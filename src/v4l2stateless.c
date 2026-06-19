@@ -355,8 +355,43 @@ v4l2sl_create_context(VADriverContextP ctx,
         context->device_path = config->device_path;
     }
 
-    /* TODO: Open V4L2 device for this context */
-    context->v4l2_fd = -1;
+    /* Open V4L2 video device */
+    context->v4l2_fd = v4l2sl_open_device(context->device_path);
+    if (context->v4l2_fd < 0) {
+        fprintf(stderr, "v4l2stateless: failed to open %s\n", context->device_path);
+        free(context->render_targets);
+        free(context);
+        return VA_STATUS_ERROR_OPERATION_FAILED;
+    }
+
+    /* Open media device for request API */
+    context->media_fd = v4l2sl_open_media_for_device(context->device_path);
+
+    /* Determine V4L2 codec format */
+    uint32_t v4l2_format;
+    switch (context->codec) {
+    case V4L2SL_CODEC_H264: v4l2_format = V4L2_PIX_FMT_H264_SLICE; break;
+    case V4L2SL_CODEC_HEVC: v4l2_format = V4L2_PIX_FMT_HEVC_SLICE; break;
+    case V4L2SL_CODEC_AV1:  v4l2_format = V4L2_PIX_FMT_AV1_FRAME; break;
+    default: v4l2_format = V4L2_PIX_FMT_H264_SLICE; break;
+    }
+
+    /* Setup output queue (compressed input) */
+    if (v4l2sl_setup_output_queue(context->v4l2_fd, v4l2_format,
+                                  picture_width, picture_height) < 0) {
+        fprintf(stderr, "v4l2stateless: failed to setup output queue\n");
+        close(context->v4l2_fd);
+        context->v4l2_fd = -1;
+        /* Non-fatal for skeleton — decode not yet implemented */
+    }
+
+    /* Setup capture queue (decoded output) */
+    if (context->v4l2_fd >= 0) {
+        if (v4l2sl_setup_capture_queue(context->v4l2_fd,
+                                       picture_width, picture_height) < 0) {
+            fprintf(stderr, "v4l2stateless: failed to setup capture queue\n");
+        }
+    }
 
     *context_id = ++driver_data->next_context_id;
     context->context_id = *context_id;
@@ -379,8 +414,11 @@ v4l2sl_destroy_context(VADriverContextP ctx, VAContextID context_id)
 
             if (context->v4l2_fd >= 0)
                 close(context->v4l2_fd);
+            if (context->media_fd >= 0)
+                close(context->media_fd);
+            if (context->request_fd >= 0)
+                close(context->request_fd);
             free(context->render_targets);
-            /* TODO: free parameter buffers */
             free(context);
             return VA_STATUS_SUCCESS;
         }
@@ -572,7 +610,11 @@ v4l2sl_begin_picture(VADriverContextP ctx,
 
     context->current_surface = surface;
     context->current_surface_id = render_target;
-    context->pending_buffers = NULL;
+    context->num_pending_buffers = 0;
+
+    /* Allocate a V4L2 request for this picture */
+    if (context->media_fd >= 0)
+        context->request_fd = v4l2sl_request_alloc(context->media_fd);
 
     return VA_STATUS_SUCCESS;
 }
@@ -594,24 +636,20 @@ v4l2sl_render_picture(VADriverContextP ctx,
 
     /* Collect buffer references for this picture */
     for (int i = 0; i < num_buffers; i++) {
-        struct v4l2sl_buffer *buf = NULL;
-
         /* Find the buffer in context */
         struct v4l2sl_buffer *b = context->buffers;
         while (b) {
             if (b->buffer_id == buffers[i]) {
-                buf = b;
+                if (context->num_pending_buffers < 32) {
+                    context->pending_buffers[context->num_pending_buffers++] = b;
+                }
                 break;
             }
             b = b->next;
         }
 
-        if (!buf)
+        if (!b)
             return VA_STATUS_ERROR_INVALID_BUFFER;
-
-        /* Store reference for end_picture to process */
-        /* TODO: For Phase 2+, translate VA-API params to V4L2 controls here */
-        (void)buf;
     }
 
     return VA_STATUS_SUCCESS;
@@ -633,10 +671,41 @@ v4l2sl_end_picture(VADriverContextP ctx,
     if (!context->current_surface)
         return VA_STATUS_ERROR_INVALID_SURFACE;
 
-    /* TODO: Phase 2+ — submit V4L2 request and wait for decode */
+    /* Call codec-specific translation */
+    VAStatus va_status;
+    switch (context->codec) {
+    case V4L2SL_CODEC_H264:
+        va_status = v4l2sl_h264_translate(context,
+                                          context->pending_buffers,
+                                          context->num_pending_buffers);
+        break;
+    case V4L2SL_CODEC_HEVC:
+        va_status = v4l2sl_hevc_translate(context,
+                                          context->pending_buffers,
+                                          context->num_pending_buffers);
+        break;
+    case V4L2SL_CODEC_AV1:
+        va_status = v4l2sl_av1_translate(context,
+                                         context->pending_buffers,
+                                         context->num_pending_buffers);
+        break;
+    default:
+        va_status = VA_STATUS_ERROR_UNSUPPORTED_ENTRYPOINT;
+        break;
+    }
+
+    if (va_status != VA_STATUS_SUCCESS)
+        fprintf(stderr, "v4l2stateless: decode translate failed: %d\n", va_status);
 
     context->current_surface->status = VASurfaceReady;
     context->current_surface = NULL;
+    context->num_pending_buffers = 0;
+
+    /* Close request fd */
+    if (context->request_fd >= 0) {
+        close(context->request_fd);
+        context->request_fd = -1;
+    }
 
     return VA_STATUS_SUCCESS;
 }

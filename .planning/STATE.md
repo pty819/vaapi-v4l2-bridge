@@ -1,12 +1,11 @@
 # STATE — vaapi-v4l2-bridge
 
 ## Current Phase
-- **Phase:** 1 — Driver Skeleton + Init
+- **Phase:** 2 — H.264 Decode Pipeline
 - **Status:** Starting
-- **Started:** 2026-06-19
 
 ## Completed
-(None)
+- ✅ Phase 1: Driver skeleton — vainfo shows H264/HEVC/AV1 profiles (2026-06-19)
 
 ## Blockers
 (None)
