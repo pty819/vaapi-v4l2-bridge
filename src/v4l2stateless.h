@@ -54,6 +54,10 @@ struct v4l2sl_buffer {
     struct v4l2sl_buffer *next;
 };
 
+/* Number of output/capture buffer slots */
+#define V4L2SL_NUM_OUTPUT_BUFS  4
+#define V4L2SL_NUM_CAPTURE_BUFS 8
+
 /* Per-context state (one decode session) */
 struct v4l2sl_context {
     VAContextID context_id;
@@ -79,6 +83,17 @@ struct v4l2sl_context {
 
     struct v4l2sl_buffer *buffers;  /* Attached parameter buffers */
     struct v4l2sl_context *next;
+
+    /* Output (bitstream) buffer management */
+    int output_bufs_allocd;
+    uint32_t output_buf_size;
+    void  *output_buf_ptr[V4L2SL_NUM_OUTPUT_BUFS];
+
+    /* Capture (decoded frame) buffer management */
+    int capture_bufs_allocd;
+
+    /* Frame counter for V4L2 timestamps (DPB reference matching) */
+    uint64_t frame_count;
 };
 
 /* Driver global state */
@@ -110,17 +125,22 @@ int v4l2sl_queue_output(int fd, int buf_index, const uint8_t *data, uint32_t siz
 int v4l2sl_queue_capture(int fd, int buf_index, int request_fd);
 int v4l2sl_export_dmabuf(int fd, int buf_index);
 int v4l2sl_dequeue_buffer(int fd, enum v4l2_buf_type type);
+int v4l2sl_mmap_output_buffers(int fd, int count, void **ptrs, uint32_t *size_out);
+int v4l2sl_set_request_controls(int request_fd, int v4l2_fd, struct v4l2_ext_controls *ctrls);
+int v4l2sl_submit_request(int request_fd);
 
 /* H.264 translation (v4l2stateless_h264.c) */
 void h264_fill_sps(struct v4l2_ctrl_h264_sps *sps, const VAPictureParameterBufferH264 *pic);
 void h264_fill_pps(struct v4l2_ctrl_h264_pps *pps, const VAPictureParameterBufferH264 *pic);
 void h264_fill_decode_params(struct v4l2_ctrl_h264_decode_params *dec,
-                             const VAPictureParameterBufferH264 *pic);
+                             const VAPictureParameterBufferH264 *pic,
+                             struct v4l2sl_driver_data *dd);
 void h264_fill_scaling_matrix(struct v4l2_ctrl_h264_scaling_matrix *sm,
                               const VAIQMatrixBufferH264 *iq);
 void h264_fill_slice_params(struct v4l2_ctrl_h264_slice_params *sp,
                             const VASliceParameterBufferH264 *slice,
-                            const VAPictureParameterBufferH264 *pic);
+                            const VAPictureParameterBufferH264 *pic,
+                            struct v4l2sl_driver_data *dd);
 VAStatus v4l2sl_h264_translate(struct v4l2sl_context *ctx,
                                struct v4l2sl_buffer **buffers,
                                int num_buffers);

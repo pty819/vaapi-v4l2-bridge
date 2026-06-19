@@ -1,8 +1,9 @@
 /*
  * v4l2stateless — HEVC parameter translation
  *
- * Maps VA-API HEVC buffers to V4L2 stateless controls.
- * Special: RK3588 VDPU381 requires explicit RPS via decode_params.
+ * Maps VA-API HEVC buffers to V4L2 stateless controls and submits
+ * a decode request. Special: RK3588 VDPU381 requires explicit RPS
+ * via hevc_ext_sps_lt_rps/hevc_ext_sps_st_rps.
  */
 
 #include <stdio.h>
@@ -78,9 +79,9 @@ static void hevc_fill_pps(struct v4l2_ctrl_hevc_pps *pps,
     pps->pps_beta_offset_div2 = pic->pps_beta_offset_div2;
     pps->pps_tc_offset_div2 = pic->pps_tc_offset_div2;
 
-    for (int i = 0; i < 19; i++)  /* VA-API column_width_minus1[19] */
+    for (int i = 0; i < 19; i++)
         pps->column_width_minus1[i] = pic->column_width_minus1[i];
-    for (int i = 0; i < 21; i++)  /* VA-API row_height_minus1[21] */
+    for (int i = 0; i < 21; i++)
         pps->row_height_minus1[i] = pic->row_height_minus1[i];
 
     pps->flags = 0;
@@ -147,6 +148,9 @@ static void hevc_fill_decode_params(struct v4l2_ctrl_hevc_decode_params *dec,
         dec->flags |= V4L2_HEVC_DECODE_PARAM_FLAG_IRAP_PIC;
 }
 
+/*
+ * HEVC decode pipeline — translate and submit
+ */
 VAStatus v4l2sl_hevc_translate(struct v4l2sl_context *ctx,
                                struct v4l2sl_buffer **buffers,
                                int num_buffers)
@@ -173,6 +177,11 @@ VAStatus v4l2sl_hevc_translate(struct v4l2sl_context *ctx,
         return VA_STATUS_ERROR_INVALID_PARAMETER;
     }
 
+    if (!slice_data || slice_data_size == 0) {
+        fprintf(stderr, "v4l2stateless: HEVC decode missing slice data\n");
+        return VA_STATUS_ERROR_INVALID_PARAMETER;
+    }
+
     struct v4l2_ctrl_hevc_sps sps;
     struct v4l2_ctrl_hevc_pps pps;
     struct v4l2_ctrl_hevc_decode_params dec;
@@ -181,12 +190,90 @@ VAStatus v4l2sl_hevc_translate(struct v4l2sl_context *ctx,
     hevc_fill_pps(&pps, pic_param);
     hevc_fill_decode_params(&dec, pic_param);
 
-    /* TODO: VIDIOC_S_EXT_CTRLS with V4L2_CTRL_WHICH_REQUEST_VAL + queue buffers */
+    int request_fd = ctx->request_fd;
+    int v4l2_fd = ctx->v4l2_fd;
 
-    fprintf(stderr, "v4l2stateless: HEVC params translated (pic=%dx%d, POC=%d)\n",
+    if (request_fd < 0) {
+        fprintf(stderr, "v4l2stateless: HEVC no request fd available\n");
+        return VA_STATUS_ERROR_OPERATION_FAILED;
+    }
+
+    /* Set HEVC SPS */
+    struct v4l2_ext_control sps_ctrl = { 0 };
+    sps_ctrl.id = V4L2_CID_STATELESS_HEVC_SPS;
+    sps_ctrl.p_hevc_sps = &sps;
+    sps_ctrl.size = sizeof(sps);
+
+    struct v4l2_ext_controls sps_ctrls = { 0 };
+    sps_ctrls.controls = &sps_ctrl;
+    sps_ctrls.count = 1;
+
+    if (v4l2sl_set_request_controls(request_fd, v4l2_fd, &sps_ctrls) < 0) {
+        fprintf(stderr, "v4l2stateless: failed to set HEVC SPS\n");
+        return VA_STATUS_ERROR_OPERATION_FAILED;
+    }
+
+    /* Set HEVC PPS */
+    struct v4l2_ext_control pps_ctrl = { 0 };
+    pps_ctrl.id = V4L2_CID_STATELESS_HEVC_PPS;
+    pps_ctrl.p_hevc_pps = &pps;
+    pps_ctrl.size = sizeof(pps);
+
+    struct v4l2_ext_controls pps_ctrls = { 0 };
+    pps_ctrls.controls = &pps_ctrl;
+    pps_ctrls.count = 1;
+
+    if (v4l2sl_set_request_controls(request_fd, v4l2_fd, &pps_ctrls) < 0) {
+        fprintf(stderr, "v4l2stateless: failed to set HEVC PPS\n");
+        return VA_STATUS_ERROR_OPERATION_FAILED;
+    }
+
+    /* Set HEVC decode params (includes RPS for VDPU381) */
+    struct v4l2_ext_control dec_ctrl = { 0 };
+    dec_ctrl.id = V4L2_CID_STATELESS_HEVC_DECODE_PARAMS;
+    dec_ctrl.p_hevc_decode_params = &dec;
+    dec_ctrl.size = sizeof(dec);
+
+    struct v4l2_ext_controls dec_ctrls = { 0 };
+    dec_ctrls.controls = &dec_ctrl;
+    dec_ctrls.count = 1;
+
+    if (v4l2sl_set_request_controls(request_fd, v4l2_fd, &dec_ctrls) < 0) {
+        fprintf(stderr, "v4l2stateless: failed to set HEVC decode params\n");
+        return VA_STATUS_ERROR_OPERATION_FAILED;
+    }
+
+    /* Queue output (compressed bitstream) */
+    uint64_t timestamp = ctx->current_surface ? ctx->current_surface->timestamp : 0;
+
+    if (ctx->output_buf_ptr[0] && slice_data_size <= ctx->output_buf_size) {
+        memcpy(ctx->output_buf_ptr[0], slice_data, slice_data_size);
+    }
+
+    if (v4l2sl_queue_output(v4l2_fd, 0,
+                            ctx->output_buf_ptr[0] ? ctx->output_buf_ptr[0] : slice_data,
+                            slice_data_size, request_fd, timestamp) < 0) {
+        fprintf(stderr, "v4l2stateless: failed to queue HEVC output buffer\n");
+        return VA_STATUS_ERROR_OPERATION_FAILED;
+    }
+
+    /* Queue capture (decoded frame) */
+    if (v4l2sl_queue_capture(v4l2_fd, 0, request_fd) < 0) {
+        fprintf(stderr, "v4l2stateless: failed to queue HEVC capture buffer\n");
+        return VA_STATUS_ERROR_OPERATION_FAILED;
+    }
+
+    /* Submit request */
+    if (v4l2sl_submit_request(request_fd) < 0) {
+        fprintf(stderr, "v4l2stateless: failed to submit HEVC request\n");
+        return VA_STATUS_ERROR_OPERATION_FAILED;
+    }
+
+    fprintf(stderr, "v4l2stateless: HEVC request submitted (pic=%dx%d, POC=%d, slice=%u bytes)\n",
             pic_param->pic_width_in_luma_samples,
             pic_param->pic_height_in_luma_samples,
-            pic_param->CurrPic.pic_order_cnt);
+            pic_param->CurrPic.pic_order_cnt,
+            slice_data_size);
 
     return VA_STATUS_SUCCESS;
 }

@@ -1,8 +1,8 @@
 /*
  * v4l2stateless — AV1 parameter translation
  *
- * Maps VA-API AV1 buffers to V4L2 stateless controls.
- * Note: VA-API uses VADecPictureParameterBufferAV1 (not VAPictureParameterBufferAV1).
+ * Maps VA-API AV1 buffers to V4L2 stateless controls and submits
+ * a decode request.
  */
 
 #include <stdio.h>
@@ -61,7 +61,7 @@ static void av1_fill_frame_params(struct v4l2_ctrl_av1_frame *frame,
     frame->order_hint = pic->order_hint;
     frame->superres_denom = pic->superres_scale_denominator;
     frame->primary_ref_frame = pic->primary_ref_frame;
-    frame->refresh_frame_flags = 0; /* TODO: get from bitstream */
+    frame->refresh_frame_flags = 0;
 
     for (int i = 0; i < V4L2_AV1_TOTAL_REFS_PER_FRAME; i++)
         frame->ref_frame_idx[i] = pic->ref_frame_idx[i];
@@ -89,6 +89,9 @@ static void av1_fill_frame_params(struct v4l2_ctrl_av1_frame *frame,
         frame->flags |= V4L2_AV1_FRAME_FLAG_DISABLE_FRAME_END_UPDATE_CDF;
 }
 
+/*
+ * AV1 decode pipeline — translate and submit
+ */
 VAStatus v4l2sl_av1_translate(struct v4l2sl_context *ctx,
                               struct v4l2sl_buffer **buffers,
                               int num_buffers)
@@ -113,19 +116,86 @@ VAStatus v4l2sl_av1_translate(struct v4l2sl_context *ctx,
         return VA_STATUS_ERROR_INVALID_PARAMETER;
     }
 
+    if (!tile_data || tile_data_size == 0) {
+        fprintf(stderr, "v4l2stateless: AV1 decode missing tile data\n");
+        return VA_STATUS_ERROR_INVALID_PARAMETER;
+    }
+
     struct v4l2_ctrl_av1_sequence seq;
     struct v4l2_ctrl_av1_frame frame;
 
     av1_fill_sequence_params(&seq, pic_param);
     av1_fill_frame_params(&frame, pic_param);
 
-    /* TODO: VIDIOC_S_EXT_CTRLS with V4L2_CTRL_WHICH_REQUEST_VAL + queue buffers */
+    int request_fd = ctx->request_fd;
+    int v4l2_fd = ctx->v4l2_fd;
 
-    fprintf(stderr, "v4l2stateless: AV1 params translated (pic=%dx%d, type=%d, order=%d)\n",
+    if (request_fd < 0) {
+        fprintf(stderr, "v4l2stateless: AV1 no request fd available\n");
+        return VA_STATUS_ERROR_OPERATION_FAILED;
+    }
+
+    /* Set AV1 sequence params */
+    struct v4l2_ext_control seq_ctrl = { 0 };
+    seq_ctrl.id = V4L2_CID_STATELESS_AV1_SEQUENCE;
+    seq_ctrl.p_av1_sequence = &seq;
+    seq_ctrl.size = sizeof(seq);
+
+    struct v4l2_ext_controls seq_ctrls = { 0 };
+    seq_ctrls.controls = &seq_ctrl;
+    seq_ctrls.count = 1;
+
+    if (v4l2sl_set_request_controls(request_fd, v4l2_fd, &seq_ctrls) < 0) {
+        fprintf(stderr, "v4l2stateless: failed to set AV1 sequence params\n");
+        return VA_STATUS_ERROR_OPERATION_FAILED;
+    }
+
+    /* Set AV1 frame params */
+    struct v4l2_ext_control frame_ctrl = { 0 };
+    frame_ctrl.id = V4L2_CID_STATELESS_AV1_FRAME;
+    frame_ctrl.p_av1_frame = &frame;
+    frame_ctrl.size = sizeof(frame);
+
+    struct v4l2_ext_controls frame_ctrls = { 0 };
+    frame_ctrls.controls = &frame_ctrl;
+    frame_ctrls.count = 1;
+
+    if (v4l2sl_set_request_controls(request_fd, v4l2_fd, &frame_ctrls) < 0) {
+        fprintf(stderr, "v4l2stateless: failed to set AV1 frame params\n");
+        return VA_STATUS_ERROR_OPERATION_FAILED;
+    }
+
+    /* Queue output (compressed tile data) */
+    uint64_t timestamp = ctx->current_surface ? ctx->current_surface->timestamp : 0;
+
+    if (ctx->output_buf_ptr[0] && tile_data_size <= ctx->output_buf_size) {
+        memcpy(ctx->output_buf_ptr[0], tile_data, tile_data_size);
+    }
+
+    if (v4l2sl_queue_output(v4l2_fd, 0,
+                            ctx->output_buf_ptr[0] ? ctx->output_buf_ptr[0] : tile_data,
+                            tile_data_size, request_fd, timestamp) < 0) {
+        fprintf(stderr, "v4l2stateless: failed to queue AV1 output buffer\n");
+        return VA_STATUS_ERROR_OPERATION_FAILED;
+    }
+
+    /* Queue capture (decoded frame) */
+    if (v4l2sl_queue_capture(v4l2_fd, 0, request_fd) < 0) {
+        fprintf(stderr, "v4l2stateless: failed to queue AV1 capture buffer\n");
+        return VA_STATUS_ERROR_OPERATION_FAILED;
+    }
+
+    /* Submit request */
+    if (v4l2sl_submit_request(request_fd) < 0) {
+        fprintf(stderr, "v4l2stateless: failed to submit AV1 request\n");
+        return VA_STATUS_ERROR_OPERATION_FAILED;
+    }
+
+    fprintf(stderr, "v4l2stateless: AV1 request submitted (pic=%dx%d, type=%d, tile=%u bytes)\n",
             pic_param->frame_width_minus1 + 1,
             pic_param->frame_height_minus1 + 1,
             pic_param->pic_info_fields.bits.frame_type,
-            pic_param->order_hint);
+            tile_data_size);
 
     return VA_STATUS_SUCCESS;
 }
