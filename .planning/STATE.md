@@ -1,12 +1,14 @@
 # STATE — vaapi-v4l2-bridge
 
 ## Current Phase
-- **Phase:** 3 — HEVC Decode Pipeline
-- **Status:** Starting
+- **Phase:** 5 — Integration Testing
+- **Status:** Pending
 
 ## Completed
 - ✅ Phase 1: Driver skeleton — vainfo shows H264/HEVC/AV1 profiles (2026-06-19)
 - ✅ Phase 2: H.264 translation + V4L2 device management (2026-06-19)
+- ✅ Phase 3: HEVC translation with RPS for VDPU381 (2026-06-19)
+- ✅ Phase 4: AV1 translation (2026-06-19)
 
 ## Blockers
 (None)
