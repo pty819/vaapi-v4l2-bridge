@@ -8,10 +8,15 @@ Applications that only speak VA-API (`ffmpeg -hwaccel vaapi`, mpv, Firefox) can 
 | Codec | Device (this RK3588) | Status |
 |---|---|---|
 | H.264 Constrained Baseline / Main / High | rkvdec `/dev/video1` | bit-exact vs ffmpeg software (`hwdownload` framemd5) |
+| H.264 High10 | same, capture NV15 | advertised; capture renegotiates to NV15 (`vaExportSurfaceHandle` PRIME) |
+| H.264 High422 | same, capture NV16 | advertised (ffmpeg's vaapi hwaccel often still picks software for 4:2:2) |
 | HEVC 8-bit Main (incl. WPP) | same | bit-exact |
+| HEVC Main10 | same, capture NV15 → P010 | bit-exact vs ffmpeg software (`hwdownload,format=p010le`) |
 | AV1 Profile0 8-bit | hantro `/dev/video4` + matching media node | bit-exact vs ffmpeg software (libaom, libaom realtime, SVT-AV1 RA) |
 | VP8 | hantro `/dev/video2` | bit-exact vs ffmpeg software |
 | MPEG-2 Simple / Main | same `/dev/video2` | bit-exact vs GStreamer `v4l2slmpeg2dec` (hantro IDCT ≠ ffmpeg SW) |
+| JPEG Baseline encode | VEPU121 `/dev/video3` | `mjpeg_vaapi` (stateful M2M) |
+| VPP (scale / CSC / rotate / flip) | RGA `/dev/video0` | `scale_vaapi` (`VAProfileNone` + `VAEntrypointVideoProc`) |
 
 Decoder nodes are selected by OUTPUT fourcc, not by a hardcoded `/dev/videoN`.
 
@@ -39,7 +44,7 @@ ffmpeg -hwaccel vaapi -hwaccel_output_format vaapi \
   -vf "hwdownload,format=nv12" -pix_fmt yuv420p -f framemd5 -
 ```
 
-HEVC Main10 is advertised but not verified. Mid-stream resolution changes are not renegotiated.
+Mid-stream resolution / bit-depth / chroma changes renegotiate capture (`STREAMOFF` / `S_FMT` / `REQBUFS`). Zero-copy: `vaExportSurfaceHandle` DRM PRIME 2.
 
 Full host matrix (needs `/dev/video*` and writes clips under `verify/`, gitignored):
 

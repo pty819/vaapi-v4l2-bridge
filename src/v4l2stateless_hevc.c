@@ -284,6 +284,19 @@ VAStatus v4l2sl_hevc_translate(struct v4l2sl_context *ctx,
         return VA_STATUS_ERROR_OPERATION_FAILED;
     }
 
+    {
+        uint32_t cap = v4l2sl_capture_fourcc_from_sps(
+            pic_param->bit_depth_luma_minus8,
+            pic_param->pic_fields.bits.chroma_format_idc);
+        if (v4l2sl_ensure_capture(ctx,
+                                  pic_param->pic_width_in_luma_samples,
+                                  pic_param->pic_height_in_luma_samples,
+                                  cap) < 0) {
+            fprintf(stderr, "v4l2stateless: HEVC capture reconfig failed\n");
+            return VA_STATUS_ERROR_OPERATION_FAILED;
+        }
+    }
+
     /* The kernel accepts STREAMON only after it has the SPS */
     if (!ctx->streamed) {
         if (v4l2sl_streamon(v4l2_fd, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE) < 0 ||
@@ -442,6 +455,7 @@ VAStatus v4l2sl_hevc_translate(struct v4l2sl_context *ctx,
         if (ctx->cap_stride) {
             surf->stride = ctx->cap_stride;
             surf->aligned_h = ctx->cap_height;
+            surf->cap_fourcc = ctx->cap_pixelformat;
         }
     } else {
         ctx->free_cap_bufs[ctx->n_free_cap++] = done_cap;

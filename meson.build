@@ -39,6 +39,9 @@ sources = files(
   'src/v4l2stateless_av1.c',
   'src/v4l2stateless_vp8.c',
   'src/v4l2stateless_mpeg2.c',
+  'src/v4l2stateless_format.c',
+  'src/v4l2stateless_jpeg.c',
+  'src/v4l2stateless_vpp.c',
 )
 
 shared_library('v4l2stateless_drv_video',

@@ -25,12 +25,14 @@ void v4l2sl_fourcc_to_str(uint32_t fourcc, char out[5])
 const char *v4l2sl_codec_name(enum v4l2sl_codec codec)
 {
     switch (codec) {
-    case V4L2SL_CODEC_H264:  return "H.264";
-    case V4L2SL_CODEC_HEVC:  return "HEVC";
-    case V4L2SL_CODEC_AV1:   return "AV1";
-    case V4L2SL_CODEC_VP8:   return "VP8";
-    case V4L2SL_CODEC_MPEG2: return "MPEG-2";
-    default:                 return "unknown";
+    case V4L2SL_CODEC_H264:     return "H.264";
+    case V4L2SL_CODEC_HEVC:     return "HEVC";
+    case V4L2SL_CODEC_AV1:      return "AV1";
+    case V4L2SL_CODEC_VP8:      return "VP8";
+    case V4L2SL_CODEC_MPEG2:    return "MPEG-2";
+    case V4L2SL_CODEC_JPEG_ENC: return "JPEG-enc";
+    case V4L2SL_CODEC_VPP:      return "VPP";
+    default:                    return "unknown";
     }
 }
 
@@ -178,5 +180,84 @@ int v4l2sl_scan_decoder_paths_ex(char *h264_out, char *hevc_out, char *av1_out,
     p = v4l2sl_pick_device_for_codec(V4L2SL_CODEC_MPEG2, nodes, n_nodes);
     copy_path(mpeg2_out, out_len, p);
 
+    return 0;
+}
+
+int v4l2sl_enum_capture_fourccs(int fd, uint32_t *out, unsigned max)
+{
+    struct v4l2_fmtdesc fmt;
+    unsigned n = 0;
+
+    if (fd < 0 || !out || max == 0)
+        return -1;
+
+    memset(&fmt, 0, sizeof(fmt));
+    fmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
+    for (fmt.index = 0; n < max; fmt.index++) {
+        if (ioctl(fd, VIDIOC_ENUM_FMT, &fmt) < 0)
+            break;
+        out[n++] = fmt.pixelformat;
+    }
+    return (int)n;
+}
+
+static int fourcc_in(const uint32_t *list, unsigned n, uint32_t fcc)
+{
+    unsigned i;
+    for (i = 0; i < n; i++)
+        if (list[i] == fcc)
+            return 1;
+    return 0;
+}
+
+int v4l2sl_scan_aux_paths(char *jpeg_enc_out, char *vpp_out, unsigned out_len)
+{
+    int i;
+
+    if (jpeg_enc_out && out_len)
+        jpeg_enc_out[0] = 0;
+    if (vpp_out && out_len)
+        vpp_out[0] = 0;
+
+    for (i = 0; i < 64; i++) {
+        char path[64];
+        uint32_t out_fcc[V4L2SL_PROBE_MAX_FOURCCS];
+        uint32_t cap_fcc[V4L2SL_PROBE_MAX_FOURCCS];
+        struct v4l2_capability cap;
+        struct v4l2_queryctrl qc;
+        int fd, nout, ncap;
+        int has_jpeg, has_coded, has_rotate;
+
+        snprintf(path, sizeof(path), "/dev/video%d", i);
+        fd = open(path, O_RDWR | O_NONBLOCK);
+        if (fd < 0)
+            continue;
+        memset(&cap, 0, sizeof(cap));
+        if (ioctl(fd, VIDIOC_QUERYCAP, &cap) < 0 ||
+            !(cap.capabilities & V4L2_CAP_VIDEO_M2M_MPLANE)) {
+            close(fd);
+            continue;
+        }
+        nout = v4l2sl_enum_output_fourccs(fd, out_fcc, V4L2SL_PROBE_MAX_FOURCCS);
+        ncap = v4l2sl_enum_capture_fourccs(fd, cap_fcc, V4L2SL_PROBE_MAX_FOURCCS);
+        memset(&qc, 0, sizeof(qc));
+        qc.id = V4L2_CID_ROTATE;
+        has_rotate = ioctl(fd, VIDIOC_QUERYCTRL, &qc) == 0;
+        close(fd);
+        if (nout <= 0 || ncap <= 0)
+            continue;
+
+        has_jpeg = fourcc_in(cap_fcc, (unsigned)ncap, V4L2_PIX_FMT_JPEG);
+        has_coded = fourcc_in(out_fcc, (unsigned)nout, V4L2_PIX_FMT_H264_SLICE) ||
+                    fourcc_in(out_fcc, (unsigned)nout, V4L2_PIX_FMT_HEVC_SLICE) ||
+                    fourcc_in(out_fcc, (unsigned)nout, V4L2_PIX_FMT_AV1_FRAME) ||
+                    fourcc_in(out_fcc, (unsigned)nout, V4L2_PIX_FMT_VP8_FRAME) ||
+                    fourcc_in(out_fcc, (unsigned)nout, V4L2_PIX_FMT_MPEG2_SLICE);
+
+        if (has_jpeg && jpeg_enc_out && out_len && !jpeg_enc_out[0])
+            copy_path(jpeg_enc_out, out_len, path);
+        if (has_rotate && !has_coded && !has_jpeg && vpp_out && out_len && !vpp_out[0])
+            copy_path(vpp_out, out_len, path);
+    }
     return 0;
 }

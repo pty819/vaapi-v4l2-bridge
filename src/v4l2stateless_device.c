@@ -191,14 +191,15 @@ int v4l2sl_setup_output_queue(int fd, uint32_t codec_format, int width, int heig
  * Setup capture queue (decoded frames output)
  * Returns 0 on success, -1 on error
  */
-int v4l2sl_setup_capture_queue(int fd, int width, int height)
+int v4l2sl_setup_capture_queue(int fd, int width, int height, uint32_t pixelformat)
 {
-    /* Set capture format (decoded output) — NV12 for all codecs */
+    /* Set capture format (decoded output). Default NV12; 10-bit/422 use
+     * NV15/NV16/NV20 which rkvdec only accepts after a matching SPS. */
     struct v4l2_format fmt = { 0 };
     fmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
     fmt.fmt.pix_mp.width = width;
     fmt.fmt.pix_mp.height = height;
-    fmt.fmt.pix_mp.pixelformat = V4L2_PIX_FMT_NV12;
+    fmt.fmt.pix_mp.pixelformat = pixelformat ? pixelformat : V4L2_PIX_FMT_NV12;
     fmt.fmt.pix_mp.field = V4L2_FIELD_NONE;
     fmt.fmt.pix_mp.num_planes = 1;
 
@@ -232,6 +233,124 @@ int v4l2sl_streamon(int fd, enum v4l2_buf_type type)
         fprintf(stderr, "v4l2stateless: STREAMON(type=%u) failed: %s\n",
                 type, strerror(errno));
         return -1;
+    }
+    return 0;
+}
+
+int v4l2sl_streamoff(int fd, enum v4l2_buf_type type)
+{
+    if (xioctl(fd, VIDIOC_STREAMOFF, &type) < 0) {
+        fprintf(stderr, "v4l2stateless: STREAMOFF(type=%u) failed: %s\n",
+                type, strerror(errno));
+        return -1;
+    }
+    return 0;
+}
+
+static void release_ctx_capture_surfaces(struct v4l2sl_context *ctx)
+{
+    int i;
+
+    if (!ctx || !ctx->driver_data)
+        return;
+    for (i = 0; i < ctx->num_render_targets; i++) {
+        VASurfaceID id = ctx->render_targets[i];
+        struct v4l2sl_surface *s;
+
+        if (id == VA_INVALID_ID || (unsigned)id >= 4096)
+            continue;
+        s = ctx->driver_data->surfaces[id];
+        if (!s)
+            continue;
+        if (s->dma_buf_fd >= 0) {
+            close(s->dma_buf_fd);
+            s->dma_buf_fd = -1;
+        }
+        s->buf_index = -1;
+    }
+}
+
+/*
+ * Reconfigure capture (and coded OUTPUT size) when bit-depth, chroma or
+ * resolution changes. Safe to call before the first STREAMON.
+ */
+int v4l2sl_ensure_capture(struct v4l2sl_context *ctx, int width, int height,
+                          uint32_t pixelformat)
+{
+    int n_cap;
+    uint32_t fourcc = pixelformat ? pixelformat : V4L2_PIX_FMT_NV12;
+    int size_changed, fmt_changed;
+
+    if (!ctx || ctx->v4l2_fd < 0 || width <= 0 || height <= 0)
+        return -1;
+
+    /* Display size from vaCreateContext is often 1920x1080 while the
+     * coded size is 1920x1088. Reconfig only if the current capture
+     * buffer cannot hold the new frame, or the fourcc changed. */
+    size_changed = (ctx->cap_width == 0) ||
+                   (width > (int)ctx->cap_width) ||
+                   (height > (int)ctx->cap_height);
+    fmt_changed = (ctx->cap_pixelformat != fourcc) ||
+                  (ctx->capture_bufs_allocd <= 0);
+
+    if (!size_changed && !fmt_changed)
+        return 0;
+
+    fprintf(stderr,
+            "v4l2stateless: renegotiate capture %dx%d %.4s -> %dx%d %.4s streamed=%d\n",
+            ctx->width, ctx->height, (char *)&ctx->cap_pixelformat,
+            width, height, (char *)&fourcc, ctx->streamed);
+
+    if (ctx->streamed) {
+        v4l2sl_streamoff(ctx->v4l2_fd, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE);
+        v4l2sl_streamoff(ctx->v4l2_fd, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE);
+        ctx->streamed = 0;
+    }
+
+    release_ctx_capture_surfaces(ctx);
+
+    if (ctx->capture_bufs_allocd > 0) {
+        struct v4l2_requestbuffers req = { 0 };
+        req.count = 0;
+        req.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
+        req.memory = V4L2_MEMORY_MMAP;
+        xioctl(ctx->v4l2_fd, VIDIOC_REQBUFS, &req);
+        ctx->capture_bufs_allocd = 0;
+        ctx->n_free_cap = 0;
+    }
+
+    if (size_changed && ctx->output_bufs_allocd > 0) {
+        struct v4l2_format ofmt = { 0 };
+        ofmt.type = V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE;
+        if (xioctl(ctx->v4l2_fd, VIDIOC_G_FMT, &ofmt) == 0) {
+            ofmt.fmt.pix_mp.width = width;
+            ofmt.fmt.pix_mp.height = height;
+            if (xioctl(ctx->v4l2_fd, VIDIOC_S_FMT, &ofmt) < 0)
+                fprintf(stderr, "v4l2stateless: S_FMT output resize failed: %s\n",
+                        strerror(errno));
+        }
+    }
+
+    n_cap = v4l2sl_setup_capture_queue(ctx->v4l2_fd, width, height, fourcc);
+    if (n_cap <= 0)
+        return -1;
+
+    ctx->capture_bufs_allocd = n_cap;
+    ctx->n_free_cap = 0;
+    {
+        int i;
+        for (i = 0; i < n_cap && i < V4L2SL_NUM_CAPTURE_BUFS; i++)
+            ctx->free_cap_bufs[ctx->n_free_cap++] = i;
+    }
+    ctx->width = width;
+    ctx->height = height;
+    ctx->cap_pixelformat = fourcc;
+
+    if (v4l2sl_get_capture_geometry(ctx->v4l2_fd, &ctx->cap_width, &ctx->cap_height,
+                                    &ctx->cap_stride, &ctx->cap_sizeimage) == 0) {
+        fprintf(stderr, "v4l2stateless: capture geometry %ux%u stride=%u size=%u fourcc=%.4s\n",
+                ctx->cap_width, ctx->cap_height, ctx->cap_stride, ctx->cap_sizeimage,
+                (char *)&fourcc);
     }
     return 0;
 }

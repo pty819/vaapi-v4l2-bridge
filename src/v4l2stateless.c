@@ -19,7 +19,9 @@
 
 #include <va/va.h>
 #include <va/va_backend.h>
+#include <va/va_backend_vpp.h>
 #include <va/va_drmcommon.h>
+#include <drm_fourcc.h>
 
 #include "v4l2stateless.h"
 #include "v4l2stateless_probe.h"
@@ -33,37 +35,38 @@ static const VAProfile v4l2sl_profiles[] = {
     VAProfileH264ConstrainedBaseline,
     VAProfileH264Main,
     VAProfileH264High,
+    VAProfileH264High10,
+    VAProfileH264High422,
     VAProfileHEVCMain,
     VAProfileHEVCMain10,
     VAProfileAV1Profile0,
     VAProfileVP8Version0_3,
     VAProfileMPEG2Simple,
     VAProfileMPEG2Main,
+    VAProfileJPEGBaseline,
+    VAProfileNone,
 };
 
 #define NUM_PROFILES (sizeof(v4l2sl_profiles) / sizeof(v4l2sl_profiles[0]))
 
-/* Supported entrypoints — decode only */
-static const VAEntrypoint v4l2sl_entrypoints[] = {
-    VAEntrypointVLD,
-};
-
-#define NUM_ENTRYPOINTS (sizeof(v4l2sl_entrypoints) / sizeof(v4l2sl_entrypoints[0]))
-
-/* RT formats per profile */
+/* RT formats per profile (bitmask) */
 static const struct {
     VAProfile profile;
     unsigned int rt_format;
 } profile_rt_formats[] = {
     { VAProfileH264ConstrainedBaseline, VA_RT_FORMAT_YUV420 },
     { VAProfileH264Main,       VA_RT_FORMAT_YUV420 },
-    { VAProfileH264High,       VA_RT_FORMAT_YUV420 },
+    { VAProfileH264High,       VA_RT_FORMAT_YUV420 | VA_RT_FORMAT_YUV420_10 | VA_RT_FORMAT_YUV422 | VA_RT_FORMAT_YUV422_10 },
+    { VAProfileH264High10,     VA_RT_FORMAT_YUV420_10 },
+    { VAProfileH264High422,    VA_RT_FORMAT_YUV422 | VA_RT_FORMAT_YUV422_10 },
     { VAProfileHEVCMain,       VA_RT_FORMAT_YUV420 },
     { VAProfileHEVCMain10,     VA_RT_FORMAT_YUV420_10 },
     { VAProfileAV1Profile0,    VA_RT_FORMAT_YUV420 },
     { VAProfileVP8Version0_3,  VA_RT_FORMAT_YUV420 },
     { VAProfileMPEG2Simple,    VA_RT_FORMAT_YUV420 },
     { VAProfileMPEG2Main,      VA_RT_FORMAT_YUV420 },
+    { VAProfileJPEGBaseline,   VA_RT_FORMAT_YUV420 },
+    { VAProfileNone,           VA_RT_FORMAT_YUV420 | VA_RT_FORMAT_YUV422 | VA_RT_FORMAT_RGB32 },
 };
 
 /* Map VA profile to codec. Device path is resolved by OUTPUT fourcc. */
@@ -74,12 +77,16 @@ static const struct {
     { VAProfileH264ConstrainedBaseline, V4L2SL_CODEC_H264 },
     { VAProfileH264Main,    V4L2SL_CODEC_H264 },
     { VAProfileH264High,    V4L2SL_CODEC_H264 },
+    { VAProfileH264High10,  V4L2SL_CODEC_H264 },
+    { VAProfileH264High422, V4L2SL_CODEC_H264 },
     { VAProfileHEVCMain,    V4L2SL_CODEC_HEVC },
     { VAProfileHEVCMain10,  V4L2SL_CODEC_HEVC },
     { VAProfileAV1Profile0, V4L2SL_CODEC_AV1  },
     { VAProfileVP8Version0_3, V4L2SL_CODEC_VP8 },
     { VAProfileMPEG2Simple, V4L2SL_CODEC_MPEG2 },
     { VAProfileMPEG2Main,   V4L2SL_CODEC_MPEG2 },
+    { VAProfileJPEGBaseline, V4L2SL_CODEC_JPEG_ENC },
+    { VAProfileNone,        V4L2SL_CODEC_VPP },
 };
 
 static int codec_for_profile(VAProfile profile, enum v4l2sl_codec *codec)
@@ -103,8 +110,10 @@ static const char *cached_device(struct v4l2sl_driver_data *dd, enum v4l2sl_code
     case V4L2SL_CODEC_H264:  p = dd->dev_h264;  break;
     case V4L2SL_CODEC_HEVC:  p = dd->dev_hevc;  break;
     case V4L2SL_CODEC_AV1:   p = dd->dev_av1;   break;
-    case V4L2SL_CODEC_VP8:   p = dd->dev_vp8;   break;
-    case V4L2SL_CODEC_MPEG2: p = dd->dev_mpeg2; break;
+    case V4L2SL_CODEC_VP8:      p = dd->dev_vp8;      break;
+    case V4L2SL_CODEC_MPEG2:    p = dd->dev_mpeg2;    break;
+    case V4L2SL_CODEC_JPEG_ENC: p = dd->dev_jpeg_enc; break;
+    case V4L2SL_CODEC_VPP:      p = dd->dev_vpp;      break;
     default: break;
     }
     return (p && p[0]) ? p : NULL;
@@ -188,20 +197,16 @@ v4l2sl_query_config_entrypoints(VADriverContextP ctx,
         return VA_STATUS_ERROR_UNSUPPORTED_PROFILE;
     }
 
-    int count = 0;
-    int cap = (num_entrypoints && *num_entrypoints > 0)
-                  ? *num_entrypoints : (int)NUM_ENTRYPOINTS;
+    VAEntrypoint ep = VAEntrypointVLD;
+    if (profile == VAProfileJPEGBaseline)
+        ep = VAEntrypointEncPicture;
+    else if (profile == VAProfileNone)
+        ep = VAEntrypointVideoProc;
 
-    if (!entrypoints)
-        cap = 0;
-    for (unsigned i = 0; i < NUM_ENTRYPOINTS; i++) {
-        if (count < cap)
-            entrypoints[count] = v4l2sl_entrypoints[i];
-        count++;
-    }
-
+    if (entrypoints)
+        entrypoints[0] = ep;
     if (num_entrypoints)
-        *num_entrypoints = count;
+        *num_entrypoints = 1;
     return VA_STATUS_SUCCESS;
 }
 
@@ -225,6 +230,18 @@ v4l2sl_get_config_attributes(VADriverContextP ctx,
             break;
         case VAConfigAttribDecSliceMode:
             attrib_list[i].value = VA_DEC_SLICE_MODE_NORMAL;
+            break;
+        case VAConfigAttribEncPackedHeaders:
+            attrib_list[i].value = 0;
+            break;
+        case VAConfigAttribEncQualityRange:
+            attrib_list[i].value = 100;
+            break;
+        case VAConfigAttribMaxPictureWidth:
+            attrib_list[i].value = 8192;
+            break;
+        case VAConfigAttribMaxPictureHeight:
+            attrib_list[i].value = 8192;
             break;
         default:
             attrib_list[i].value = VA_ATTRIB_NOT_SUPPORTED;
@@ -251,8 +268,17 @@ v4l2sl_create_config(VADriverContextP ctx,
     uint32_t fourcc;
     char fcc[5];
 
+    if (entrypoint != VAEntrypointVLD &&
+        entrypoint != VAEntrypointEncPicture &&
+        entrypoint != VAEntrypointVideoProc)
+        return VA_STATUS_ERROR_UNSUPPORTED_ENTRYPOINT;
+
     if (codec_for_profile(profile, &codec) < 0)
         return VA_STATUS_ERROR_UNSUPPORTED_PROFILE;
+    if (entrypoint == VAEntrypointEncPicture)
+        codec = V4L2SL_CODEC_JPEG_ENC;
+    if (entrypoint == VAEntrypointVideoProc)
+        codec = V4L2SL_CODEC_VPP;
 
     device_path = cached_device(driver_data, codec);
     if (!device_path) {
@@ -366,14 +392,26 @@ v4l2sl_query_surface_attributes(VADriverContextP ctx,
     if (!config)
         return VA_STATUS_ERROR_INVALID_CONFIG;
 
-    VASurfaceAttrib attribs[5];
+    VASurfaceAttrib attribs[8];
     unsigned int count = 0;
+    uint32_t pix[4];
+    unsigned npix = 0, p;
 
-    attribs[count].type          = VASurfaceAttribPixelFormat;
-    attribs[count].flags         = VA_SURFACE_ATTRIB_GETTABLE;
-    attribs[count].value.type    = VAGenericValueTypeInteger;
-    attribs[count].value.value.i = VA_FOURCC_NV12;
-    count++;
+    pix[npix++] = VA_FOURCC_NV12;
+    if (config->rt_format & VA_RT_FORMAT_YUV420_10)
+        pix[npix++] = VA_FOURCC_P010;
+    if (config->rt_format & (VA_RT_FORMAT_YUV422 | VA_RT_FORMAT_YUV422_10))
+        pix[npix++] = VA_FOURCC_YUY2;
+    if (config->rt_format & VA_RT_FORMAT_RGB32)
+        pix[npix++] = VA_FOURCC_BGRX;
+
+    for (p = 0; p < npix; p++) {
+        attribs[count].type          = VASurfaceAttribPixelFormat;
+        attribs[count].flags         = VA_SURFACE_ATTRIB_GETTABLE | VA_SURFACE_ATTRIB_SETTABLE;
+        attribs[count].value.type    = VAGenericValueTypeInteger;
+        attribs[count].value.value.i = (int)pix[p];
+        count++;
+    }
 
     attribs[count].type          = VASurfaceAttribMinWidth;
     attribs[count].flags         = VA_SURFACE_ATTRIB_GETTABLE;
@@ -427,6 +465,15 @@ v4l2sl_create_surfaces(VADriverContextP ctx,
 {
     struct v4l2sl_driver_data *driver_data = ctx->pDriverData;
 
+    if (format == VA_RT_FORMAT_YUV420 || format == 0)
+        format = VA_FOURCC_NV12;
+    else if (format == VA_RT_FORMAT_YUV420_10)
+        format = VA_FOURCC_P010;
+    else if (format == VA_RT_FORMAT_YUV422 || format == VA_RT_FORMAT_YUV422_10)
+        format = VA_FOURCC_YUY2;
+    else if (format == VA_RT_FORMAT_RGB32)
+        format = VA_FOURCC_BGRX;
+
     for (int i = 0; i < num_surfaces; i++) {
         struct v4l2sl_surface *surface = calloc(1, sizeof(*surface));
         if (!surface) {
@@ -444,6 +491,22 @@ v4l2sl_create_surfaces(VADriverContextP ctx,
         surface->status = VASurfaceReady;
         surface->buf_index = -1;
         surface->dma_buf_fd = -1;
+        surface->cpu_stride = v4l2sl_default_image_stride(format, width);
+        surface->cpu_size = v4l2sl_va_image_size(format, surface->cpu_stride, height);
+        if (surface->cpu_size) {
+            surface->cpu_ptr = calloc(1, surface->cpu_size);
+            if (!surface->cpu_ptr) {
+                free(surface);
+                for (int j = 0; j < i; j++) {
+                    if (driver_data->surfaces[surfaces[j]]) {
+                        free(driver_data->surfaces[surfaces[j]]->cpu_ptr);
+                        free(driver_data->surfaces[surfaces[j]]);
+                        driver_data->surfaces[surfaces[j]] = NULL;
+                    }
+                }
+                return VA_STATUS_ERROR_ALLOCATION_FAILED;
+            }
+        }
 
         /* Allocate ID */
         surfaces[i] = ++driver_data->next_surface_id;
@@ -465,15 +528,23 @@ v4l2sl_create_surfaces2(VADriverContextP ctx,
 {
     unsigned int fourcc = VA_FOURCC_NV12;
 
+    if (format == VA_RT_FORMAT_YUV420_10)
+        fourcc = VA_FOURCC_P010;
+    else if (format == VA_RT_FORMAT_YUV422 || format == VA_RT_FORMAT_YUV422_10)
+        fourcc = VA_FOURCC_YUY2;
+    else if (format == VA_RT_FORMAT_RGB32)
+        fourcc = VA_FOURCC_BGRX;
+
     for (unsigned int i = 0; i < num_attribs; i++) {
         if (attrib_list[i].type == VASurfaceAttribPixelFormat &&
             attrib_list[i].value.type == VAGenericValueTypeInteger)
             fourcc = attrib_list[i].value.value.i;
-        /* MemoryType / UsageHint: accepted and ignored — our surfaces are
-         * V4L2 capture buffers, DMA-BUF export happens via vaDeriveImage */
     }
 
-    if (fourcc != VA_FOURCC_NV12)
+    if (fourcc != VA_FOURCC_NV12 && fourcc != VA_FOURCC_P010 &&
+        fourcc != VA_FOURCC_YUY2 && fourcc != VA_FOURCC_I420 &&
+        fourcc != VA_FOURCC_ARGB && fourcc != VA_FOURCC_BGRA &&
+        fourcc != VA_FOURCC_BGRX)
         return VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT;
 
     return v4l2sl_create_surfaces(ctx, width, height, fourcc,
@@ -492,6 +563,7 @@ v4l2sl_destroy_surfaces(VADriverContextP ctx,
         if (surface) {
             if (surface->dma_buf_fd >= 0)
                 close(surface->dma_buf_fd);
+            free(surface->cpu_ptr);
             free(surface);
             driver_data->surfaces[surfaces[i]] = NULL;
         }
@@ -542,8 +614,13 @@ v4l2sl_create_context(VADriverContextP ctx,
     if (config) {
         context->codec = config->codec;
         context->profile = config->profile;
+        context->entrypoint = config->entrypoint;
+        context->rt_format = config->rt_format;
         context->device_path = config->device_path;
     }
+    context->v4l2_fd = -1;
+    context->media_fd = -1;
+    context->request_fd = -1;
 
     /* Open V4L2 video device */
     context->v4l2_fd = v4l2sl_open_device(context->device_path);
@@ -552,6 +629,16 @@ v4l2sl_create_context(VADriverContextP ctx,
         free(context->render_targets);
         free(context);
         return VA_STATUS_ERROR_OPERATION_FAILED;
+    }
+
+    /* JPEG encode and RGA VPP are stateful M2M — no request API. */
+    if (context->codec == V4L2SL_CODEC_JPEG_ENC ||
+        context->codec == V4L2SL_CODEC_VPP) {
+        *context_id = ++driver_data->next_context_id;
+        context->context_id = *context_id;
+        context->next = driver_data->contexts;
+        driver_data->contexts = context;
+        return VA_STATUS_SUCCESS;
     }
 
     /* Open media device for request API (sysfs, not /dev/mediaN == videoN) */
@@ -595,12 +682,25 @@ v4l2sl_create_context(VADriverContextP ctx,
         }
     }
 
-    /* Setup capture queue (decoded output) */
+    /* Setup capture queue (decoded output). 10-bit / 4:2:2 configs
+     * ask for NV15/NV16/NV20; 8-bit stays NV12. */
+    context->cap_pixelformat = v4l2sl_capture_fourcc_from_rt(context->rt_format);
     if (context->v4l2_fd >= 0) {
         int n_cap = v4l2sl_setup_capture_queue(context->v4l2_fd,
-                                               picture_width, picture_height);
+                                               picture_width, picture_height,
+                                               context->cap_pixelformat);
         if (n_cap > 0)
             context->capture_bufs_allocd = n_cap;
+        else if (context->cap_pixelformat != V4L2_PIX_FMT_NV12) {
+            /* SPS not set yet — fall back to NV12, first picture will
+             * renegotiate once bit depth is known. */
+            context->cap_pixelformat = V4L2_PIX_FMT_NV12;
+            n_cap = v4l2sl_setup_capture_queue(context->v4l2_fd,
+                                               picture_width, picture_height,
+                                               V4L2_PIX_FMT_NV12);
+            if (n_cap > 0)
+                context->capture_bufs_allocd = n_cap;
+        }
     }
 
     /*
@@ -705,14 +805,30 @@ v4l2sl_create_buffer(VADriverContextP ctx,
     buf->type = type;
     buf->size = size;
     buf->num_elements = num_elements;
-    buf->data = malloc(size * num_elements);
-    if (!buf->data) {
-        free(buf);
-        return VA_STATUS_ERROR_ALLOCATION_FAILED;
+    if (type == VAEncCodedBufferType) {
+        /* Layout: VACodedBufferSegment header followed by payload. */
+        size_t payload = (size_t)size * (num_elements ? num_elements : 1);
+        size_t wrap = sizeof(VACodedBufferSegment) + payload;
+        VACodedBufferSegment *seg;
+        buf->data = calloc(1, wrap);
+        if (!buf->data) {
+            free(buf);
+            return VA_STATUS_ERROR_ALLOCATION_FAILED;
+        }
+        buf->size = (unsigned int)payload;
+        seg = buf->data;
+        seg->buf = (uint8_t *)buf->data + sizeof(*seg);
+        seg->size = 0;
+        seg->next = NULL;
+    } else {
+        buf->data = malloc(size * num_elements);
+        if (!buf->data) {
+            free(buf);
+            return VA_STATUS_ERROR_ALLOCATION_FAILED;
+        }
+        if (data)
+            memcpy(buf->data, data, size * num_elements);
     }
-
-    if (data)
-        memcpy(buf->data, data, size * num_elements);
 
     pthread_mutex_lock(&g_v4l2sl_lock);
     *buf_id = ++driver_data->next_buffer_id;
@@ -986,6 +1102,25 @@ v4l2sl_end_picture(VADriverContextP ctx,
     if (!context->current_surface)
         return VA_STATUS_ERROR_INVALID_SURFACE;
 
+    if (context->codec == V4L2SL_CODEC_JPEG_ENC) {
+        VAStatus st = v4l2sl_jpeg_encode(context, context->pending_buffers,
+                                         context->num_pending_buffers);
+        context->current_surface->status =
+            (st == VA_STATUS_SUCCESS) ? VASurfaceReady : VASurfaceSkipped;
+        context->current_surface = NULL;
+        context->num_pending_buffers = 0;
+        return st;
+    }
+    if (context->codec == V4L2SL_CODEC_VPP) {
+        VAStatus st = v4l2sl_vpp_run(context, context->pending_buffers,
+                                     context->num_pending_buffers);
+        context->current_surface->status =
+            (st == VA_STATUS_SUCCESS) ? VASurfaceReady : VASurfaceSkipped;
+        context->current_surface = NULL;
+        context->num_pending_buffers = 0;
+        return st;
+    }
+
     if (context->v4l2_fd < 0 || context->request_fd < 0) {
         /* V4L2 device not available — just mark surface as ready (stub mode) */
         context->current_surface->status = VASurfaceReady;
@@ -1112,17 +1247,35 @@ v4l2sl_query_image_formats(VADriverContextP ctx,
                            VAImageFormat *format_list,
                            int *num_formats)
 {
+    static const struct {
+        uint32_t fourcc;
+        int depth;
+        int bpp;
+    } fmts[] = {
+        { VA_FOURCC_NV12, 12, 12 },
+        { VA_FOURCC_P010, 24, 24 },
+        { VA_FOURCC_YUY2, 16, 16 },
+        { VA_FOURCC_I420, 12, 12 },
+        { VA_FOURCC_BGRX, 32, 32 },
+        { VA_FOURCC_BGRA, 32, 32 },
+        { VA_FOURCC_ARGB, 32, 32 },
+    };
     int count = 0;
+    unsigned i;
+    int cap = num_formats ? *num_formats : 0;
 
-    if (count < *num_formats) {
-        memset(&format_list[count], 0, sizeof(VAImageFormat));
-        format_list[count].fourcc = VA_FOURCC_NV12;
-        format_list[count].depth = 12;
-        format_list[count].bits_per_pixel = 12;
+    for (i = 0; i < sizeof(fmts) / sizeof(fmts[0]); i++) {
+        if (format_list && count < cap) {
+            memset(&format_list[count], 0, sizeof(VAImageFormat));
+            format_list[count].fourcc = fmts[i].fourcc;
+            format_list[count].depth = fmts[i].depth;
+            format_list[count].bits_per_pixel = fmts[i].bpp;
+        }
         count++;
     }
 
-    *num_formats = count;
+    if (num_formats)
+        *num_formats = count;
     return VA_STATUS_SUCCESS;
 }
 
@@ -1137,7 +1290,7 @@ v4l2sl_derive_image(VADriverContextP ctx,
     if (!surf)
         return VA_STATUS_ERROR_INVALID_SURFACE;
 
-    if (surf->dma_buf_fd < 0 || surf->buf_index < 0) {
+    if ((surf->dma_buf_fd < 0 || surf->buf_index < 0) && !surf->cpu_ptr) {
         fprintf(stderr, "v4l2stateless: derive_image: surface %d has no decoded frame\n",
                 surface);
         return VA_STATUS_ERROR_INVALID_SURFACE;
@@ -1162,14 +1315,37 @@ v4l2sl_derive_image(VADriverContextP ctx,
                       ((c && c->cap_stride) ? c->cap_stride : surf->width);
     uint32_t aligned_h = surf->aligned_h ? surf->aligned_h :
                           ((c && c->cap_height) ? c->cap_height : surf->height);
-    uint32_t data_size = stride * aligned_h * 3 / 2;  /* NV12: Y + interleaved UV */
+    uint32_t cap_fcc = surf->cap_fourcc ? surf->cap_fourcc :
+                       ((c && c->cap_pixelformat) ? c->cap_pixelformat : V4L2_PIX_FMT_NV12);
+    uint32_t va_fcc = v4l2sl_va_fourcc_for_capture(cap_fcc);
+    uint32_t data_size;
+    void *map;
+    int mmapped = 0;
 
-    /* Map the decoded frame once; the mapping lives until vaDestroyImage. */
-    void *map = mmap(NULL, data_size, PROT_READ, MAP_SHARED, surf->dma_buf_fd, 0);
-    if (map == MAP_FAILED) {
-        fprintf(stderr, "v4l2stateless: derive_image: mmap dmabuf failed: %s\n",
-                strerror(errno));
-        return VA_STATUS_ERROR_OPERATION_FAILED;
+    if (surf->cpu_ptr && surf->dma_buf_fd < 0) {
+        map = surf->cpu_ptr;
+        stride = surf->cpu_stride;
+        aligned_h = surf->height;
+        va_fcc = surf->format ? surf->format : VA_FOURCC_NV12;
+        data_size = surf->cpu_size;
+        mmapped = 2; /* borrowed cpu backing — do not free on DestroyImage */
+    } else {
+        data_size = v4l2sl_capture_plane_size(cap_fcc, stride, aligned_h);
+        map = mmap(NULL, data_size, PROT_READ, MAP_SHARED, surf->dma_buf_fd, 0);
+        if (map == MAP_FAILED) {
+            fprintf(stderr, "v4l2stateless: derive_image: mmap dmabuf failed: %s\n",
+                    strerror(errno));
+            return VA_STATUS_ERROR_OPERATION_FAILED;
+        }
+        mmapped = 1;
+        /* Derive reports the native V4L2 layout so zero-copy clients can
+         * consume NV15/NV16; GetImage converts to P010/YUY2. */
+        if (cap_fcc == V4L2_PIX_FMT_NV12)
+            va_fcc = VA_FOURCC_NV12;
+        else if (cap_fcc == V4L2_PIX_FMT_NV15)
+            va_fcc = VA_FOURCC_P010;
+        else
+            va_fcc = VA_FOURCC_YUY2;
     }
 
     struct v4l2sl_buffer *ib = calloc(1, sizeof(*ib));
@@ -1183,7 +1359,7 @@ v4l2sl_derive_image(VADriverContextP ctx,
     ib->type = VAImageBufferType;
     ib->size = data_size;
     ib->data = map;
-    ib->mmapped = 1;
+    ib->mmapped = mmapped;
     ib->next = driver_data->orphan_buffers;
     driver_data->orphan_buffers = ib;
     pthread_mutex_unlock(&g_v4l2sl_lock);
@@ -1191,14 +1367,21 @@ v4l2sl_derive_image(VADriverContextP ctx,
     memset(image, 0, sizeof(*image));
     image->image_id = id;
     image->buf = id;               /* vaMapBuffer(image.buf) returns the mapping */
-    image->format.fourcc = VA_FOURCC_NV12;
+    image->format.fourcc = va_fcc;
     image->width = surf->width;    /* display size */
     image->height = surf->height;
-    image->num_planes = 2;
-    image->pitches[0] = stride;    /* Y stride (driver-padded) */
-    image->pitches[1] = stride;    /* UV stride */
-    image->offsets[0] = 0;
-    image->offsets[1] = stride * aligned_h;
+    if (va_fcc == VA_FOURCC_YUY2 || va_fcc == VA_FOURCC_BGRX ||
+        va_fcc == VA_FOURCC_BGRA || va_fcc == VA_FOURCC_ARGB) {
+        image->num_planes = 1;
+        image->pitches[0] = (va_fcc == VA_FOURCC_YUY2) ? stride : stride;
+        image->offsets[0] = 0;
+    } else {
+        image->num_planes = 2;
+        image->pitches[0] = stride;
+        image->pitches[1] = stride;
+        image->offsets[0] = 0;
+        image->offsets[1] = stride * aligned_h;
+    }
     image->data_size = data_size;
 
     return VA_STATUS_SUCCESS;
@@ -1215,9 +1398,9 @@ v4l2sl_destroy_image(VADriverContextP ctx, VAImageID image_id)
     while (*pp) {
         if ((*pp)->buffer_id == image_id) {
             struct v4l2sl_buffer *ib = *pp;
-            if (ib->mmapped)
+            if (ib->mmapped == 1)
                 munmap(ib->data, ib->size);
-            else
+            else if (ib->mmapped == 0)
                 free(ib->data);
             *pp = ib->next;
             free(ib);
@@ -1252,19 +1435,19 @@ v4l2sl_create_image(VADriverContextP ctx, VAImageFormat *format,
 {
     struct v4l2sl_driver_data *driver_data = ctx->pDriverData;
 
-    if (!format || format->fourcc != VA_FOURCC_NV12)
+    if (!format)
+        return VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT;
+    if (format->fourcc != VA_FOURCC_NV12 && format->fourcc != VA_FOURCC_P010 &&
+        format->fourcc != VA_FOURCC_YUY2 && format->fourcc != VA_FOURCC_I420 &&
+        format->fourcc != VA_FOURCC_BGRX && format->fourcc != VA_FOURCC_BGRA &&
+        format->fourcc != VA_FOURCC_ARGB)
         return VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT;
     if (width <= 0 || height <= 0)
         return VA_STATUS_ERROR_INVALID_PARAMETER;
 
-    /* Match the negotiated capture geometry when a decode session exists. */
-    struct v4l2sl_context *c = driver_data->contexts;
-    uint32_t stride = width, aligned_h = height;
-    if (c && c->cap_stride) {
-        stride = c->cap_stride;
-        aligned_h = c->cap_height;
-    }
-    uint32_t data_size = stride * aligned_h * 3 / 2;
+    uint32_t stride = v4l2sl_default_image_stride(format->fourcc, width);
+    uint32_t aligned_h = height;
+    uint32_t data_size = v4l2sl_va_image_size(format->fourcc, stride, aligned_h);
 
     struct v4l2sl_buffer *ib = calloc(1, sizeof(*ib));
     if (!ib)
@@ -1289,11 +1472,18 @@ v4l2sl_create_image(VADriverContextP ctx, VAImageFormat *format,
     image->format = *format;
     image->width = width;
     image->height = height;
-    image->num_planes = 2;
-    image->pitches[0] = stride;
-    image->pitches[1] = stride;
-    image->offsets[0] = 0;
-    image->offsets[1] = stride * aligned_h;
+    if (format->fourcc == VA_FOURCC_YUY2 || format->fourcc == VA_FOURCC_BGRX ||
+        format->fourcc == VA_FOURCC_BGRA || format->fourcc == VA_FOURCC_ARGB) {
+        image->num_planes = 1;
+        image->pitches[0] = stride;
+        image->offsets[0] = 0;
+    } else {
+        image->num_planes = 2;
+        image->pitches[0] = stride;
+        image->pitches[1] = stride;
+        image->offsets[0] = 0;
+        image->offsets[1] = stride * aligned_h;
+    }
     image->data_size = data_size;
 
     return VA_STATUS_SUCCESS;
@@ -1307,10 +1497,10 @@ v4l2sl_get_image(VADriverContextP ctx, VASurfaceID surface,
     struct v4l2sl_driver_data *driver_data = ctx->pDriverData;
     struct v4l2sl_surface *surf = driver_data->surfaces[surface];
 
-    if (!surf || surf->dma_buf_fd < 0)
+    if (!surf)
         return VA_STATUS_ERROR_INVALID_SURFACE;
     if (x != 0 || y != 0)
-        return VA_STATUS_ERROR_INVALID_PARAMETER;  /* region reads unused by ffmpeg */
+        return VA_STATUS_ERROR_INVALID_PARAMETER;
 
     pthread_mutex_lock(&g_v4l2sl_lock);
     struct v4l2sl_buffer *ib = driver_data->orphan_buffers;
@@ -1324,33 +1514,201 @@ v4l2sl_get_image(VADriverContextP ctx, VASurfaceID surface,
                           ((c && c->cap_stride) ? c->cap_stride : surf->width);
     uint32_t src_alh = surf->aligned_h ? surf->aligned_h :
                        ((c && c->cap_height) ? c->cap_height : surf->height);
-    size_t map_size = (size_t)src_stride * src_alh * 3 / 2;
+    uint32_t cap_fcc = surf->cap_fourcc ? surf->cap_fourcc :
+                       ((c && c->cap_pixelformat) ? c->cap_pixelformat : V4L2_PIX_FMT_NV12);
+    uint8_t *dst = ib->data;
+    const uint8_t *src;
+    void *mapped = NULL;
+    size_t map_size = 0;
+    int copy_w = (int)width < surf->width ? (int)width : surf->width;
+    int copy_h = (int)height < surf->height ? (int)height : surf->height;
+    uint32_t dst_fourcc = VA_FOURCC_NV12;
+    uint32_t dst_stride;
 
-    uint8_t *src = mmap(NULL, map_size, PROT_READ, MAP_SHARED,
-                        surf->dma_buf_fd, 0);
-    if (src == MAP_FAILED) {
-        fprintf(stderr, "v4l2stateless: get_image: mmap dmabuf failed: %s\n",
-                strerror(errno));
-        return VA_STATUS_ERROR_OPERATION_FAILED;
+    if (cap_fcc == V4L2_PIX_FMT_NV15) {
+        dst_fourcc = VA_FOURCC_P010;
+        dst_stride = v4l2sl_default_image_stride(VA_FOURCC_P010, copy_w);
+    } else if (cap_fcc == V4L2_PIX_FMT_NV16 || cap_fcc == V4L2_PIX_FMT_NV20) {
+        dst_fourcc = VA_FOURCC_YUY2;
+        dst_stride = v4l2sl_default_image_stride(VA_FOURCC_YUY2, copy_w);
+    } else {
+        dst_stride = v4l2sl_default_image_stride(VA_FOURCC_NV12, copy_w);
     }
 
-    uint8_t *dst = ib->data;
-    /* The image buffer comes from v4l2sl_create_image, which allocates with
-     * the same negotiated geometry — destination stride matches the source. */
-    uint32_t dst_stride = src_stride;
+    if (surf->dma_buf_fd >= 0) {
+        map_size = v4l2sl_capture_plane_size(cap_fcc, src_stride, src_alh);
+        mapped = mmap(NULL, map_size, PROT_READ, MAP_SHARED, surf->dma_buf_fd, 0);
+        if (mapped == MAP_FAILED) {
+            fprintf(stderr, "v4l2stateless: get_image: mmap dmabuf failed: %s\n",
+                    strerror(errno));
+            return VA_STATUS_ERROR_OPERATION_FAILED;
+        }
+        src = mapped;
+    } else if (surf->cpu_ptr) {
+        src = surf->cpu_ptr;
+        src_stride = surf->cpu_stride;
+        src_alh = surf->height;
+        cap_fcc = V4L2_PIX_FMT_NV12;
+        dst_fourcc = VA_FOURCC_NV12;
+        dst_stride = v4l2sl_default_image_stride(VA_FOURCC_NV12, copy_w);
+    } else {
+        return VA_STATUS_ERROR_INVALID_SURFACE;
+    }
 
-    unsigned int copy_w = width < (unsigned)surf->width ? width : surf->width;
-    unsigned int copy_h = height < src_alh ? height : src_alh;
+    if (dst_fourcc == VA_FOURCC_P010)
+        v4l2sl_nv15_to_p010(dst, dst_stride, src, src_stride, src_alh, copy_w, copy_h);
+    else if (dst_fourcc == VA_FOURCC_YUY2 && cap_fcc == V4L2_PIX_FMT_NV20)
+        v4l2sl_nv20_to_yuy2(dst, dst_stride, src, src_stride, src_alh, copy_w, copy_h);
+    else if (dst_fourcc == VA_FOURCC_YUY2)
+        v4l2sl_nv16_to_yuy2(dst, dst_stride, src, src_stride, src_alh, copy_w, copy_h);
+    else
+        v4l2sl_copy_nv12(dst, dst_stride, src, src_stride, src_alh, copy_w, copy_h);
 
-    for (unsigned int row = 0; row < copy_h; row++)
-        memcpy(dst + (size_t)row * dst_stride,
-               src + (size_t)row * src_stride, copy_w);
-    for (unsigned int row = 0; row < copy_h / 2; row++)
-        memcpy(dst + (size_t)dst_stride * src_alh + (size_t)row * dst_stride,
-               src + (size_t)src_stride * src_alh + (size_t)row * src_stride,
-               copy_w);
+    if (mapped)
+        munmap(mapped, map_size);
+    return VA_STATUS_SUCCESS;
+}
 
-    munmap(src, map_size);
+static VAStatus
+v4l2sl_put_image(VADriverContextP ctx,
+                 VASurfaceID surface,
+                 VAImageID image,
+                 int src_x, int src_y,
+                 unsigned int src_width, unsigned int src_height,
+                 int dest_x, int dest_y,
+                 unsigned int dest_width, unsigned int dest_height)
+{
+    struct v4l2sl_driver_data *driver_data = ctx->pDriverData;
+    struct v4l2sl_surface *surf = driver_data->surfaces[surface];
+    struct v4l2sl_buffer *ib;
+    uint8_t *src;
+    int copy_w, copy_h;
+
+    (void)dest_width;
+    (void)dest_height;
+    if (!surf)
+        return VA_STATUS_ERROR_INVALID_SURFACE;
+    if (src_x || src_y || dest_x || dest_y)
+        return VA_STATUS_ERROR_UNIMPLEMENTED;
+    if (!surf->cpu_ptr)
+        return VA_STATUS_ERROR_OPERATION_FAILED;
+
+    pthread_mutex_lock(&g_v4l2sl_lock);
+    ib = driver_data->orphan_buffers;
+    while (ib && ib->buffer_id != image)
+        ib = ib->next;
+    pthread_mutex_unlock(&g_v4l2sl_lock);
+    if (!ib)
+        return VA_STATUS_ERROR_INVALID_IMAGE;
+
+    src = ib->data;
+    copy_w = (int)src_width < surf->width ? (int)src_width : surf->width;
+    copy_h = (int)src_height < surf->height ? (int)src_height : surf->height;
+    v4l2sl_copy_nv12(surf->cpu_ptr, surf->cpu_stride, src,
+                     (uint32_t)copy_w, copy_h, copy_w, copy_h);
+    return VA_STATUS_SUCCESS;
+}
+
+static VAStatus
+v4l2sl_vpp_query_filters_wrap(VADriverContextP ctx, VAContextID context,
+                              VAProcFilterType *filters, unsigned int *num_filters)
+{
+    (void)ctx;
+    (void)context;
+    return v4l2sl_vpp_query_filters(filters, num_filters);
+}
+
+static VAStatus
+v4l2sl_vpp_query_filter_caps_wrap(VADriverContextP ctx, VAContextID context,
+                                  VAProcFilterType type, void *filter_caps,
+                                  unsigned int *num_filter_caps)
+{
+    (void)ctx;
+    (void)context;
+    return v4l2sl_vpp_query_filter_caps(type, filter_caps, num_filter_caps);
+}
+
+static VAStatus
+v4l2sl_vpp_query_pipeline_caps_wrap(VADriverContextP ctx, VAContextID context,
+                                    VABufferID *filters, unsigned int num_filters,
+                                    VAProcPipelineCaps *pipeline_caps)
+{
+    (void)ctx;
+    (void)context;
+    (void)filters;
+    (void)num_filters;
+    return v4l2sl_vpp_query_pipeline_caps(pipeline_caps);
+}
+
+static VAStatus
+v4l2sl_export_surface_handle(VADriverContextP ctx, VASurfaceID surface_id,
+                             uint32_t mem_type, uint32_t flags, void *descriptor)
+{
+    struct v4l2sl_driver_data *driver_data = ctx->pDriverData;
+    struct v4l2sl_surface *surf = driver_data->surfaces[surface_id];
+    struct v4l2sl_context *c;
+    VADRMPRIMESurfaceDescriptor *desc = descriptor;
+    uint32_t stride, alh, cap_fcc, drm_fcc, plane_size;
+    int fd;
+
+    if (!surf)
+        return VA_STATUS_ERROR_INVALID_SURFACE;
+    if (!descriptor)
+        return VA_STATUS_ERROR_INVALID_PARAMETER;
+    if (mem_type != VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2 &&
+        mem_type != VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME)
+        return VA_STATUS_ERROR_UNSUPPORTED_MEMORY_TYPE;
+    if (surf->dma_buf_fd < 0)
+        return VA_STATUS_ERROR_INVALID_SURFACE;
+
+    c = context_for_surface(driver_data, surface_id);
+    stride = surf->stride ? surf->stride : (c && c->cap_stride ? c->cap_stride : surf->width);
+    alh = surf->aligned_h ? surf->aligned_h : (c && c->cap_height ? c->cap_height : surf->height);
+    cap_fcc = surf->cap_fourcc ? surf->cap_fourcc :
+              (c && c->cap_pixelformat ? c->cap_pixelformat : V4L2_PIX_FMT_NV12);
+    drm_fcc = v4l2sl_drm_fourcc_for_capture(cap_fcc);
+    plane_size = v4l2sl_capture_plane_size(cap_fcc, stride, alh);
+
+    fd = dup(surf->dma_buf_fd);
+    if (fd < 0)
+        return VA_STATUS_ERROR_OPERATION_FAILED;
+
+    memset(desc, 0, sizeof(*desc));
+    desc->fourcc = v4l2sl_va_fourcc_for_capture(cap_fcc);
+    if (cap_fcc == V4L2_PIX_FMT_NV12)
+        desc->fourcc = VA_FOURCC_NV12;
+    desc->width = surf->width;
+    desc->height = surf->height;
+    desc->num_objects = 1;
+    desc->objects[0].fd = fd;
+    desc->objects[0].size = plane_size;
+    desc->objects[0].drm_format_modifier = DRM_FORMAT_MOD_LINEAR;
+
+    if (flags & VA_EXPORT_SURFACE_SEPARATE_LAYERS) {
+        desc->num_layers = 2;
+        desc->layers[0].drm_format = (cap_fcc == V4L2_PIX_FMT_NV15) ?
+            DRM_FORMAT_R16 : DRM_FORMAT_R8;
+        desc->layers[0].num_planes = 1;
+        desc->layers[0].object_index[0] = 0;
+        desc->layers[0].offset[0] = 0;
+        desc->layers[0].pitch[0] = stride;
+        desc->layers[1].drm_format = (cap_fcc == V4L2_PIX_FMT_NV15) ?
+            DRM_FORMAT_GR1616 : DRM_FORMAT_GR88;
+        desc->layers[1].num_planes = 1;
+        desc->layers[1].object_index[0] = 0;
+        desc->layers[1].offset[0] = stride * alh;
+        desc->layers[1].pitch[0] = stride;
+    } else {
+        desc->num_layers = 1;
+        desc->layers[0].drm_format = drm_fcc;
+        desc->layers[0].num_planes = 2;
+        desc->layers[0].object_index[0] = 0;
+        desc->layers[0].object_index[1] = 0;
+        desc->layers[0].offset[0] = 0;
+        desc->layers[0].offset[1] = stride * alh;
+        desc->layers[0].pitch[0] = stride;
+        desc->layers[0].pitch[1] = stride;
+    }
     return VA_STATUS_SUCCESS;
 }
 
@@ -1400,6 +1758,8 @@ v4l2sl_init(VADriverContextP ctx)
                                  driver_data->dev_av1, driver_data->dev_vp8,
                                  driver_data->dev_mpeg2,
                                  sizeof(driver_data->dev_h264));
+    v4l2sl_scan_aux_paths(driver_data->dev_jpeg_enc, driver_data->dev_vpp,
+                          sizeof(driver_data->dev_jpeg_enc));
     fprintf(stderr, "v4l2stateless: probe H.264  -> %s\n",
             driver_data->dev_h264[0] ? driver_data->dev_h264 : "(none)");
     fprintf(stderr, "v4l2stateless: probe HEVC   -> %s\n",
@@ -1410,12 +1770,16 @@ v4l2sl_init(VADriverContextP ctx)
             driver_data->dev_vp8[0] ? driver_data->dev_vp8 : "(none)");
     fprintf(stderr, "v4l2stateless: probe MPEG-2 -> %s\n",
             driver_data->dev_mpeg2[0] ? driver_data->dev_mpeg2 : "(none)");
+    fprintf(stderr, "v4l2stateless: probe JPEG   -> %s\n",
+            driver_data->dev_jpeg_enc[0] ? driver_data->dev_jpeg_enc : "(none)");
+    fprintf(stderr, "v4l2stateless: probe VPP    -> %s\n",
+            driver_data->dev_vpp[0] ? driver_data->dev_vpp : "(none)");
 
     /* Set context limits */
     ctx->max_profiles = NUM_PROFILES;
-    ctx->max_entrypoints = NUM_ENTRYPOINTS;
-    ctx->max_attributes = 4;
-    ctx->max_image_formats = 1;
+    ctx->max_entrypoints = 4;
+    ctx->max_attributes = 8;
+    ctx->max_image_formats = 8;
     ctx->max_subpic_formats = 1;
     ctx->max_display_attributes = 0;
     ctx->str_vendor = "v4l2stateless/vaapi-v4l2-bridge";
@@ -1454,7 +1818,7 @@ v4l2sl_init(VADriverContextP ctx)
     vtable->vaDestroyImage            = v4l2sl_destroy_image;
     vtable->vaSetImagePalette         = (void *)v4l2sl_stub_unimplemented;
     vtable->vaGetImage                = v4l2sl_get_image;
-    vtable->vaPutImage                = (void *)v4l2sl_stub_unimplemented;
+    vtable->vaPutImage                = v4l2sl_put_image;
     vtable->vaQuerySubpictureFormats  = (void *)v4l2sl_stub_unimplemented;
     vtable->vaCreateSubpicture        = (void *)v4l2sl_stub_unimplemented;
     vtable->vaDestroySubpicture       = (void *)v4l2sl_stub_unimplemented;
@@ -1467,6 +1831,14 @@ v4l2sl_init(VADriverContextP ctx)
     vtable->vaGetDisplayAttributes    = (void *)v4l2sl_stub_unimplemented;
     vtable->vaSetDisplayAttributes    = (void *)v4l2sl_stub_unimplemented;
     vtable->vaPutSurface              = (void *)v4l2sl_put_surface;
+    vtable->vaExportSurfaceHandle     = v4l2sl_export_surface_handle;
+
+    if (ctx->vtable_vpp) {
+        ctx->vtable_vpp->version = VA_DRIVER_VTABLE_VPP_VERSION;
+        ctx->vtable_vpp->vaQueryVideoProcFilters = v4l2sl_vpp_query_filters_wrap;
+        ctx->vtable_vpp->vaQueryVideoProcFilterCaps = v4l2sl_vpp_query_filter_caps_wrap;
+        ctx->vtable_vpp->vaQueryVideoProcPipelineCaps = v4l2sl_vpp_query_pipeline_caps_wrap;
+    }
 
     return VA_STATUS_SUCCESS;
 }

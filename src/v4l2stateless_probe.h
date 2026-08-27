@@ -37,5 +37,7 @@ int v4l2sl_scan_decoder_paths(char *h264_out, char *hevc_out, char *av1_out,
 int v4l2sl_scan_decoder_paths_ex(char *h264_out, char *hevc_out, char *av1_out,
                                  char *vp8_out, char *mpeg2_out,
                                  unsigned out_len);
+int v4l2sl_enum_capture_fourccs(int fd, uint32_t *out, unsigned max);
+int v4l2sl_scan_aux_paths(char *jpeg_enc_out, char *vpp_out, unsigned out_len);
 
 #endif

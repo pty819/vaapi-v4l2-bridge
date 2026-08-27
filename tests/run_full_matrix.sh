@@ -132,8 +132,10 @@ if ! grep -q "v4l2stateless/vaapi-v4l2-bridge" "$OUT/vainfo.log"; then
   echo "vainfo did not load driver"; fail=$((fail+1))
 else
   for p in VAProfileH264ConstrainedBaseline VAProfileH264Main VAProfileH264High \
-           VAProfileHEVCMain VAProfileAV1Profile0 VAProfileVP8Version0_3 \
-           VAProfileMPEG2Simple VAProfileMPEG2Main; do
+           VAProfileH264High10 VAProfileH264High422 \
+           VAProfileHEVCMain VAProfileHEVCMain10 VAProfileAV1Profile0 \
+           VAProfileVP8Version0_3 VAProfileMPEG2Simple VAProfileMPEG2Main \
+           VAProfileJPEGBaseline VAProfileNone; do
     if grep -q "$p" "$OUT/vainfo.log"; then
       echo "VAINFO_OK $p"
     else
@@ -167,6 +169,8 @@ enc "$CLIP/hevc_wpp.mp4" -f lavfi -i testsrc=size=1920x1080:rate=30:duration=4 \
   -pix_fmt yuv420p -c:v libx265 -preset ultrafast -x265-params "log-level=error:wpp=1" -g 30
 enc "$CLIP/hevc_4k.mp4" -f lavfi -i testsrc=size=3840x2160:rate=30:duration=1 \
   -pix_fmt yuv420p -c:v libx265 -preset ultrafast -x265-params "log-level=error" -g 30 -frames:v 8
+enc "$CLIP/hevc10.mp4" -f lavfi -i testsrc=size=1280x720:rate=30:duration=1 \
+  -pix_fmt yuv420p10le -c:v libx265 -preset ultrafast -x265-params "log-level=error" -frames:v 8
 
 # AV1
 enc "$CLIP/av1_aom.mp4" -f lavfi -i testsrc=size=1280x720:rate=30:duration=2 \
@@ -205,6 +209,21 @@ pair_sw "$CLIP/hevc_main.mp4" 120 hevc-main
 pair_sw "$CLIP/hevc_wpp.mp4" 120 hevc-wpp
 pair_sw "$CLIP/hevc_4k.mp4" 8 hevc-4k
 
+echo "== SW hevc10 $CLIP/hevc10.mp4 n=8 =="
+$FF -hide_banner -hwaccel vaapi -hwaccel_output_format vaapi \
+  -vaapi_device /dev/dri/renderD128 -i "$CLIP/hevc10.mp4" \
+  -vf "hwdownload,format=p010le" -pix_fmt p010le -frames:v 8 \
+  -f framemd5 -y "$OUT/hevc10-hw.md5" >"$OUT/hevc10-hw.stderr" 2>&1
+he=$?
+$FF -hide_banner -i "$CLIP/hevc10.mp4" -pix_fmt p010le -frames:v 8 \
+  -f framemd5 -y "$OUT/hevc10-sw.md5" >/dev/null 2>&1
+if [ "$he" -ne 0 ]; then echo "HW_EXIT $he hevc10"; fail=$((fail+1))
+elif ! forbidden "$OUT/hevc10-hw.stderr"; then fail=$((fail+1))
+elif ! used_hw "$OUT/hevc10-hw.stderr"; then fail=$((fail+1))
+elif diff -q "$OUT/hevc10-hw.md5" "$OUT/hevc10-sw.md5" >/dev/null; then
+  echo "MD5_MATCH hevc10"; pass=$((pass+1))
+else echo "MD5_DIFF hevc10"; fail=$((fail+1)); fi
+
 pair_sw "$CLIP/av1_aom.mp4" 8 av1-aom-8
 pair_sw "$CLIP/av1_aom.mp4" 49 av1-aom-49
 pair_sw "$CLIP/av1_svt.mp4" 32 av1-svt-32
@@ -217,6 +236,30 @@ pair_sw "$CLIP/vp8_720.webm" 50 vp8-720
 pair_gst_mpeg2 "$CLIP/mpeg2_ip.mpg" 40 mpeg2-ip
 pair_gst_mpeg2 "$CLIP/mpeg2_b.mpg" 40 mpeg2-b
 pair_gst_mpeg2 "$CLIP/mpeg2_1080.mpg" 40 mpeg2-1080
+
+echo "== JPEG mjpeg_vaapi =="
+$FF -hide_banner -vaapi_device /dev/dri/renderD128 -f lavfi \
+  -i testsrc=size=320x240:rate=5:duration=1 -vf "format=nv12,hwupload" \
+  -c:v mjpeg_vaapi -y "$OUT/va.jpg" >"$OUT/jpeg.stderr" 2>&1
+if grep -q "v4l2stateless: JPEG encoded" "$OUT/jpeg.stderr" && \
+   ffprobe -v error -select_streams v:0 -show_entries stream=width,height,codec_name \
+     -of csv=p=0 "$OUT/va.jpg" | grep -q mjpeg; then
+  echo "JPEG_OK"; pass=$((pass+1))
+else
+  echo "JPEG_FAIL"; tail -15 "$OUT/jpeg.stderr"; fail=$((fail+1))
+fi
+
+echo "== VPP scale_vaapi =="
+$FF -hide_banner -hwaccel vaapi -hwaccel_output_format vaapi \
+  -vaapi_device /dev/dri/renderD128 -i "$CLIP/h264_qcif.mp4" \
+  -vf "scale_vaapi=w=160:h=120,hwdownload,format=nv12" -frames:v 8 \
+  -f framemd5 -y "$OUT/vpp.md5" >"$OUT/vpp.stderr" 2>&1
+if grep -q "v4l2stateless: VPP " "$OUT/vpp.stderr" && \
+   grep -q "^0," "$OUT/vpp.md5"; then
+  echo "VPP_OK"; pass=$((pass+1))
+else
+  echo "VPP_FAIL"; tail -15 "$OUT/vpp.stderr"; fail=$((fail+1))
+fi
 
 echo "PASS=$pass FAIL=$fail" | tee "$OUT/summary.txt"
 if [ "$fail" -ne 0 ]; then

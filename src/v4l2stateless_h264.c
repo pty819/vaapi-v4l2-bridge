@@ -146,6 +146,12 @@ void h264_fill_sps(struct v4l2_ctrl_h264_sps *sps,
     } else if (profile == VAProfileH264Main) {
         sps->profile_idc = 77;
         sps->constraint_set_flags = 0;
+    } else if (profile == VAProfileH264High10) {
+        sps->profile_idc = 110;
+        sps->constraint_set_flags = 0;
+    } else if (profile == VAProfileH264High422) {
+        sps->profile_idc = 122;
+        sps->constraint_set_flags = 0;
     } else {
         sps->profile_idc = 100; /* High */
         sps->constraint_set_flags = 0;
@@ -382,6 +388,26 @@ VAStatus v4l2sl_h264_translate(struct v4l2sl_context *ctx,
     if (n_slice_data == 0) {
         fprintf(stderr, "v4l2stateless: H.264 decode missing slice data\n");
         return VA_STATUS_ERROR_INVALID_PARAMETER;
+    }
+
+    {
+        int w = (pic_param->picture_width_in_mbs_minus1 + 1) * 16;
+        int h = (pic_param->picture_height_in_mbs_minus1 + 1) * 16;
+        uint32_t cap = v4l2sl_capture_fourcc_from_sps(
+            pic_param->bit_depth_luma_minus8,
+            pic_param->seq_fields.bits.chroma_format_idc);
+        if (v4l2sl_ensure_capture(ctx, w, h, cap) < 0) {
+            fprintf(stderr, "v4l2stateless: H.264 capture reconfig failed\n");
+            return VA_STATUS_ERROR_OPERATION_FAILED;
+        }
+        if (!ctx->streamed) {
+            if (v4l2sl_streamon(ctx->v4l2_fd, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE) < 0 ||
+                v4l2sl_streamon(ctx->v4l2_fd, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE) < 0) {
+                fprintf(stderr, "v4l2stateless: H.264 STREAMON failed\n");
+                return VA_STATUS_ERROR_OPERATION_FAILED;
+            }
+            ctx->streamed = 1;
+        }
     }
 
     /*
@@ -629,6 +655,7 @@ VAStatus v4l2sl_h264_translate(struct v4l2sl_context *ctx,
         if (ctx->cap_stride) {
             surf->stride = ctx->cap_stride;
             surf->aligned_h = ctx->cap_height;
+            surf->cap_fourcc = ctx->cap_pixelformat;
         }
     } else {
         /* No target surface — recycle the capture buffer */

@@ -308,6 +308,7 @@ VAStatus v4l2sl_vp8_translate(struct v4l2sl_context *ctx,
             if (ctx->cap_stride) {
                 surf->stride = ctx->cap_stride;
                 surf->aligned_h = ctx->cap_height;
+                surf->cap_fourcc = ctx->cap_pixelformat;
             }
         } else {
             ctx->free_cap_bufs[ctx->n_free_cap++] = done_cap;

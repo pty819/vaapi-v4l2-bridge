@@ -11,6 +11,7 @@
 #include <va/va.h>
 #include <va/va_backend.h>
 #include <va/va_dec_vp8.h>
+#include <va/va_vpp.h>
 #include <linux/v4l2-controls.h>
 #include <linux/videodev2.h>
 
@@ -21,6 +22,8 @@ enum v4l2sl_codec {
     V4L2SL_CODEC_AV1,
     V4L2SL_CODEC_VP8,
     V4L2SL_CODEC_MPEG2,
+    V4L2SL_CODEC_JPEG_ENC,
+    V4L2SL_CODEC_VPP,
 };
 
 /* Per-config state */
@@ -39,7 +42,8 @@ struct v4l2sl_surface {
     VASurfaceID surface_id;
     unsigned int width;
     unsigned int height;
-    unsigned int format;
+    unsigned int format;     /* VA fourcc (NV12/P010/YUY2/ARGB) */
+    unsigned int rt_format;
     VASurfaceStatus status;
     int buf_index;           /* V4L2 capture buffer index, -1 if not allocated */
     int dma_buf_fd;          /* DMA-BUF fd for export */
@@ -48,6 +52,10 @@ struct v4l2sl_surface {
     uint8_t av1_level1;      /* AV1 KEY / level-1 ARF (hidden skip=0,0) */
     uint32_t stride;         /* negotiated capture geometry, set at decode */
     uint32_t aligned_h;
+    uint32_t cap_fourcc;     /* V4L2 capture fourcc of attached decode buf */
+    void *cpu_ptr;           /* software backing for upload / encode / VPP src */
+    uint32_t cpu_size;
+    uint32_t cpu_stride;
 };
 
 /* Parameter buffer */
@@ -71,6 +79,8 @@ struct v4l2sl_context {
     VAConfigID config_id;
     enum v4l2sl_codec codec;
     VAProfile profile;
+    VAEntrypoint entrypoint;
+    unsigned int rt_format;
     const char *device_path;
     struct v4l2sl_driver_data *driver_data;  /* back-pointer for surface lookup */
     int width;
@@ -111,6 +121,7 @@ struct v4l2sl_context {
     uint32_t cap_height;       /* aligned height (e.g. 1088 for 1080p) */
     uint32_t cap_stride;       /* bytes per row, may exceed width */
     uint32_t cap_sizeimage;    /* per-buffer plane size */
+    uint32_t cap_pixelformat;  /* V4L2 capture fourcc (NV12/NV15/NV16/NV20) */
 
     /* Frame counter for V4L2 timestamps (DPB reference matching) */
     uint64_t frame_count;
@@ -152,6 +163,8 @@ struct v4l2sl_driver_data {
     char dev_av1[64];
     char dev_vp8[64];
     char dev_mpeg2[64];
+    char dev_jpeg_enc[64];
+    char dev_vpp[64];
 };
 
 static inline uint64_t v4l2sl_surface_ts(struct v4l2sl_driver_data *dd, VASurfaceID id)
@@ -168,10 +181,13 @@ int v4l2sl_open_device(const char *path);
 int v4l2sl_open_media_for_device(const char *video_path);
 int v4l2sl_request_alloc(int media_fd);
 int v4l2sl_setup_output_queue(int fd, uint32_t codec_format, int width, int height);
-int v4l2sl_setup_capture_queue(int fd, int width, int height);
+int v4l2sl_setup_capture_queue(int fd, int width, int height, uint32_t pixelformat);
 int v4l2sl_streamon(int fd, enum v4l2_buf_type type);
+int v4l2sl_streamoff(int fd, enum v4l2_buf_type type);
 int v4l2sl_get_capture_geometry(int fd, uint32_t *w, uint32_t *h,
                                 uint32_t *stride, uint32_t *sizeimage);
+int v4l2sl_ensure_capture(struct v4l2sl_context *ctx, int width, int height,
+                          uint32_t pixelformat);
 int v4l2sl_queue_output(int fd, int buf_index, const uint8_t *data, uint32_t size,
                         int request_fd, uint64_t timestamp);
 int v4l2sl_queue_capture(int fd, int buf_index, int request_fd);
@@ -234,5 +250,38 @@ void v4l2sl_mpeg2_fill_quant(struct v4l2_ctrl_mpeg2_quantisation *q,
 VAStatus v4l2sl_mpeg2_translate(struct v4l2sl_context *ctx,
                                 struct v4l2sl_buffer **buffers,
                                 int num_buffers);
+
+/* JPEG encode / RGA VPP */
+VAStatus v4l2sl_jpeg_encode(struct v4l2sl_context *ctx,
+                            struct v4l2sl_buffer **buffers, int num_buffers);
+VAStatus v4l2sl_vpp_run(struct v4l2sl_context *ctx,
+                        struct v4l2sl_buffer **buffers, int num_buffers);
+VAStatus v4l2sl_vpp_query_filters(VAProcFilterType *filters, unsigned int *n);
+VAStatus v4l2sl_vpp_query_filter_caps(VAProcFilterType type, void *caps,
+                                      unsigned int *n);
+VAStatus v4l2sl_vpp_query_pipeline_caps(VAProcPipelineCaps *caps);
+
+/* Pixel format helpers (v4l2stateless_format.c) */
+uint32_t v4l2sl_capture_fourcc_from_rt(unsigned int rt_format);
+uint32_t v4l2sl_capture_fourcc_from_sps(int bit_depth_minus8, int chroma_format_idc);
+int v4l2sl_capture_is_10bit(uint32_t fourcc);
+int v4l2sl_capture_is_422(uint32_t fourcc);
+uint32_t v4l2sl_va_fourcc_for_capture(uint32_t v4l2_fourcc);
+uint32_t v4l2sl_drm_fourcc_for_capture(uint32_t v4l2_fourcc);
+uint32_t v4l2sl_capture_plane_size(uint32_t fourcc, uint32_t stride, uint32_t aligned_h);
+uint32_t v4l2sl_va_image_size(uint32_t va_fourcc, uint32_t stride, uint32_t height);
+uint32_t v4l2sl_default_image_stride(uint32_t va_fourcc, int width);
+void v4l2sl_nv15_to_p010(uint8_t *dst, uint32_t dst_stride,
+                         const uint8_t *src, uint32_t src_stride,
+                         uint32_t src_aligned_h, int width, int height);
+void v4l2sl_copy_nv12(uint8_t *dst, uint32_t dst_stride,
+                      const uint8_t *src, uint32_t src_stride,
+                      uint32_t src_aligned_h, int width, int height);
+void v4l2sl_nv16_to_yuy2(uint8_t *dst, uint32_t dst_stride,
+                         const uint8_t *src, uint32_t src_stride,
+                         uint32_t src_aligned_h, int width, int height);
+void v4l2sl_nv20_to_yuy2(uint8_t *dst, uint32_t dst_stride,
+                         const uint8_t *src, uint32_t src_stride,
+                         uint32_t src_aligned_h, int width, int height);
 
 #endif /* V4L2STATELESS_H */
