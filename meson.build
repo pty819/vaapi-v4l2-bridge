@@ -25,9 +25,12 @@ add_project_arguments(
   language: 'c',
 )
 
+inc = include_directories('src')
+
 sources = files(
   'src/v4l2stateless.c',
   'src/v4l2stateless_device.c',
+  'src/v4l2stateless_probe.c',
   'src/v4l2stateless_config.c',
   'src/v4l2stateless_context.c',
   'src/v4l2stateless_buffer.c',
@@ -38,8 +41,17 @@ sources = files(
 
 shared_library('v4l2stateless_drv_video',
   sources,
+  include_directories: inc,
   dependencies: [libva_dep, libva_drm_dep, libdrm_dep],
   install: true,
   install_dir: libva_driverdir,
   name_prefix: '',  # No 'lib' prefix
 )
+
+test_video_probe = executable('test_video_probe',
+  files('tests/test_video_probe.c', 'src/v4l2stateless_probe.c'),
+  include_directories: inc,
+  dependencies: [libva_dep],
+)
+
+test('video_probe', test_video_probe)

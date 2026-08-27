@@ -124,7 +124,7 @@ struct v4l2sl_context {
 
 /* Driver global state */
 struct v4l2sl_driver_data {
-    int media_fd;                /* /dev/media0 */
+    int media_fd;                /* unused leftover; decode uses per-context media_fd */
     pthread_mutex_t lock;        /* serializes buffer id/list access across
                                     client threads (libva does not lock) */
 
@@ -140,6 +140,11 @@ struct v4l2sl_driver_data {
 
     VABufferID next_buffer_id;
     struct v4l2sl_buffer *orphan_buffers;
+
+    /* Resolved at init by OUTPUT_MPLANE fourcc (empty if missing). */
+    char dev_h264[64];
+    char dev_hevc[64];
+    char dev_av1[64];
 };
 
 /* Device helpers (v4l2stateless_device.c) */

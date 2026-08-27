@@ -66,20 +66,21 @@ int v4l2sl_open_device(const char *path)
 
 /*
  * Open the media device associated with a V4L2 video device
- * /dev/videoN → /dev/mediaN
+ * video node → matching media node via sysfs (numbers need not match)
  */
 int v4l2sl_open_media_for_device(const char *video_path)
 {
     /* /dev/videoN lives next to /dev/mediaM on the same platform device.
-     * Walk /sys/class/video4linux/<name>/device/media* to find the right one
-     * — AV1 is /dev/video4 → media3, rkvdec is /dev/video1 → media0. */
+     * Walk /sys/class/video4linux/<name>/device/media* — do not assume
+     * mediaN == videoN (AV1 has been video4 → media3). */
     const char *base = strrchr(video_path, '/');
     base = base ? base + 1 : video_path;
 
     char sysdir[128];
     snprintf(sysdir, sizeof(sysdir), "/sys/class/video4linux/%s/device", base);
 
-    char media_path[128] = "/dev/media0";
+    char media_path[128];
+    int found = 0;
     DIR *d = opendir(sysdir);
     if (d) {
         struct dirent *de;
@@ -87,9 +88,16 @@ int v4l2sl_open_media_for_device(const char *video_path)
             if (strncmp(de->d_name, "media", 5) != 0)
                 continue;
             snprintf(media_path, sizeof(media_path), "/dev/%s", de->d_name);
+            found = 1;
             break;
         }
         closedir(d);
+    }
+
+    if (!found) {
+        fprintf(stderr, "v4l2stateless: no sysfs media* for %s (%s)\n",
+                video_path, sysdir);
+        return -1;
     }
 
     int fd = open(media_path, O_RDWR);

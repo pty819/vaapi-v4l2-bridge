@@ -22,6 +22,7 @@
 #include <va/va_drmcommon.h>
 
 #include "v4l2stateless.h"
+#include "v4l2stateless_probe.h"
 
 /* Global driver-wide lock — statically initialized, immune to struct-layout
  * or init-order issues; libva does not serialize client threads. */
@@ -57,18 +58,43 @@ static const struct {
     { VAProfileAV1Profile0,    VA_RT_FORMAT_YUV420 },
 };
 
-/* Map VA profile to V4L2 codec and device path */
+/* Map VA profile to codec. Device path is resolved by OUTPUT fourcc. */
 static const struct {
     VAProfile profile;
-    const char *device_path;
     enum v4l2sl_codec codec;
-} profile_device_map[] = {
-    { VAProfileH264Main,    "/dev/video1", V4L2SL_CODEC_H264 },
-    { VAProfileH264High,    "/dev/video1", V4L2SL_CODEC_H264 },
-    { VAProfileHEVCMain,    "/dev/video1", V4L2SL_CODEC_HEVC },
-    { VAProfileHEVCMain10,  "/dev/video1", V4L2SL_CODEC_HEVC },
-    { VAProfileAV1Profile0, "/dev/video4", V4L2SL_CODEC_AV1  },
+} profile_codec_map[] = {
+    { VAProfileH264Main,    V4L2SL_CODEC_H264 },
+    { VAProfileH264High,    V4L2SL_CODEC_H264 },
+    { VAProfileHEVCMain,    V4L2SL_CODEC_HEVC },
+    { VAProfileHEVCMain10,  V4L2SL_CODEC_HEVC },
+    { VAProfileAV1Profile0, V4L2SL_CODEC_AV1  },
 };
+
+static int codec_for_profile(VAProfile profile, enum v4l2sl_codec *codec)
+{
+    unsigned i;
+
+    for (i = 0; i < sizeof(profile_codec_map) / sizeof(profile_codec_map[0]); i++) {
+        if (profile_codec_map[i].profile == profile) {
+            *codec = profile_codec_map[i].codec;
+            return 0;
+        }
+    }
+    return -1;
+}
+
+static const char *cached_device(struct v4l2sl_driver_data *dd, enum v4l2sl_codec codec)
+{
+    const char *p = NULL;
+
+    switch (codec) {
+    case V4L2SL_CODEC_H264: p = dd->dev_h264; break;
+    case V4L2SL_CODEC_HEVC: p = dd->dev_hevc; break;
+    case V4L2SL_CODEC_AV1:  p = dd->dev_av1;  break;
+    default: break;
+    }
+    return (p && p[0]) ? p : NULL;
+}
 
 /*
  * VA-API driver VTable implementations
@@ -96,10 +122,18 @@ v4l2sl_query_config_profiles(VADriverContextP ctx,
                              VAProfile *profiles,
                              int *num_profiles)
 {
+    struct v4l2sl_driver_data *driver_data = ctx->pDriverData;
     int count = 0;
 
-    for (unsigned i = 0; i < NUM_PROFILES && count < *num_profiles; i++)
+    for (unsigned i = 0; i < NUM_PROFILES && count < *num_profiles; i++) {
+        enum v4l2sl_codec codec;
+
+        if (codec_for_profile(v4l2sl_profiles[i], &codec) < 0)
+            continue;
+        if (!cached_device(driver_data, codec))
+            continue;
         profiles[count++] = v4l2sl_profiles[i];
+    }
 
     *num_profiles = count;
     return VA_STATUS_SUCCESS;
@@ -111,14 +145,19 @@ v4l2sl_query_config_entrypoints(VADriverContextP ctx,
                                 VAEntrypoint *entrypoints,
                                 int *num_entrypoints)
 {
-    /* Check if profile is supported */
+    struct v4l2sl_driver_data *driver_data = ctx->pDriverData;
+    enum v4l2sl_codec codec;
     int supported = 0;
+
     for (unsigned i = 0; i < NUM_PROFILES; i++) {
         if (v4l2sl_profiles[i] == profile) {
             supported = 1;
             break;
         }
     }
+    if (supported && codec_for_profile(profile, &codec) == 0 &&
+        !cached_device(driver_data, codec))
+        supported = 0;
 
     if (!supported) {
         *num_entrypoints = 0;
@@ -174,20 +213,26 @@ v4l2sl_create_config(VADriverContextP ctx,
     struct v4l2sl_driver_data *driver_data = ctx->pDriverData;
     struct v4l2sl_config *config;
 
-    /* Find the codec and device for this profile */
-    const char *device_path = NULL;
-    enum v4l2sl_codec codec = V4L2SL_CODEC_H264;
+    const char *device_path;
+    enum v4l2sl_codec codec;
+    uint32_t fourcc;
+    char fcc[5];
 
-    for (unsigned i = 0; i < sizeof(profile_device_map)/sizeof(profile_device_map[0]); i++) {
-        if (profile_device_map[i].profile == profile) {
-            device_path = profile_device_map[i].device_path;
-            codec = profile_device_map[i].codec;
-            break;
-        }
-    }
-
-    if (!device_path)
+    if (codec_for_profile(profile, &codec) < 0)
         return VA_STATUS_ERROR_UNSUPPORTED_PROFILE;
+
+    device_path = cached_device(driver_data, codec);
+    if (!device_path) {
+        if (v4l2sl_codec_coded_fourcc(codec, &fourcc) == 0)
+            v4l2sl_fourcc_to_str(fourcc, fcc);
+        else
+            memcpy(fcc, "????", 5);
+        fprintf(stderr,
+                "v4l2stateless: no V4L2 stateless decoder advertises %s "
+                "(OUTPUT fourcc %s)\n",
+                v4l2sl_codec_name(codec), fcc);
+        return VA_STATUS_ERROR_OPERATION_FAILED;
+    }
 
     config = calloc(1, sizeof(*config));
     if (!config)
@@ -197,6 +242,8 @@ v4l2sl_create_config(VADriverContextP ctx,
     config->entrypoint = entrypoint;
     config->codec = codec;
     config->device_path = device_path;
+    fprintf(stderr, "v4l2stateless: %s config uses %s\n",
+            v4l2sl_codec_name(codec), device_path);
 
     /* Parse RT format from attribs */
     config->rt_format = VA_RT_FORMAT_YUV420;
@@ -473,8 +520,16 @@ v4l2sl_create_context(VADriverContextP ctx,
         return VA_STATUS_ERROR_OPERATION_FAILED;
     }
 
-    /* Open media device for request API */
+    /* Open media device for request API (sysfs, not /dev/mediaN == videoN) */
     context->media_fd = v4l2sl_open_media_for_device(context->device_path);
+    if (context->media_fd < 0) {
+        fprintf(stderr, "v4l2stateless: no media request node for %s\n",
+                context->device_path);
+        close(context->v4l2_fd);
+        free(context->render_targets);
+        free(context);
+        return VA_STATUS_ERROR_OPERATION_FAILED;
+    }
 
     /* Determine V4L2 codec format */
     uint32_t v4l2_format;
@@ -1291,13 +1346,14 @@ v4l2sl_init(VADriverContextP ctx)
     pthread_mutex_init(&driver_data->lock, NULL);
     ctx->pDriverData = driver_data;
 
-    /* Open /dev/media0 for V4L2 request API */
-    driver_data->media_fd = open("/dev/media0", O_RDWR);
-    if (driver_data->media_fd < 0) {
-        fprintf(stderr, "v4l2stateless: failed to open /dev/media0: %s\n",
-                strerror(errno));
-        /* Non-fatal — we'll open per-device later */
-    }
+    v4l2sl_scan_decoder_paths(driver_data->dev_h264, driver_data->dev_hevc,
+                              driver_data->dev_av1, sizeof(driver_data->dev_h264));
+    fprintf(stderr, "v4l2stateless: probe H.264 -> %s\n",
+            driver_data->dev_h264[0] ? driver_data->dev_h264 : "(none)");
+    fprintf(stderr, "v4l2stateless: probe HEVC  -> %s\n",
+            driver_data->dev_hevc[0] ? driver_data->dev_hevc : "(none)");
+    fprintf(stderr, "v4l2stateless: probe AV1   -> %s\n",
+            driver_data->dev_av1[0] ? driver_data->dev_av1 : "(none)");
 
     /* Set context limits */
     ctx->max_profiles = NUM_PROFILES;
