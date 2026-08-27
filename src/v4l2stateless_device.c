@@ -17,6 +17,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <errno.h>
+#include <dirent.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <linux/media.h>
@@ -69,11 +70,34 @@ int v4l2sl_open_device(const char *path)
  */
 int v4l2sl_open_media_for_device(const char *video_path)
 {
-    /* Simple approach: try /dev/media0 */
-    /* A proper implementation would read /sys/class/video4linux/videoN/device/media* */
-    int fd = open("/dev/media0", O_RDWR);
+    /* /dev/videoN lives next to /dev/mediaM on the same platform device.
+     * Walk /sys/class/video4linux/<name>/device/media* to find the right one
+     * — AV1 is /dev/video4 → media3, rkvdec is /dev/video1 → media0. */
+    const char *base = strrchr(video_path, '/');
+    base = base ? base + 1 : video_path;
+
+    char sysdir[128];
+    snprintf(sysdir, sizeof(sysdir), "/sys/class/video4linux/%s/device", base);
+
+    char media_path[128] = "/dev/media0";
+    DIR *d = opendir(sysdir);
+    if (d) {
+        struct dirent *de;
+        while ((de = readdir(d))) {
+            if (strncmp(de->d_name, "media", 5) != 0)
+                continue;
+            snprintf(media_path, sizeof(media_path), "/dev/%s", de->d_name);
+            break;
+        }
+        closedir(d);
+    }
+
+    int fd = open(media_path, O_RDWR);
     if (fd < 0)
-        fprintf(stderr, "v4l2stateless: open /dev/media0: %s\n", strerror(errno));
+        fprintf(stderr, "v4l2stateless: open %s (for %s): %s\n",
+                media_path, video_path, strerror(errno));
+    else
+        fprintf(stderr, "v4l2stateless: media for %s is %s\n", video_path, media_path);
     return fd;
 }
 
@@ -104,6 +128,9 @@ int v4l2sl_setup_output_queue(int fd, uint32_t codec_format, int width, int heig
     fmt.fmt.pix_mp.pixelformat = codec_format;
     fmt.fmt.pix_mp.field = V4L2_FIELD_NONE;
     fmt.fmt.pix_mp.num_planes = 1;
+    /* AV1 on hantro wants sizeimage ~= coded luma size, not a 4MB guess. */
+    if (codec_format == V4L2_PIX_FMT_AV1_FRAME)
+        fmt.fmt.pix_mp.plane_fmt[0].sizeimage = (uint32_t)width * (uint32_t)height;
 
     if (xioctl(fd, VIDIOC_S_FMT, &fmt) < 0) {
         fprintf(stderr, "v4l2stateless: S_FMT output failed: %s\n", strerror(errno));
@@ -186,6 +213,44 @@ int v4l2sl_setup_capture_queue(int fd, int width, int height)
 }
 
 /*
+ * Start streaming on a queue — required after REQBUFS and before QBUF
+ * Returns 0 on success, -1 on error
+ */
+int v4l2sl_streamon(int fd, enum v4l2_buf_type type)
+{
+    if (xioctl(fd, VIDIOC_STREAMON, &type) < 0) {
+        fprintf(stderr, "v4l2stateless: STREAMON(type=%u) failed: %s\n",
+                type, strerror(errno));
+        return -1;
+    }
+    return 0;
+}
+
+/*
+ * Read back the driver-chosen capture geometry.
+ * The stride can be larger than the width (alignment) — image export must
+ * use these values, not the display dimensions.
+ */
+int v4l2sl_get_capture_geometry(int fd, uint32_t *w, uint32_t *h,
+                                uint32_t *stride, uint32_t *sizeimage)
+{
+    struct v4l2_format fmt = { 0 };
+    fmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
+
+    if (xioctl(fd, VIDIOC_G_FMT, &fmt) < 0) {
+        fprintf(stderr, "v4l2stateless: G_FMT capture failed: %s\n", strerror(errno));
+        return -1;
+    }
+
+    *w = fmt.fmt.pix_mp.width;
+    *h = fmt.fmt.pix_mp.height;
+    *stride = fmt.fmt.pix_mp.plane_fmt[0].bytesperline;
+    *sizeimage = fmt.fmt.pix_mp.plane_fmt[0].sizeimage;
+    return 0;
+}
+
+
+/*
  * Mmap all output buffers after REQBUFS
  * ptrs[] must be at least V4L2SL_NUM_OUTPUT_BUFS
  * Returns number of mmap'd buffers or -1 on error
@@ -244,10 +309,24 @@ int v4l2sl_queue_output(int fd, int buf_index,
     buf.request_fd = request_fd;
     buf.flags = V4L2_BUF_FLAG_REQUEST_FD;
 
-    /* Set timestamp */
+    /* Timestamp is in nanoseconds (µs-aligned). vb2 stores the timeval
+     * internally as ns again, so this must round-trip losslessly to match
+     * DPB reference_ts values — which live in the same ns domain. */
     buf.timestamp.tv_sec = timestamp / 1000000000ULL;
-    buf.timestamp.tv_usec = (timestamp % 1000000000ULL) / 1000;
+    buf.timestamp.tv_usec = (timestamp % 1000000000ULL) / 1000ULL;
 
+    /* hantro AV1 rejects QBUF unless plane length matches the mapped size. */
+    {
+        struct v4l2_buffer q = { 0 };
+        struct v4l2_plane qp[1] = { 0 };
+        q.type = V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE;
+        q.memory = V4L2_MEMORY_MMAP;
+        q.index = buf_index;
+        q.length = 1;
+        q.m.planes = qp;
+        if (xioctl(fd, VIDIOC_QUERYBUF, &q) == 0)
+            planes[0].length = qp[0].length;
+    }
     planes[0].bytesused = size;
 
     if (xioctl(fd, VIDIOC_QBUF, &buf) < 0) {
@@ -271,8 +350,12 @@ int v4l2sl_queue_capture(int fd, int buf_index, int request_fd)
     buf.index = buf_index;
     buf.length = 1;
     buf.m.planes = planes;
-    buf.request_fd = request_fd;
-    buf.flags = V4L2_BUF_FLAG_REQUEST_FD;
+    /* request_fd intentionally NOT set: only OUTPUT (bitstream) buffers are
+     * request objects. The CAPTURE queue does not support requests — binding
+     * one makes vb2 fail QBUF with EPERM. Capture buffers are queued bare;
+     * the decoder fills whichever capture buffer is available when the
+     * request on the OUTPUT side completes. */
+    (void)request_fd;
 
     if (xioctl(fd, VIDIOC_QBUF, &buf) < 0) {
         fprintf(stderr, "v4l2stateless: QBUF capture[%d] failed: %s\n", buf_index, strerror(errno));
@@ -349,6 +432,23 @@ int v4l2sl_set_request_controls(int request_fd, int v4l2_fd,
         return -1;
     }
 
+    return 0;
+}
+
+/*
+ * Set extended controls as plain (non-request) values. Some codecs bind
+ * stream-level controls globally — e.g. the rkvdec HEVC SPS rejects the
+ * request-scoped variant with EINVAL.
+ */
+int v4l2sl_set_global_controls(int v4l2_fd, struct v4l2_ext_controls *ctrls)
+{
+    ctrls->which = 0;  /* V4L2_CTRL_WHICH_CUR_VAL */
+
+    if (xioctl(v4l2_fd, VIDIOC_S_EXT_CTRLS, ctrls) < 0) {
+        fprintf(stderr, "v4l2stateless: S_EXT_CTRLS (global) failed: %s\n",
+                strerror(errno));
+        return -1;
+    }
     return 0;
 }
 
