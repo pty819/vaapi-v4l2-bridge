@@ -1,0 +1,5 @@
+/builddir/
+/verify/
+*.so
+*~
+.cache/
