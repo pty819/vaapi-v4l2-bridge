@@ -124,18 +124,28 @@ v4l2sl_query_config_profiles(VADriverContextP ctx,
 {
     struct v4l2sl_driver_data *driver_data = ctx->pDriverData;
     int count = 0;
+    /* Firefox vaapitest passes *num_profiles = 0 after allocating
+     * vaMaxNumProfiles() slots. Treat 0 as "use max_profiles". */
+    int cap = (num_profiles && *num_profiles > 0) ? *num_profiles
+                                                  : (int)NUM_PROFILES;
 
-    for (unsigned i = 0; i < NUM_PROFILES && count < *num_profiles; i++) {
+    if (!profiles)
+        cap = 0;
+
+    for (unsigned i = 0; i < NUM_PROFILES; i++) {
         enum v4l2sl_codec codec;
 
         if (codec_for_profile(v4l2sl_profiles[i], &codec) < 0)
             continue;
         if (!cached_device(driver_data, codec))
             continue;
-        profiles[count++] = v4l2sl_profiles[i];
+        if (count < cap)
+            profiles[count] = v4l2sl_profiles[i];
+        count++;
     }
 
-    *num_profiles = count;
+    if (num_profiles)
+        *num_profiles = count;
     return VA_STATUS_SUCCESS;
 }
 
@@ -165,10 +175,19 @@ v4l2sl_query_config_entrypoints(VADriverContextP ctx,
     }
 
     int count = 0;
-    for (unsigned i = 0; i < NUM_ENTRYPOINTS && count < *num_entrypoints; i++)
-        entrypoints[count++] = v4l2sl_entrypoints[i];
+    int cap = (num_entrypoints && *num_entrypoints > 0)
+                  ? *num_entrypoints : (int)NUM_ENTRYPOINTS;
 
-    *num_entrypoints = count;
+    if (!entrypoints)
+        cap = 0;
+    for (unsigned i = 0; i < NUM_ENTRYPOINTS; i++) {
+        if (count < cap)
+            entrypoints[count] = v4l2sl_entrypoints[i];
+        count++;
+    }
+
+    if (num_entrypoints)
+        *num_entrypoints = count;
     return VA_STATUS_SUCCESS;
 }
 
