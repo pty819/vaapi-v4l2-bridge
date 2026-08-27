@@ -122,7 +122,8 @@ static void h264_fill_dpb_entry(struct v4l2_h264_dpb_entry *dpb,
  * Translate VA-API picture parameters to V4L2 H.264 SPS
  */
 void h264_fill_sps(struct v4l2_ctrl_h264_sps *sps,
-                   const VAPictureParameterBufferH264 *pic)
+                   const VAPictureParameterBufferH264 *pic,
+                   VAProfile profile)
 {
     memset(sps, 0, sizeof(*sps));
 
@@ -136,10 +137,19 @@ void h264_fill_sps(struct v4l2_ctrl_h264_sps *sps,
     sps->pic_width_in_mbs_minus1 = pic->picture_width_in_mbs_minus1;
     sps->pic_height_in_map_units_minus1 = pic->picture_height_in_mbs_minus1;
 
-    /* profile_idc and level_idc are not in VA-API's VAPictureParameterBufferH264
-     * directly. We use reasonable defaults for H.264 Main/High. */
-    sps->profile_idc = 100;  /* High profile (covers both Main and High) */
-    sps->constraint_set_flags = 0;
+    /* profile_idc / constraint_set are not in VA picture params; take them
+     * from the VA config profile ffmpeg selected for this stream. */
+    if (profile == VAProfileH264ConstrainedBaseline) {
+        sps->profile_idc = 66;  /* Baseline */
+        sps->constraint_set_flags = V4L2_H264_SPS_CONSTRAINT_SET0_FLAG |
+                                    V4L2_H264_SPS_CONSTRAINT_SET1_FLAG;
+    } else if (profile == VAProfileH264Main) {
+        sps->profile_idc = 77;
+        sps->constraint_set_flags = 0;
+    } else {
+        sps->profile_idc = 100; /* High */
+        sps->constraint_set_flags = 0;
+    }
     sps->level_idc = 40;     /* Level 4.0 (covers 1080p) */
 
     sps->flags = h264_sps_flags(pic);
@@ -393,7 +403,7 @@ VAStatus v4l2sl_h264_translate(struct v4l2sl_context *ctx,
      * the first few frames (with no references) will work fine.
      * Multi-reference decoding needs the actual timestamps. */
 
-    h264_fill_sps(&sps, pic_param);
+    h264_fill_sps(&sps, pic_param, ctx->profile);
     h264_fill_pps(&pps, pic_param, slice_param);
     h264_fill_decode_params(&dec, pic_param, ctx->driver_data, slice_param);
 

@@ -30,6 +30,7 @@ static pthread_mutex_t g_v4l2sl_lock = PTHREAD_MUTEX_INITIALIZER;
 
 /* Supported profiles */
 static const VAProfile v4l2sl_profiles[] = {
+    VAProfileH264ConstrainedBaseline,
     VAProfileH264Main,
     VAProfileH264High,
     VAProfileHEVCMain,
@@ -51,6 +52,7 @@ static const struct {
     VAProfile profile;
     unsigned int rt_format;
 } profile_rt_formats[] = {
+    { VAProfileH264ConstrainedBaseline, VA_RT_FORMAT_YUV420 },
     { VAProfileH264Main,       VA_RT_FORMAT_YUV420 },
     { VAProfileH264High,       VA_RT_FORMAT_YUV420 },
     { VAProfileHEVCMain,       VA_RT_FORMAT_YUV420 },
@@ -63,6 +65,7 @@ static const struct {
     VAProfile profile;
     enum v4l2sl_codec codec;
 } profile_codec_map[] = {
+    { VAProfileH264ConstrainedBaseline, V4L2SL_CODEC_H264 },
     { VAProfileH264Main,    V4L2SL_CODEC_H264 },
     { VAProfileH264High,    V4L2SL_CODEC_H264 },
     { VAProfileHEVCMain,    V4L2SL_CODEC_HEVC },
@@ -527,6 +530,7 @@ v4l2sl_create_context(VADriverContextP ctx,
 
     if (config) {
         context->codec = config->codec;
+        context->profile = config->profile;
         context->device_path = config->device_path;
     }
 

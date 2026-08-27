@@ -69,6 +69,7 @@ struct v4l2sl_context {
     VAContextID context_id;
     VAConfigID config_id;
     enum v4l2sl_codec codec;
+    VAProfile profile;
     const char *device_path;
     struct v4l2sl_driver_data *driver_data;  /* back-pointer for surface lookup */
     int width;
@@ -167,7 +168,8 @@ int v4l2sl_set_global_controls(int v4l2_fd, struct v4l2_ext_controls *ctrls);
 int v4l2sl_submit_request(int request_fd);
 
 /* H.264 translation (v4l2stateless_h264.c) */
-void h264_fill_sps(struct v4l2_ctrl_h264_sps *sps, const VAPictureParameterBufferH264 *pic);
+void h264_fill_sps(struct v4l2_ctrl_h264_sps *sps, const VAPictureParameterBufferH264 *pic,
+                    VAProfile profile);
 void h264_fill_pps(struct v4l2_ctrl_h264_pps *pps, const VAPictureParameterBufferH264 *pic,
                     const VASliceParameterBufferH264 *slice);
 void h264_fill_decode_params(struct v4l2_ctrl_h264_decode_params *dec,
