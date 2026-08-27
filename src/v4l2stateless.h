@@ -111,6 +111,15 @@ struct v4l2sl_context {
 
     /* Frame counter for V4L2 timestamps (DPB reference matching) */
     uint64_t frame_count;
+
+    /* AV1 refresh_frame_flags inference: VA does not expose the bitmask.
+     * 0 = unknown, 1 = libaom-style (free slots from index 1),
+     * 2 = SVT-AV1 RA pyramid. */
+    uint8_t av1_style;
+    uint8_t av1_gop;           /* first hidden ARF order_hint (mini-GOP) */
+    uint8_t av1_l0_toggle;     /* SVT L0 slots 0-1-2 */
+    uint8_t av1_l1_toggle;     /* SVT L1 slots 3-4 */
+    uint8_t av1_have_first_arf;
 };
 
 /* Driver global state */

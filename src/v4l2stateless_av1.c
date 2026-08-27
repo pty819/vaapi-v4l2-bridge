@@ -217,55 +217,146 @@ static uint8_t av1_surface_level1(struct v4l2sl_driver_data *dd, VASurfaceID sid
     return s ? s->av1_level1 : 0;
 }
 
-static uint8_t av1_infer_refresh_flags(const VADecPictureParameterBufferAV1 *pic,
-                                       struct v4l2sl_driver_data *dd)
+#define AV1_STYLE_UNKNOWN 0
+#define AV1_STYLE_LIBAOM  1
+#define AV1_STYLE_SVT     2
+
+static int av1_slot_is_dup(const VASurfaceID sids[8], int i)
 {
-    uint8_t ft = pic->pic_info_fields.bits.frame_type;
-    VASurfaceID sids[8];
-    uint32_t hints[8];
-    uint8_t level1[8];
-    unsigned bits_minus_1 = pic->order_hint_bits_minus_1;
-    uint32_t cur = pic->order_hint;
-    int i, j;
-    int update_arf;
-    int arf_count = 0;
-    int oldest_arf_order = 0x7fffffff, oldest_arf_idx = -1;
-    int oldest_order = 0x7fffffff, oldest_idx = -1;
+    int j;
 
-    if (ft == V4L2_AV1_KEY_FRAME ||
-        ft == V4L2_AV1_SWITCH_FRAME ||
-        ft == V4L2_AV1_INTRA_ONLY_FRAME)
-        return 0xff;
+    if (sids[i] == VA_INVALID_SURFACE)
+        return 1;
+    for (j = 0; j < i; j++) {
+        if (sids[j] == sids[i])
+            return 1;
+    }
+    return 0;
+}
+
+static int av1_unique_sid_count(const VASurfaceID sids[8])
+{
+    int n = 0, i, j;
 
     for (i = 0; i < 8; i++) {
-        sids[i] = pic->ref_frame_map[i];
-        hints[i] = av1_surface_order_hint(dd, sids[i]);
-        level1[i] = av1_surface_level1(dd, sids[i]);
-    }
-
-    /* Overlay / show-existing of an ARF already sitting in the DPB. */
-    for (i = 0; i < 8; i++) {
-        if (sids[i] != VA_INVALID_SURFACE && hints[i] == cur)
-            return 0;
-    }
-
-    /* Duplicate copies of the same surface (leftover from KEY filling
-     * every slot) are encoder "empty" map entries. libaom
-     * get_free_ref_map_index() takes the first of those. */
-    for (i = 1; i < 8; i++) {
         if (sids[i] == VA_INVALID_SURFACE)
             continue;
+        for (j = 0; j < i; j++) {
+            if (sids[j] == sids[i])
+                break;
+        }
+        if (j == i)
+            n++;
+    }
+    return n;
+}
+
+/* First slot of the most-duplicated surface (KEY copies after 0xff). */
+static uint8_t av1_most_dup_first(const VASurfaceID sids[8],
+                                 const uint32_t hints[8])
+{
+    int i, j, best = -1, best_count = 1, best_oh = 0x7fffffff;
+
+    for (i = 0; i < 8; i++) {
+        int count;
+
+        if (sids[i] == VA_INVALID_SURFACE)
+            continue;
+        for (j = 0; j < i; j++) {
+            if (sids[j] == sids[i])
+                break;
+        }
+        if (j != i)
+            continue;
+        count = 1;
+        for (j = i + 1; j < 8; j++) {
+            if (sids[j] == sids[i])
+                count++;
+        }
+        if (count > best_count ||
+            (count == best_count && count > 1 && (int)hints[i] < best_oh)) {
+            best_count = count;
+            best_oh = (int)hints[i];
+            best = i;
+        }
+    }
+    if (best < 0 || best_count <= 1)
+        return 0;
+    return (uint8_t)(1u << best);
+}
+
+static uint8_t av1_first_dup_from(const VASurfaceID sids[8], int start)
+{
+    int i, j;
+
+    for (i = start; i < 8; i++) {
+        if (sids[i] == VA_INVALID_SURFACE)
+            return (uint8_t)(1u << i);
         for (j = 0; j < i; j++) {
             if (sids[j] == sids[i])
                 return (uint8_t)(1u << i);
         }
     }
+    return 0;
+}
 
-    /* libaom get_refresh_idx(): skip the 3 closest previous + future
-     * frames; prefer evicting the oldest non-level-1, unless this is a
-     * new level-1 ARF and more than two ARFs already live. */
-    update_arf = !pic->pic_info_fields.bits.show_frame &&
-                 !pic->mode_control_fields.bits.skip_mode_present;
+/* Hidden ARF still to decode in this mini-GOP (even order_hint > cur). */
+static int av1_svt_pending_arf(const uint32_t hints[8], uint32_t cur, uint32_t gop)
+{
+    int i, arf;
+
+    if (gop < 8)
+        gop = 8;
+    for (arf = 2; arf < (int)gop; arf += 2) {
+        int live = 0;
+
+        if (arf <= (int)cur)
+            continue;
+        for (i = 0; i < 8; i++) {
+            if ((int)hints[i] == arf)
+                live = 1;
+        }
+        if (!live)
+            return 1;
+    }
+    return 0;
+}
+
+/* SVT RA temporal layer from order_hint modulo mini-GOP. */
+static int av1_svt_tl(uint32_t oh, uint32_t gop)
+{
+    unsigned pos, x, v, logg, g;
+
+    if (!gop)
+        return 0;
+    pos = oh % gop;
+    if (pos == 0)
+        return 0;
+    g = gop;
+    logg = 0;
+    while (g > 1) {
+        g >>= 1;
+        logg++;
+    }
+    x = pos;
+    v = 0;
+    while ((x & 1) == 0) {
+        x >>= 1;
+        v++;
+    }
+    return (int)logg - (int)v;
+}
+
+static uint8_t av1_get_refresh_idx(const VASurfaceID sids[8],
+                                  const uint32_t hints[8],
+                                  const uint8_t level1[8],
+                                  uint32_t cur, unsigned bits_minus_1,
+                                  int update_arf)
+{
+    int i;
+    int arf_count = 0;
+    int oldest_arf_order = 0x7fffffff, oldest_arf_idx = -1;
+    int oldest_order = 0x7fffffff, oldest_idx = -1;
 
     for (i = 0; i < 8; i++) {
         int order, dist;
@@ -274,7 +365,7 @@ static uint8_t av1_infer_refresh_flags(const VADecPictureParameterBufferAV1 *pic
             continue;
         order = (int)hints[i];
         dist = av1_relative_dist((unsigned)order, cur, bits_minus_1);
-        /* Keep future frames and three closest previous (disp > cur-3). */
+        /* Keep future frames and three closest previous. */
         if (dist > -3)
             continue;
         if (level1[i]) {
@@ -296,7 +387,173 @@ static uint8_t av1_infer_refresh_flags(const VADecPictureParameterBufferAV1 *pic
         return (uint8_t)(1u << oldest_idx);
     if (oldest_arf_idx >= 0)
         return (uint8_t)(1u << oldest_arf_idx);
-    return 0x01;
+    return 0;
+}
+
+static uint8_t av1_infer_refresh_libaom(const VASurfaceID sids[8],
+                                       const uint32_t hints[8],
+                                       const uint8_t level1[8],
+                                       uint32_t cur, unsigned bits_minus_1,
+                                       int show, int skip)
+{
+    uint8_t r;
+
+    r = av1_first_dup_from(sids, 1);
+    if (r)
+        return r;
+    r = av1_get_refresh_idx(sids, hints, level1, cur, bits_minus_1,
+                            !show && !skip);
+    return r ? r : 0x01;
+}
+
+static uint8_t av1_svt_layer_slot(struct v4l2sl_context *ctx, uint32_t cur)
+{
+    int tl = av1_svt_tl(cur, ctx->av1_gop);
+    uint8_t slot;
+
+    switch (tl) {
+    case 0:
+        slot = ctx->av1_l0_toggle;
+        ctx->av1_l0_toggle = (uint8_t)((ctx->av1_l0_toggle + 1) % 3);
+        return (uint8_t)(1u << slot);
+    case 1:
+        slot = (uint8_t)(3 + ctx->av1_l1_toggle);
+        ctx->av1_l1_toggle ^= 1;
+        return (uint8_t)(1u << slot);
+    case 2:
+        return 0x20; /* slot 5 */
+    case 3:
+        return 0x40; /* slot 6 */
+    default:
+        return 0x80; /* slot 7 */
+    }
+}
+
+static uint8_t av1_infer_refresh_svt(const VASurfaceID sids[8],
+                                    const uint32_t hints[8],
+                                    const uint8_t level1[8],
+                                    uint32_t cur, unsigned bits_minus_1,
+                                    int show, int skip,
+                                    struct v4l2sl_context *ctx)
+{
+    uint8_t r;
+    int bit;
+    uint32_t gop = ctx ? ctx->av1_gop : 8;
+
+    /* Shown highest-layer leaf while a later even ARF is still pending. */
+    if (show && skip && (cur & 1) && av1_svt_pending_arf(hints, cur, gop))
+        return 0;
+
+    if (!show) {
+        if (ctx && !ctx->av1_have_first_arf) {
+            ctx->av1_have_first_arf = 1;
+            ctx->av1_gop = (uint8_t)(cur ? cur : 8);
+            ctx->av1_l0_toggle = 1;
+            ctx->av1_l1_toggle = 0;
+            r = av1_most_dup_first(sids, hints);
+            return r ? r : 0x01;
+        }
+        /* mini-GOP 16/32: SVT layer-to-slot map (L0:0-1-2, L1:3-4, L2:5, L3:6). */
+        if (ctx && ctx->av1_gop >= 16)
+            return av1_svt_layer_slot(ctx, cur);
+
+        /* Cut-short / 8-frame mini-GOP: occupancy. */
+        if (av1_unique_sid_count(sids) == 2 && av1_slot_is_dup(sids, 3))
+            return 0x08;
+        r = av1_most_dup_first(sids, hints);
+        if (r)
+            return r;
+        r = av1_get_refresh_idx(sids, hints, level1, cur, bits_minus_1,
+                                !show && !skip);
+        return r ? r : 0x01;
+    }
+
+    r = av1_get_refresh_idx(sids, hints, level1, cur, bits_minus_1,
+                            !show && !skip);
+    if (!r)
+        r = av1_first_dup_from(sids, 0);
+    if (!r)
+        r = 0x01;
+    /* Shown ref overwriting KEY: prefer L1 slots 4 then 3 if they still
+     * hold a KEY copy (matches SVT lay1 3–4). */
+    bit = 0;
+    while (bit < 8 && !((r >> bit) & 1))
+        bit++;
+    if (bit < 8 && hints[bit] == 0) {
+        if (av1_slot_is_dup(sids, 4) && hints[4] == 0)
+            return 0x10;
+        if (av1_slot_is_dup(sids, 3) && hints[3] == 0)
+            return 0x08;
+    }
+    return r;
+}
+
+/*
+ * VA-API does not expose refresh_frame_flags. Reconstruct the bitmask
+ * from DPB occupancy (ref_frame_map + per-surface order_hint).
+ *
+ * libaom pyramids: free duplicate slots starting at index 1 (KEY stays
+ * in slot 0), then get_refresh_idx.
+ * SVT-AV1 RA pyramids: first hidden ARF overwrites slot 0, non-ref
+ * shown leaves have refresh=0, second ARF uses GOLDEN (slot 3).
+ * Style is latched from the first inter after a KEY.
+ */
+static uint8_t av1_infer_refresh_flags(const VADecPictureParameterBufferAV1 *pic,
+                                       struct v4l2sl_driver_data *dd,
+                                       struct v4l2sl_context *ctx)
+{
+    uint8_t ft = pic->pic_info_fields.bits.frame_type;
+    VASurfaceID sids[8];
+    uint32_t hints[8];
+    uint8_t level1[8];
+    unsigned bits_minus_1 = pic->order_hint_bits_minus_1;
+    uint32_t cur = pic->order_hint;
+    int i;
+    int show = pic->pic_info_fields.bits.show_frame;
+    int skip = pic->mode_control_fields.bits.skip_mode_present;
+
+    if (ft == V4L2_AV1_KEY_FRAME ||
+        ft == V4L2_AV1_SWITCH_FRAME ||
+        ft == V4L2_AV1_INTRA_ONLY_FRAME) {
+        if (ctx) {
+            ctx->av1_style = AV1_STYLE_UNKNOWN;
+            ctx->av1_gop = 0;
+            ctx->av1_l0_toggle = 0;
+            ctx->av1_l1_toggle = 0;
+            ctx->av1_have_first_arf = 0;
+        }
+        return 0xff;
+    }
+
+    for (i = 0; i < 8; i++) {
+        sids[i] = pic->ref_frame_map[i];
+        hints[i] = av1_surface_order_hint(dd, sids[i]);
+        level1[i] = av1_surface_level1(dd, sids[i]);
+    }
+
+    /* Overlay / show-existing of an ARF already sitting in the DPB. */
+    for (i = 0; i < 8; i++) {
+        if (sids[i] != VA_INVALID_SURFACE && hints[i] == cur)
+            return 0;
+    }
+
+    if (ctx && ctx->av1_style == AV1_STYLE_UNKNOWN &&
+        ft == V4L2_AV1_INTER_FRAME && !show) {
+        /* SVT RA: first picture after KEY is a showable hidden ARF that
+         * still uses LAST's CDF. libaom's filtered ARF is not showable
+         * and uses primary_ref_frame = 7 (none). */
+        if (pic->pic_info_fields.bits.showable_frame &&
+            pic->primary_ref_frame != 7)
+            ctx->av1_style = AV1_STYLE_SVT;
+        else
+            ctx->av1_style = AV1_STYLE_LIBAOM;
+    }
+
+    if (ctx && ctx->av1_style == AV1_STYLE_SVT)
+        return av1_infer_refresh_svt(sids, hints, level1, cur, bits_minus_1,
+                                     show, skip, ctx);
+    return av1_infer_refresh_libaom(sids, hints, level1, cur, bits_minus_1,
+                                    show, skip);
 }
 
 static void av1_fill_frame_params(struct v4l2_ctrl_av1_frame *frame,
@@ -508,7 +765,7 @@ static void av1_fill_frame_params(struct v4l2_ctrl_av1_frame *frame,
             av1_surface_order_hint(dd, sid);
     }
 
-    frame->refresh_frame_flags = av1_infer_refresh_flags(pic, dd);
+    frame->refresh_frame_flags = av1_infer_refresh_flags(pic, dd, ctx);
 
     frame->flags = 0;
     if (pic->pic_info_fields.bits.show_frame)
