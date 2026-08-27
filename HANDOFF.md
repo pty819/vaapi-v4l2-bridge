@@ -1,24 +1,26 @@
 # HANDOFF — VA-API → V4L2-stateless 桥接层
 
-写于 **2026-08-27 10:25 +0800**。机器：Orange Pi 5 NAS `192.168.1.21`，Armbian 26.8.3，kernel **7.1.8-edge-rockchip64**。
+写于 **2026-08-27**。机器：Orange Pi 5 NAS `192.168.1.21`，Armbian 26.8.3，kernel **7.1.8-edge-rockchip64**。
 
-AV1 inter 已接上：`/tmp/av1.mp4` 前 8 帧（含 P）与前 49 帧 VA-API `hwdownload` framemd5 对软解；同机 GStreamer `v4l2slav1dec` 这 49 帧也对齐。4K 8-bit H.264 High（3840×2160，8 帧）同样 bit-exact。H.264/HEVC 1080p 120 帧回归仍绿。
+全量矩阵 `tests/run_full_matrix.sh`：**PASS=22 FAIL=0**。Git 仓库在 NAS：`https://github.com/pty819/vaapi-v4l2-bridge.git`。
 
-安装 `.so`：`/usr/lib/aarch64-linux-gnu/dri/v4l2stateless_drv_video.so`（2026-08-27 10:18）。回归脚本：`tests/vaapi_hwdownload.sh`。
+安装 `.so`：`/usr/lib/aarch64-linux-gnu/dri/v4l2stateless_drv_video.so`。
 
 ---
 
 ## 一句话
 
-C 驱动 `v4l2stateless_drv_video.so` 已经能把 ffmpeg VA-API 硬解接到主线 V4L2-stateless：
+C 驱动 `v4l2stateless_drv_video.so` 把 ffmpeg VA-API 硬解接到主线 V4L2-stateless。节点按 OUTPUT fourcc 选，不写死 `/dev/videoN`。
 
 | 编码 | 设备 | 状态 |
 |---|---|---|
-| H.264 | rkvdec `/dev/video1` | **完成**：三路 1080p 各 120/120 framemd5 |
-| HEVC 8-bit Main | 同上 | **完成**：Main + WPP 各 120/120 |
-| AV1 8-bit | hantro `/dev/video4` + `/dev/media3` | **完成**：`/tmp/av1.mp4` 前 8 帧与前 49 帧 hwdownload framemd5 均对软解 |
+| H.264 CB / Main / High | rkvdec `/dev/video1` | **完成**：含 B / 全 P / 4-slice / 4K / QCIF |
+| HEVC 8-bit Main | 同上 | **完成**：Main + WPP + 4K |
+| AV1 8-bit Profile0 | hantro `/dev/video4` + `/dev/media3` | **完成**：libaom、libaom realtime、SVT-AV1 RA、4K |
+| VP8 | hantro `/dev/video2` | **完成**：480p / 720p vs ffmpeg SW |
+| MPEG-2 Simple / Main | 同上 `/dev/video2` | **完成**：vs GStreamer `v4l2slmpeg2dec`（hantro IDCT ≠ ffmpeg SW） |
 
-约束没变：只走主线 edge，禁止 vendor/BSP/MPP；成功判定必须是 `hwdownload` 后的 framemd5，禁止把静默软解当硬解成功。
+约束没变：只走主线 edge，禁止 vendor/BSP/MPP；成功判定必须是 `hwdownload` 后的 framemd5（MPEG-2 对 GST），禁止把静默软解当硬解成功。
 
 ---
 
@@ -29,12 +31,13 @@ C 驱动 `v4l2stateless_drv_video.so` 已经能把 ffmpeg VA-API 硬解接到主
 | NAS 工程 | `/home/liyifan/vaapi-v4l2-bridge/` |
 | NAS 源码 | `~/vaapi-v4l2-bridge/src/` |
 | NAS 构建 | `~/vaapi-v4l2-bridge/builddir/`（meson + ninja） |
-| 已安装 .so | `/usr/lib/aarch64-linux-gnu/dri/v4l2stateless_drv_video.so`（2026-08-27 09:26，206784 bytes） |
+| 已安装 .so | `/usr/lib/aarch64-linux-gnu/dri/v4l2stateless_drv_video.so` |
 | Mac 工作副本 | `~/v4l2bridge-dev/`（改完 scp 到 NAS 再 ninja） |
 | 探针 / dump | Mac `~/v4l2bridge-dev/{ioctlspy.c,ctrldiff.py,av1probe.c,dumpdec.c}` |
 | ffmpeg | **apt** `/usr/bin/ffmpeg` `7:8.0.1-3ubuntu2`，不是本地编的 |
 | 驱动选择 | `~/.profile`：`export LIBVA_DRIVER_NAME=v4l2stateless` |
-| SSH | `liyifan@192.168.1.21`（密钥）；sudo 密码 `liyifan` |
+| SSH | `liyifan@192.168.1.21`（密钥） |
+| git | NAS 仓库 `master` → `origin` = `https://github.com/pty819/vaapi-v4l2-bridge.git` |
 
 构建 / 安装：
 
@@ -50,36 +53,39 @@ Mac → NAS：
 scp ~/v4l2bridge-dev/v4l2stateless_av1.c liyifan@192.168.1.21:~/vaapi-v4l2-bridge/src/
 ```
 
-git：仓库在 NAS 上，`master`，工作树脏（C 驱动整段是未提交改动）。最近提交仍是六月骨架文档，**不要把 git log 当当前实现**。
+全量矩阵（写 `verify/`，已 gitignore）：
+
+```bash
+bash ~/vaapi-v4l2-bridge/tests/run_full_matrix.sh
+```
 
 ---
 
 ## 验证方法（唯一有效）
 
-不要用裸 `-f framemd5`。ffmpeg 硬解失败时会静默回软解，hash 会对、硬件没干活。
+不要用裸 `-f framemd5`。ffmpeg 硬解失败时会静默回软解，hash 会对、硬件没干活。矩阵脚本还会拒绝 `hardware accelerator failed` / `Failed to query surface attributes`，并要求日志里出现 `v4l2stateless: .* config uses /dev/video`。
 
 ```bash
 LIBVA_DRIVER_NAME=v4l2stateless /usr/bin/ffmpeg \
   -hwaccel vaapi -hwaccel_output_format vaapi -vaapi_device /dev/dri/renderD128 \
-  -i FILE.mp4 -vf "hwdownload,format=nv12" -pix_fmt yuv420p -frames:v N \
+  -i FILE -vf "hwdownload,format=nv12" -pix_fmt yuv420p -frames:v N \
   -f framemd5 -y /tmp/hw.md5
 
-/usr/bin/ffmpeg -i FILE.mp4 -pix_fmt yuv420p -frames:v N -f framemd5 -y /tmp/sw.md5
+/usr/bin/ffmpeg -i FILE -pix_fmt yuv420p -frames:v N -f framemd5 -y /tmp/sw.md5
 diff -u /tmp/sw.md5 /tmp/hw.md5
 ```
 
-同时看 stderr：不能出现 `hardware accelerator failed` / `Failed to query surface attributes`。`derive_image: surface N has no decoded frame` 在第一帧前出现过一次，目前不影响后续比对。
+MPEG-2 对 GStreamer，不要对 ffmpeg SW：
 
-测试流（都在 NAS `/tmp/`）：
+```bash
+gst-launch-1.0 filesrc location=FILE ! parsebin ! v4l2slmpeg2dec ! \
+  videoconvert ! video/x-raw,format=I420 ! \
+  checksumsink eos-after=N hash=md5
+```
 
-| 文件 | 内容 |
-|---|---|
-| `hs_test.mp4` | H.264 1080p30 High + B 帧 |
-| `allp.mp4` | H.264 1080p30 High，无 B |
-| `ms.mp4` | H.264 1080p30 4-slice |
-| `hevc.mp4` | HEVC 1080p30 Main |
-| `hevcwpp.mp4` | HEVC 1080p30 WPP |
-| `av1.mp4` | AV1 1080p30，GOP = I 后全 P |
+`derive_image: surface N has no decoded frame` 在第一帧前出现过一次，不影响后续比对。
+
+测试流生成在 NAS `~/vaapi-v4l2-bridge/verify/clips/`（gitignored）。
 
 ---
 
@@ -87,7 +93,7 @@ diff -u /tmp/sw.md5 /tmp/hw.md5
 
 两路都走 rkvdec **frame-based** UAPI（kernel 7.0+），不是 slice-based。
 
-关键运行时（六月骨架里缺的，后来补上的）：
+关键运行时：
 
 - 两边队列 `VIDIOC_STREAMON`（HEVC/AV1 要等全局 SPS/sequence 之后）
 - Capture QBUF **不能**带 `V4L2_BUF_FLAG_REQUEST_FD`（带了 vb2 直接 EPERM）
@@ -98,97 +104,43 @@ diff -u /tmp/sw.md5 /tmp/hw.md5
 - recycle 只改用户态池，不再 QBUF 一次（否则和 decode 路径第二次 QBUF 撞 EINVAL）
 - Capture 几何写回 surface（HEVC 1080 显示、1088 对齐，`vaGetImage` 用错高度会 chroma 错 15360 字节）
 
-H.264 特有：DPB `VALID|ACTIVE`；`FLAG_PFRAME`/`FLAG_BFRAME`/`IDR`（I + `frame_num==0`，这套 libva **没有** `idr_pic_flag`）；PPS `num_ref_idx` 来自 slice；DPB 按 `frame_num` 插入排序；Annex B start code；多 slice 拼接。
+H.264 特有：DPB `VALID|ACTIVE`；`FLAG_PFRAME`/`FLAG_BFRAME`/`IDR`（I + `frame_num==0`，这套 libva **没有** `idr_pic_flag`）；PPS `num_ref_idx` 来自 slice；DPB 按 `frame_num` 插入排序；Annex B start code；多 slice 拼接。已 advertise Constrained Baseline。
 
 HEVC 特有：SPS 是 **全局** control（`which=0`），绑 request 会 ioctl 成功但设备没配上；PCM 关闭时字段必须是 0 不是 0xff；`chroma_format_idc` 来自 `pic_fields`；`UNIFORM_SPACING`；scaling 填全 16；DPB 按 POC 分 StCurrBefore/After。
 
 ---
 
-## AV1（已完成到 49 帧 / 本测试片）
+## AV1（refresh_frame_flags 推断）
 
-VA 不暴露 `refresh_frame_flags`。驱动用 DPB 占用（`ref_frame_map` + 每 surface 的 `order_hint` / `av1_level1`）重建 bitmask，对齐 libaom `get_free_ref_map_index`（KEY 填满 8 槽后的重复 surface 当空槽）和 `get_refresh_idx`（跳过未来帧和最近 3 个 previous，LEVEL-1 ARF 单独计）。KEY/SWITCH=`0xff`；overlay（当前 `order_hint` 已在 DPB）=`0`。
+VA **不暴露** `refresh_frame_flags`。驱动按第一帧 INTER 锁风格，再填 bitmask：
 
-`order_hints[]` 按 **ref type**（LAST=1…ALTREF=7）填，不是 DPB slot 下标。`skip_mode_frame[]` 按 spec 5.9.22 / ffmpeg `skip_mode_params()` 从 LAST..ALTREF 的 order hint 推，`skip_mode_frame[0]>0` 时置 `SKIP_MODE_ALLOWED`。
+| 风格 | 判定（KEY 之后第一帧 INTER） | refresh |
+|---|---|---|
+| `LIBAOM_RTC` | 第一帧 INTER **shown** | `1u << (order_hint % 6)`，槽 6–7 留 KEY |
+| `SVT` | 第一帧 INTER hidden + `showable` + `primary_ref_frame != 7` | shown 叶 = 0；第一个 hidden ARF 记下 GOP/L0；之后 `cur > av1_l0_oh` 为 L0；其余 hidden 用 `g = l0_oh - prev_l0_oh` 的层图 |
+| `LIBAOM` | 其它（filtered ARF：not showable，`primary_ref=7`） | DPB 占用 + `get_free_ref_map_index` / `get_refresh_idx`（8 槽 first_dup） |
 
-不要再为 ffmpeg 裸 tile 包 TILE_GROUP OBU。4K 请用 **High/Main** 编码；Constrained Baseline 本驱动没有 advertise，ffmpeg 会 `hwaccel initialisation returned error`。
+`order_hints[]` 按 **ref type**（LAST=1…ALTREF=7）填。`skip_mode_frame[]` 按 spec 5.9.22 / ffmpeg `skip_mode_params()` 推。
 
----
-
-## 进行中：AV1（历史，保留对照）
-
-设备：hantro `rockchip,rk3588-av1-vpu-dec` = `/dev/video4`，media 必须从 sysfs 解，**不是** `/dev/media0`：
+不要再为 ffmpeg 裸 tile 包 TILE_GROUP OBU。`tx_mode` 必须来自 VA `mode_control_fields`（留 0 = ONLY_4X4，关键帧也灰）。AV1 media 节点从 sysfs 解，**不是** `/dev/media0`：
 
 ```
 /sys/class/video4linux/video4/device/media*  →  /dev/media3
 ```
 
-硬编码 media0 时 request 分配在错误节点，OUTPUT QBUF 会 EINVAL。
+---
 
-### 2026-08-27 09:26 实测（`/tmp/av1.mp4` 前 8 帧）
+## VP8
 
-| 帧 | 软解 | 硬解 | |
-|---|---|---|---|
-| 0 (I) | `693ddf68750a001fb6c39be072726c68` | 同左 | **bit-exact** |
-| 1–7 (P) | 各不相同 | 各不相同 | 全错 |
+`src/v4l2stateless_vp8.c`。ffmpeg VA 给的是 **已经剥掉 uncompressed header** 的 payload（key 3 字节 / inter 10 字节）。hantro `cfg_parts()` 仍会自己 skip 那一段，所以驱动要把 header 长度加回 `first_part_size`，并按 *带 header 的码流* 填 `dct_part_sizes[]`。OUTPUT sizeimage ≈ luma。
 
-管线 120 帧都能跑完、无 ioctl 失败。以前整段近灰（Y≈0x80 vs 0x51）是 `tx_mode` 留 0（`ONLY_4X4`）。补 VA `mode_control_fields` 之后关键帧对了。
+---
 
-stderr 仍有一行：`v4l2stateless: derive_image: surface 1 has no decoded frame`（ffmpeg 在第一帧解码前 derive）。后面帧不再刷。
+## MPEG-2
 
-同机 GStreamer `v4l2slav1dec` 曾作为 ioctl 对照：前 49 帧对软解、从 49 开始分叉。那是 **GStreamer 自己的上限**，不是「我们也可以只做到 48」。本桥的验收仍是 ffmpeg VA-API 路径至少关键帧 + 随后若干 P 帧对软解。
+`src/v4l2stateless_mpeg2.c`。ffmpeg 每个 MB 行一片 slice；`pending_buffers` 必须 ≥ 1080p 的行数，以前 32 会静默丢片、I 帧花。现为 **256**。
 
-### 已填进 `v4l2stateless_av1.c` 的字段
-
-- sequence：profile / 尺寸 / bit_depth / 大部分 seq flags；`ENABLE_WARPED_MOTION` / `ENABLE_REF_FRAME_MVS` 在 `enable_order_hint` 时强制打开（VA sequence 没有这两位）
-- frame：`tx_mode`、`interpolation_filter`、show / showable / superres / high-precision-mv / reference_select / reduced_tx_set / skip_mode_present
-- tile_info：uniform 时按 MI 均分；`mi_rows = ceil(h/4)`，1080 → 270
-- quant / loop filter（含 `ref_deltas`/`mode_deltas`/`delta_q`/`delta_lf`）
-- CDEF packed strengths
-- segmentation（flags + `feature_mask` + `feature_data`）
-- loop restoration + `loop_restoration_size`（256 >> `lr_unit_shift`）
-- global motion：VA `wm[0..6]` → V4L2 slot `1..7`（INTRA=0 保持 identity）
-- film grain：从 `VAFilmGrainStructAV1` 填，不再永远 memset 0
-- bitstream：ffmpeg 给的是 **裸 tile payload**（`raw_tile_group->tile_data`），`tile_offset = slice_data_offset`（通常 0）。GStreamer 走完整 TILE_GROUP OBU（约 14 字节头，`tile_offset=14`）。曾经加过自制 4 字节 OBU wrap，画面更灰，已撤回。
-
-### 还没填 / 填错，且足够让 P 帧烂掉
-
-内核 `rockchip_vpu981_hw_av1_dec.c` 用这些字段管参考和 CDF：
-
-1. **`refresh_frame_flags`** — VA **不暴露** bitmask。现在 KEY/SWITCH 填 `0xff`，P 帧填 **0**。内核 `rockchip_vpu981_av1_dec_update_prob()` / `store_cdfs()` 靠这个 bit 把熵上下文写进参考槽。P 帧 0 等于从不更新 CDF → 第 1 帧开始必错。libaom 常见 inter 只 refresh LAST（`0x01`），不要猜 `0xff`。
-2. **`order_hints[8]`** — VA 只有当前帧 `order_hint`。内核 `get_order_hint()` 从自己的 `frame_refs[]` 读，但 `av1_dec_frame_ref()` 仍会把 `frame->order_hints[]` 存进每个参考槽。应用侧应在 surface 上记住每帧的 hint，填 `order_hints[ref]`。
-3. **`skip_mode_frame[2]`** — 仍是 `{0,0}`。GStreamer 在 `skip_mode_frame[0] > 0` 时置 `SKIP_MODE_ALLOWED`。
-4. **surface `order_hint` 未存** — `v4l2sl_surface` 只有 `timestamp`。
-5. **TILE_GROUP OBU** — 关键帧裸 payload 已经对上，说明 ffmpeg 路径 **不需要** 14 字节头。不要再为了对齐 GStreamer dump 去包一层。P 帧若仍错，先查 refresh/CDF，再查码流。
-
-VA 也没有 `current_frame_id` / `buffer_removal_time` / `tile_size_bytes`。单 tile 1080p 目前看起来不是瓶颈（内核在 cols/rows log2 都为 0 时把 `tile_size_mag` 写成 3）。
-
-### 建议的下一步（按这个顺序，不要并行乱改）
-
-1. 给 `struct v4l2sl_surface` 加 `uint32_t order_hint`。在 `av1_fill_frame_params` 末尾把当前 `pic->order_hint` 写到 `current_surface`。
-2. 填 `frame->order_hints[i]`：对每个 `ref_frame_map[i]` 取该 surface 记下的 hint。
-3. 处理 `refresh_frame_flags`：
-   - 先试 inter = `0x01`（只 LAST）+ KEY/SWITCH = `0xff`
-   - 对照 GStreamer 同一 clip 的 FRAME control dump（`ioctlspy`）看真实 bitmask
-   - 不要继续留 0
-4. 按 spec 从 LAST/GOLDEN 的 order_hint 推 `skip_mode_frame[]`。
-5. 再跑 `/tmp/av1.mp4` 前 8 帧，然后 49 帧。目标：ffmpeg 硬解至少覆盖 GStreamer 能对上的那段。
-6. 只有 1 仍失败时才回头看 tile OBU / `tile_size_bytes`。
-
-ioctl 对照：
-
-```c
-// ~/v4l2bridge-dev/ioctlspy.c  — LD_PRELOAD，stderr 前缀 SPY:
-```
-
-GStreamer 源码对照（填 FRAME 的权威实现）：
-
-`https://github.com/GStreamer/gstreamer/blob/master/subprojects/gst-plugins-bad/sys/v4l2codecs/gstv4l2codecav1dec.c`
-
-内核对照：
-
-`drivers/media/platform/verisilicon/rockchip_vpu981_hw_av1_dec.c`
-
-ffmpeg VA-API AV1 怎么填 picture/slice（本机副本 `/tmp/vaapi_av1.c`，Mac 上也有）：裸 tile + `tile_offset` 相对该 buffer。
+hantro IDCT 与 ffmpeg SW 不对。验收只对同机 `v4l2slmpeg2dec`。framemd5 比 hash、不要比 SAR（GST 写 1/1，ffmpeg 常写 0/1）。
 
 ---
 
@@ -197,21 +149,34 @@ ffmpeg VA-API AV1 怎么填 picture/slice（本机副本 `/tmp/vaapi_av1.c`，Ma
 | 节点 | 角色 |
 |---|---|
 | `/dev/video1` | rkvdec H.264 / HEVC（frame-based） |
+| `/dev/video2` | hantro VP8 + MPEG-2 |
 | `/dev/video4` | hantro AV1 |
 | `/dev/media3` | AV1 的 media request 节点 |
-| `/dev/dri/renderD128` | VA-API render 节点（桥假装成 libva 驱动） |
+| `/dev/dri/renderD128` | VA-API render 节点 |
 
 RK3588 主线到 7.1：解码这条能用。缺摄像头、编码器、DDR 变频、suspend。不要为了编解码去刷 vendor kernel。
 
 ---
 
+## 上游调研（2026-08-26）：为什么必须自己做
+
+结论：**上游不存在可用的 VA-API ↔ V4L2-stateless 翻译驱动**。
+
+- [bootlin/libva-v4l2-request](https://github.com/bootlin/libva-v4l2-request)：停在 **2019-05**，只 Allwinner Cedrus MPEG2/H.264/H.265。
+- FFmpeg 官方 v4l2-request hwaccel：Jonas Karlman (Kwiboo) [WIP PR #20847](https://code.ffmpeg.org/FFmpeg/FFmpeg/pulls/20847)，未合并。
+- 字段对照：[Kwiboo FFmpeg fork](https://github.com/Kwiboo/FFmpeg) `v4l2-request-n7.1.3`（不走 VA-API，参数从码流直出）。
+- Chromium 直连 V4L2 stateless；GStreamer `v4l2codecs` 是 Collabora 用户态。vendor 的 libmpp + BSP 违反主线-only。
+
+**4K30 CMA**：hantro AV1 每帧约 13MB 连续内存，`cma=256M` 碎片化后分配失败会静默回软解。`/etc/default/u-boot`（及 extlinux.conf）`cma=256M`→`cma=1G` 后 `u-boot-update`。
+
+---
+
 ## 明确还没做
 
-- AV1 P 帧（见上）
-- HEVC Main10（驱动 advertises，没有 10-bit 测试流）
+- HEVC Main10（advertises，没有 10-bit 测试流）
 - 中途改分辨率（没有 renegotiate）
-- Firefox `about:support` Hardware decoding：profile `vaapi.default-release` 已开 `media.ffmpeg.vaapi.enabled` + `gfx.webrender.all`，需要用户登录且 source 了 `~/.profile` 再确认
-- VP8 / MPEG2：vtable 里有枚举，没有 translate 实现
+- Firefox `about:support` Hardware decoding：配置在活跃 profile `~/.mozilla/firefox/xy1kbuh7.default-release-1/user.js`。profiles.ini 里悬空的 `vaapi.default-release` 从未启用。仍需人工确认
+- VP9：本机 hantro 无 VP9 fourcc，没做
 
 ---
 
@@ -227,6 +192,11 @@ RK3588 主线到 7.1：解码这条能用。缺摄像头、编码器、DDR 变�
 - AV1 request 建在 `/dev/media0` → 应为 `/dev/media3`
 - 给 ffmpeg 的裸 AV1 tile 再包一层自制 OBU → 更灰
 - `tx_mode` 留 0 → 关键帧也灰
+- AV1 P 帧 `refresh_frame_flags=0` → CDF 永不更新
+- libaom realtime 用 8 槽 first_dup → 第 7 帧错；应锁 RTC `order_hint % 6`
+- SVT shown 叶 refresh 非 0、或把 shrinking mini-GOP（oh 24/28/30）当普通 GOLDEN → 第 15 帧后错
+- MPEG-2 `pending_buffers[32]` → 1080p I 帧丢 slice
+- VP8 按 ffmpeg 已剥 header 的 `first_part_size` 原样下发 → hantro 再 skip 一次，分区全错
 - 诊断 NAS SSH 失败时怪 Clash TUN：实际是 macOS Local Network 权限
 - ffmpeg **不是**源码树，不要对着不存在的本地 build 排
 - 不要清主线去装 BSP/MPP「先看能不能解」
@@ -237,12 +207,17 @@ RK3588 主线到 7.1：解码这条能用。缺摄像头、编码器、DDR 变�
 
 | 文件 | 作用 |
 |---|---|
-| `src/v4l2stateless.c` | libva vtable、surface、image、context、buffer ID、timestamp 分配 |
-| `src/v4l2stateless.h` | 结构、池大小、helper 声明 |
+| `src/v4l2stateless.c` | libva vtable、surface、image、context、buffer ID、timestamp、EndPicture 分发 |
+| `src/v4l2stateless.h` | 结构、池大小（pending 256）、helper 声明 |
 | `src/v4l2stateless_device.c` | open、STREAMON、QBUF、request、sysfs media 查找 |
+| `src/v4l2stateless_probe.c` | 按 OUTPUT fourcc 选节点（`scan_decoder_paths_ex` 含 VP8/MPEG-2） |
 | `src/v4l2stateless_h264.c` | H.264 翻译 + 同步提交 |
 | `src/v4l2stateless_hevc.c` | HEVC 翻译 + 同步提交 |
-| `src/v4l2stateless_av1.c` | AV1 翻译 + 同步提交（P 帧未完成） |
-| `src/v4l2stateless_{buffer,config,context}.c` | 几乎空的占位，逻辑都在上面几个文件 |
+| `src/v4l2stateless_av1.c` | AV1 翻译 + refresh 推断 |
+| `src/v4l2stateless_vp8.c` | VP8 翻译 |
+| `src/v4l2stateless_mpeg2.c` | MPEG-2 翻译 |
+| `tests/run_full_matrix.sh` | 主机全量 hwdownload 矩阵 |
+| `tests/test_video_probe.c` | fourcc → 节点（含 live） |
+| `tests/test_vp8_mpeg2_fill.c` | VP8/MPEG-2 control 填充单测 |
 
-接活的人：先读这份，再打开 `v4l2stateless_av1.c` 的 `av1_fill_frame_params()`，从 `refresh_frame_flags` 往下做。H.264/HEVC 不要为了 AV1 去改运行时，除非新证据表明公共路径坏了。
+GStreamer AV1 对照：`gstv4l2codecav1dec.c`。内核：`drivers/media/platform/verisilicon/rockchip_vpu981_hw_av1_dec.c`。

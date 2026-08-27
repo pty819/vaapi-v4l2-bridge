@@ -36,6 +36,9 @@ static const VAProfile v4l2sl_profiles[] = {
     VAProfileHEVCMain,
     VAProfileHEVCMain10,
     VAProfileAV1Profile0,
+    VAProfileVP8Version0_3,
+    VAProfileMPEG2Simple,
+    VAProfileMPEG2Main,
 };
 
 #define NUM_PROFILES (sizeof(v4l2sl_profiles) / sizeof(v4l2sl_profiles[0]))
@@ -58,6 +61,9 @@ static const struct {
     { VAProfileHEVCMain,       VA_RT_FORMAT_YUV420 },
     { VAProfileHEVCMain10,     VA_RT_FORMAT_YUV420_10 },
     { VAProfileAV1Profile0,    VA_RT_FORMAT_YUV420 },
+    { VAProfileVP8Version0_3,  VA_RT_FORMAT_YUV420 },
+    { VAProfileMPEG2Simple,    VA_RT_FORMAT_YUV420 },
+    { VAProfileMPEG2Main,      VA_RT_FORMAT_YUV420 },
 };
 
 /* Map VA profile to codec. Device path is resolved by OUTPUT fourcc. */
@@ -71,6 +77,9 @@ static const struct {
     { VAProfileHEVCMain,    V4L2SL_CODEC_HEVC },
     { VAProfileHEVCMain10,  V4L2SL_CODEC_HEVC },
     { VAProfileAV1Profile0, V4L2SL_CODEC_AV1  },
+    { VAProfileVP8Version0_3, V4L2SL_CODEC_VP8 },
+    { VAProfileMPEG2Simple, V4L2SL_CODEC_MPEG2 },
+    { VAProfileMPEG2Main,   V4L2SL_CODEC_MPEG2 },
 };
 
 static int codec_for_profile(VAProfile profile, enum v4l2sl_codec *codec)
@@ -91,9 +100,11 @@ static const char *cached_device(struct v4l2sl_driver_data *dd, enum v4l2sl_code
     const char *p = NULL;
 
     switch (codec) {
-    case V4L2SL_CODEC_H264: p = dd->dev_h264; break;
-    case V4L2SL_CODEC_HEVC: p = dd->dev_hevc; break;
-    case V4L2SL_CODEC_AV1:  p = dd->dev_av1;  break;
+    case V4L2SL_CODEC_H264:  p = dd->dev_h264;  break;
+    case V4L2SL_CODEC_HEVC:  p = dd->dev_hevc;  break;
+    case V4L2SL_CODEC_AV1:   p = dd->dev_av1;   break;
+    case V4L2SL_CODEC_VP8:   p = dd->dev_vp8;   break;
+    case V4L2SL_CODEC_MPEG2: p = dd->dev_mpeg2; break;
     default: break;
     }
     return (p && p[0]) ? p : NULL;
@@ -557,9 +568,11 @@ v4l2sl_create_context(VADriverContextP ctx,
     /* Determine V4L2 codec format */
     uint32_t v4l2_format;
     switch (context->codec) {
-    case V4L2SL_CODEC_H264: v4l2_format = V4L2_PIX_FMT_H264_SLICE; break;
-    case V4L2SL_CODEC_HEVC: v4l2_format = V4L2_PIX_FMT_HEVC_SLICE; break;
-    case V4L2SL_CODEC_AV1:  v4l2_format = V4L2_PIX_FMT_AV1_FRAME; break;
+    case V4L2SL_CODEC_H264:  v4l2_format = V4L2_PIX_FMT_H264_SLICE; break;
+    case V4L2SL_CODEC_HEVC:  v4l2_format = V4L2_PIX_FMT_HEVC_SLICE; break;
+    case V4L2SL_CODEC_AV1:   v4l2_format = V4L2_PIX_FMT_AV1_FRAME; break;
+    case V4L2SL_CODEC_VP8:   v4l2_format = V4L2_PIX_FMT_VP8_FRAME; break;
+    case V4L2SL_CODEC_MPEG2: v4l2_format = V4L2_PIX_FMT_MPEG2_SLICE; break;
     default: v4l2_format = V4L2_PIX_FMT_H264_SLICE; break;
     }
 
@@ -598,6 +611,7 @@ v4l2sl_create_context(VADriverContextP ctx,
      */
     if (context->codec != V4L2SL_CODEC_HEVC &&
         context->codec != V4L2SL_CODEC_AV1 &&
+        context->codec != V4L2SL_CODEC_MPEG2 &&
         context->v4l2_fd >= 0 && context->output_bufs_allocd > 0 &&
         context->capture_bufs_allocd > 0) {
         if (v4l2sl_streamon(context->v4l2_fd, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE) < 0 ||
@@ -916,8 +930,11 @@ v4l2sl_render_picture(VADriverContextP ctx,
         struct v4l2sl_buffer *b = context->buffers;
         while (b) {
             if (b->buffer_id == buffers[i]) {
-                if (context->num_pending_buffers < 32) {
+                if (context->num_pending_buffers < 256) {
                     context->pending_buffers[context->num_pending_buffers++] = b;
+                } else {
+                    fprintf(stderr, "v4l2stateless: pending buffer overflow\n");
+                    return VA_STATUS_ERROR_MAX_NUM_EXCEEDED;
                 }
                 break;
             }
@@ -998,6 +1015,16 @@ v4l2sl_end_picture(VADriverContextP ctx,
         va_status = v4l2sl_av1_translate(context,
                                          context->pending_buffers,
                                          context->num_pending_buffers);
+        break;
+    case V4L2SL_CODEC_VP8:
+        va_status = v4l2sl_vp8_translate(context,
+                                         context->pending_buffers,
+                                         context->num_pending_buffers);
+        break;
+    case V4L2SL_CODEC_MPEG2:
+        va_status = v4l2sl_mpeg2_translate(context,
+                                           context->pending_buffers,
+                                           context->num_pending_buffers);
         break;
     default:
         va_status = VA_STATUS_ERROR_UNSUPPORTED_ENTRYPOINT;
@@ -1369,14 +1396,20 @@ v4l2sl_init(VADriverContextP ctx)
     pthread_mutex_init(&driver_data->lock, NULL);
     ctx->pDriverData = driver_data;
 
-    v4l2sl_scan_decoder_paths(driver_data->dev_h264, driver_data->dev_hevc,
-                              driver_data->dev_av1, sizeof(driver_data->dev_h264));
-    fprintf(stderr, "v4l2stateless: probe H.264 -> %s\n",
+    v4l2sl_scan_decoder_paths_ex(driver_data->dev_h264, driver_data->dev_hevc,
+                                 driver_data->dev_av1, driver_data->dev_vp8,
+                                 driver_data->dev_mpeg2,
+                                 sizeof(driver_data->dev_h264));
+    fprintf(stderr, "v4l2stateless: probe H.264  -> %s\n",
             driver_data->dev_h264[0] ? driver_data->dev_h264 : "(none)");
-    fprintf(stderr, "v4l2stateless: probe HEVC  -> %s\n",
+    fprintf(stderr, "v4l2stateless: probe HEVC   -> %s\n",
             driver_data->dev_hevc[0] ? driver_data->dev_hevc : "(none)");
-    fprintf(stderr, "v4l2stateless: probe AV1   -> %s\n",
+    fprintf(stderr, "v4l2stateless: probe AV1    -> %s\n",
             driver_data->dev_av1[0] ? driver_data->dev_av1 : "(none)");
+    fprintf(stderr, "v4l2stateless: probe VP8    -> %s\n",
+            driver_data->dev_vp8[0] ? driver_data->dev_vp8 : "(none)");
+    fprintf(stderr, "v4l2stateless: probe MPEG-2 -> %s\n",
+            driver_data->dev_mpeg2[0] ? driver_data->dev_mpeg2 : "(none)");
 
     /* Set context limits */
     ctx->max_profiles = NUM_PROFILES;

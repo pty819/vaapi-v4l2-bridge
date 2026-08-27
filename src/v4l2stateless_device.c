@@ -136,8 +136,10 @@ int v4l2sl_setup_output_queue(int fd, uint32_t codec_format, int width, int heig
     fmt.fmt.pix_mp.pixelformat = codec_format;
     fmt.fmt.pix_mp.field = V4L2_FIELD_NONE;
     fmt.fmt.pix_mp.num_planes = 1;
-    /* AV1 on hantro wants sizeimage ~= coded luma size, not a 4MB guess. */
-    if (codec_format == V4L2_PIX_FMT_AV1_FRAME)
+    /* hantro coded formats want sizeimage ~= luma size, not a 4MB guess. */
+    if (codec_format == V4L2_PIX_FMT_AV1_FRAME ||
+        codec_format == V4L2_PIX_FMT_VP8_FRAME ||
+        codec_format == V4L2_PIX_FMT_MPEG2_SLICE)
         fmt.fmt.pix_mp.plane_fmt[0].sizeimage = (uint32_t)width * (uint32_t)height;
 
     if (xioctl(fd, VIDIOC_S_FMT, &fmt) < 0) {

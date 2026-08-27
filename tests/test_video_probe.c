@@ -86,6 +86,10 @@ static int run_unit(void)
               "/dev/video1", "hevc-current");
     expect_eq(v4l2sl_pick_device_for_codec(V4L2SL_CODEC_AV1, current, 5),
               "/dev/video4", "av1-current");
+    expect_eq(v4l2sl_pick_device_for_codec(V4L2SL_CODEC_VP8, current, 5),
+              "/dev/video2", "vp8-current");
+    expect_eq(v4l2sl_pick_device_for_codec(V4L2SL_CODEC_MPEG2, current, 5),
+              "/dev/video2", "mpeg2-current");
 
     printf("== swapped /dev/video numbers ==\n");
     expect_eq(v4l2sl_pick_device_for_codec(V4L2SL_CODEC_H264, swapped, 2),
@@ -94,12 +98,20 @@ static int run_unit(void)
               "/dev/video4", "hevc-swapped");
     expect_eq(v4l2sl_pick_device_for_codec(V4L2SL_CODEC_AV1, swapped, 2),
               "/dev/video1", "av1-swapped");
+    expect_eq(v4l2sl_pick_device_for_codec(V4L2SL_CODEC_VP8, swapped, 2),
+              NULL, "vp8-swapped-missing");
+    expect_eq(v4l2sl_pick_device_for_codec(V4L2SL_CODEC_MPEG2, swapped, 2),
+              NULL, "mpeg2-swapped-missing");
 
     printf("== missing fourcc ==\n");
     expect_eq(v4l2sl_pick_device_for_codec(V4L2SL_CODEC_H264, none, 1),
               NULL, "h264-missing");
     expect_eq(v4l2sl_pick_device_for_codec(V4L2SL_CODEC_AV1, none, 1),
               NULL, "av1-missing");
+    expect_eq(v4l2sl_pick_device_for_codec(V4L2SL_CODEC_VP8, none, 1),
+              NULL, "vp8-missing");
+    expect_eq(v4l2sl_pick_device_for_codec(V4L2SL_CODEC_MPEG2, none, 1),
+              NULL, "mpeg2-missing");
 
     if (v4l2sl_codec_coded_fourcc(V4L2SL_CODEC_H264, &fcc) != 0 ||
         fcc != V4L2_PIX_FMT_H264_SLICE) {
@@ -109,18 +121,36 @@ static int run_unit(void)
         v4l2sl_fourcc_to_str(fcc, tag);
         printf("OK coded-fourcc H.264 %s\n", tag);
     }
+    if (v4l2sl_codec_coded_fourcc(V4L2SL_CODEC_VP8, &fcc) != 0 ||
+        fcc != V4L2_PIX_FMT_VP8_FRAME) {
+        fprintf(stderr, "FAIL coded fourcc VP8\n");
+        g_fail++;
+    } else {
+        v4l2sl_fourcc_to_str(fcc, tag);
+        printf("OK coded-fourcc VP8 %s\n", tag);
+    }
+    if (v4l2sl_codec_coded_fourcc(V4L2SL_CODEC_MPEG2, &fcc) != 0 ||
+        fcc != V4L2_PIX_FMT_MPEG2_SLICE) {
+        fprintf(stderr, "FAIL coded fourcc MPEG-2\n");
+        g_fail++;
+    } else {
+        v4l2sl_fourcc_to_str(fcc, tag);
+        printf("OK coded-fourcc MPEG-2 %s\n", tag);
+    }
     return g_fail ? 1 : 0;
 }
 
 static int run_live(void)
 {
-    char h264[64], hevc[64], av1[64];
+    char h264[64], hevc[64], av1[64], vp8[64], mpeg2[64];
     uint32_t fcc;
 
-    v4l2sl_scan_decoder_paths(h264, hevc, av1, 64);
-    printf("live H.264 -> %s\n", h264[0] ? h264 : "(none)");
-    printf("live HEVC  -> %s\n", hevc[0] ? hevc : "(none)");
-    printf("live AV1   -> %s\n", av1[0] ? av1 : "(none)");
+    v4l2sl_scan_decoder_paths_ex(h264, hevc, av1, vp8, mpeg2, 64);
+    printf("live H.264  -> %s\n", h264[0] ? h264 : "(none)");
+    printf("live HEVC   -> %s\n", hevc[0] ? hevc : "(none)");
+    printf("live AV1    -> %s\n", av1[0] ? av1 : "(none)");
+    printf("live VP8    -> %s\n", vp8[0] ? vp8 : "(none)");
+    printf("live MPEG-2 -> %s\n", mpeg2[0] ? mpeg2 : "(none)");
 
     if (v4l2sl_codec_coded_fourcc(V4L2SL_CODEC_H264, &fcc) == 0) {
         if (!h264[0] || !node_has_fourcc(h264, fcc)) {
@@ -148,6 +178,29 @@ static int run_live(void)
         } else {
             printf("OK live AV1 %s has AV1F\n", av1);
         }
+    }
+    if (v4l2sl_codec_coded_fourcc(V4L2SL_CODEC_VP8, &fcc) == 0) {
+        if (!vp8[0] || !node_has_fourcc(vp8, fcc)) {
+            fprintf(stderr, "FAIL live VP8 node %s lacks VP8F\n",
+                    vp8[0] ? vp8 : "(none)");
+            g_fail++;
+        } else {
+            printf("OK live VP8 %s has VP8F\n", vp8);
+        }
+    }
+    if (v4l2sl_codec_coded_fourcc(V4L2SL_CODEC_MPEG2, &fcc) == 0) {
+        if (!mpeg2[0] || !node_has_fourcc(mpeg2, fcc)) {
+            fprintf(stderr, "FAIL live MPEG-2 node %s lacks MG2S\n",
+                    mpeg2[0] ? mpeg2 : "(none)");
+            g_fail++;
+        } else {
+            printf("OK live MPEG-2 %s has MG2S\n", mpeg2);
+        }
+    }
+    if (vp8[0] && mpeg2[0] && strcmp(vp8, mpeg2) != 0) {
+        fprintf(stderr, "FAIL VP8 and MPEG-2 resolved to different nodes %s vs %s\n",
+                vp8, mpeg2);
+        g_fail++;
     }
     /* Must not have bound H.264 to the AV1 node. */
     if (h264[0] && av1[0] && strcmp(h264, av1) == 0) {

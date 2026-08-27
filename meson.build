@@ -37,6 +37,8 @@ sources = files(
   'src/v4l2stateless_h264.c',
   'src/v4l2stateless_hevc.c',
   'src/v4l2stateless_av1.c',
+  'src/v4l2stateless_vp8.c',
+  'src/v4l2stateless_mpeg2.c',
 )
 
 shared_library('v4l2stateless_drv_video',
@@ -55,3 +57,14 @@ test_video_probe = executable('test_video_probe',
 )
 
 test('video_probe', test_video_probe)
+
+test_vp8_mpeg2_fill = executable('test_vp8_mpeg2_fill',
+  files('tests/test_vp8_mpeg2_fill.c',
+        'src/v4l2stateless_vp8.c',
+        'src/v4l2stateless_mpeg2.c',
+        'src/v4l2stateless_device.c'),
+  include_directories: inc,
+  dependencies: [libva_dep, libdrm_dep],
+)
+
+test('vp8_mpeg2_fill', test_vp8_mpeg2_fill)

@@ -10,6 +10,7 @@
 #include <pthread.h>
 #include <va/va.h>
 #include <va/va_backend.h>
+#include <va/va_dec_vp8.h>
 #include <linux/v4l2-controls.h>
 #include <linux/videodev2.h>
 
@@ -85,8 +86,9 @@ struct v4l2sl_context {
     struct v4l2sl_surface *current_surface;
     VASurfaceID current_surface_id;
 
-    /* Collected buffers for current picture */
-    struct v4l2sl_buffer *pending_buffers[32];
+    /* Collected buffers for current picture. MPEG-2 can be one slice
+     * per MB row plus param/IQ buffers, so 32 is not enough. */
+    struct v4l2sl_buffer *pending_buffers[256];
     int num_pending_buffers;
 
     struct v4l2sl_buffer *buffers;  /* Attached parameter buffers */
@@ -121,6 +123,8 @@ struct v4l2sl_context {
     uint8_t av1_l0_toggle;     /* SVT L0 slots 0-1-2 */
     uint8_t av1_l1_toggle;     /* SVT L1 slots 3-4 */
     uint8_t av1_have_first_arf;
+    uint32_t av1_l0_oh;        /* last SVT L0 ARF order_hint */
+    uint32_t av1_prev_l0_oh;   /* previous L0 ARF (mini-GOP length) */
 };
 
 /* Driver global state */
@@ -146,7 +150,18 @@ struct v4l2sl_driver_data {
     char dev_h264[64];
     char dev_hevc[64];
     char dev_av1[64];
+    char dev_vp8[64];
+    char dev_mpeg2[64];
 };
+
+static inline uint64_t v4l2sl_surface_ts(struct v4l2sl_driver_data *dd, VASurfaceID id)
+{
+    if (!dd || id == VA_INVALID_ID || (unsigned)id >= 4096)
+        return 0;
+    if (!dd->surfaces[id])
+        return 0;
+    return dd->surfaces[id]->timestamp;
+}
 
 /* Device helpers (v4l2stateless_device.c) */
 int v4l2sl_open_device(const char *path);
@@ -195,5 +210,29 @@ VAStatus v4l2sl_hevc_translate(struct v4l2sl_context *ctx,
 VAStatus v4l2sl_av1_translate(struct v4l2sl_context *ctx,
                               struct v4l2sl_buffer **buffers,
                               int num_buffers);
+
+/* VP8 translation (v4l2stateless_vp8.c) */
+void v4l2sl_vp8_fill_frame(struct v4l2_ctrl_vp8_frame *frame,
+                           const VAPictureParameterBufferVP8 *pic,
+                           const VASliceParameterBufferVP8 *slice,
+                           const VAProbabilityDataBufferVP8 *prob,
+                           const VAIQMatrixBufferVP8 *iq,
+                           struct v4l2sl_driver_data *dd);
+VAStatus v4l2sl_vp8_translate(struct v4l2sl_context *ctx,
+                              struct v4l2sl_buffer **buffers,
+                              int num_buffers);
+
+/* MPEG-2 translation (v4l2stateless_mpeg2.c) */
+void v4l2sl_mpeg2_fill_sequence(struct v4l2_ctrl_mpeg2_sequence *seq,
+                                const VAPictureParameterBufferMPEG2 *pic,
+                                VAProfile profile);
+void v4l2sl_mpeg2_fill_picture(struct v4l2_ctrl_mpeg2_picture *vpic,
+                               const VAPictureParameterBufferMPEG2 *pic,
+                               struct v4l2sl_driver_data *dd);
+void v4l2sl_mpeg2_fill_quant(struct v4l2_ctrl_mpeg2_quantisation *q,
+                             const VAIQMatrixBufferMPEG2 *iq);
+VAStatus v4l2sl_mpeg2_translate(struct v4l2sl_context *ctx,
+                                struct v4l2sl_buffer **buffers,
+                                int num_buffers);
 
 #endif /* V4L2STATELESS_H */

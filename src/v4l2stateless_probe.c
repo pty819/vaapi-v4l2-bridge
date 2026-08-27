@@ -48,6 +48,12 @@ int v4l2sl_codec_coded_fourcc(enum v4l2sl_codec codec, uint32_t *fourcc_out)
     case V4L2SL_CODEC_AV1:
         *fourcc_out = V4L2_PIX_FMT_AV1_FRAME;
         return 0;
+    case V4L2SL_CODEC_VP8:
+        *fourcc_out = V4L2_PIX_FMT_VP8_FRAME;
+        return 0;
+    case V4L2SL_CODEC_MPEG2:
+        *fourcc_out = V4L2_PIX_FMT_MPEG2_SLICE;
+        return 0;
     default:
         return -1;
     }
@@ -107,6 +113,14 @@ static void copy_path(char *dst, unsigned dst_len, const char *src)
 int v4l2sl_scan_decoder_paths(char *h264_out, char *hevc_out, char *av1_out,
                               unsigned out_len)
 {
+    return v4l2sl_scan_decoder_paths_ex(h264_out, hevc_out, av1_out,
+                                        NULL, NULL, out_len);
+}
+
+int v4l2sl_scan_decoder_paths_ex(char *h264_out, char *hevc_out, char *av1_out,
+                                 char *vp8_out, char *mpeg2_out,
+                                 unsigned out_len)
+{
     struct v4l2sl_node_fmts nodes[V4L2SL_PROBE_MAX_NODES];
     uint32_t fourccs[V4L2SL_PROBE_MAX_NODES][V4L2SL_PROBE_MAX_FOURCCS];
     char paths[V4L2SL_PROBE_MAX_NODES][64];
@@ -120,6 +134,10 @@ int v4l2sl_scan_decoder_paths(char *h264_out, char *hevc_out, char *av1_out,
         hevc_out[0] = 0;
     if (av1_out && out_len)
         av1_out[0] = 0;
+    if (vp8_out && out_len)
+        vp8_out[0] = 0;
+    if (mpeg2_out && out_len)
+        mpeg2_out[0] = 0;
 
     for (i = 0; i < 64 && n_nodes < V4L2SL_PROBE_MAX_NODES; i++) {
         struct v4l2_capability cap;
@@ -155,6 +173,10 @@ int v4l2sl_scan_decoder_paths(char *h264_out, char *hevc_out, char *av1_out,
     copy_path(hevc_out, out_len, p);
     p = v4l2sl_pick_device_for_codec(V4L2SL_CODEC_AV1, nodes, n_nodes);
     copy_path(av1_out, out_len, p);
+    p = v4l2sl_pick_device_for_codec(V4L2SL_CODEC_VP8, nodes, n_nodes);
+    copy_path(vp8_out, out_len, p);
+    p = v4l2sl_pick_device_for_codec(V4L2SL_CODEC_MPEG2, nodes, n_nodes);
+    copy_path(mpeg2_out, out_len, p);
 
     return 0;
 }
