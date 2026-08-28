@@ -349,6 +349,8 @@ v4l2sl_query_config_attributes(VADriverContextP ctx,
 {
     struct v4l2sl_driver_data *driver_data = ctx->pDriverData;
     struct v4l2sl_config *config = driver_data->configs;
+    VAConfigAttrib attribs[8];
+    int count = 0;
 
     while (config && config->config_id != config_id)
         config = config->next;
@@ -356,17 +358,36 @@ v4l2sl_query_config_attributes(VADriverContextP ctx,
     if (!config)
         return VA_STATUS_ERROR_INVALID_CONFIG;
 
-    *profile = config->profile;
-    *entrypoint = config->entrypoint;
+    if (profile)
+        *profile = config->profile;
+    if (entrypoint)
+        *entrypoint = config->entrypoint;
 
-    int count = 0;
-    if (count < *num_attribs) {
-        attrib_list[count].type = VAConfigAttribRTFormat;
-        attrib_list[count].value = config->rt_format;
-        count++;
-    }
+    /*
+     * Chrome's FillProfileInfo_Locked allocates vaMaxNumConfigAttributes()
+     * slots and passes an uninitialized *num_attribs used only as an out
+     * parameter. Do not treat *num_attribs as a buffer capacity.
+     */
+    attribs[count].type = VAConfigAttribRTFormat;
+    attribs[count].value = config->rt_format;
+    count++;
+    attribs[count].type = VAConfigAttribDecSliceMode;
+    attribs[count].value = VA_DEC_SLICE_MODE_NORMAL;
+    count++;
+    attribs[count].type = VAConfigAttribMaxPictureWidth;
+    attribs[count].value = 8192;
+    count++;
+    attribs[count].type = VAConfigAttribMaxPictureHeight;
+    attribs[count].value = 8192;
+    count++;
+    attribs[count].type = VAConfigAttribEncPackedHeaders;
+    attribs[count].value = 0;
+    count++;
 
-    *num_attribs = count;
+    if (attrib_list)
+        memcpy(attrib_list, attribs, (size_t)count * sizeof(attribs[0]));
+    if (num_attribs)
+        *num_attribs = count;
     return VA_STATUS_SUCCESS;
 }
 
@@ -392,7 +413,7 @@ v4l2sl_query_surface_attributes(VADriverContextP ctx,
     if (!config)
         return VA_STATUS_ERROR_INVALID_CONFIG;
 
-    VASurfaceAttrib attribs[8];
+    VASurfaceAttrib attribs[16];
     unsigned int count = 0;
     uint32_t pix[4];
     unsigned npix = 0, p;
@@ -435,6 +456,16 @@ v4l2sl_query_surface_attributes(VADriverContextP ctx,
     attribs[count].flags         = VA_SURFACE_ATTRIB_GETTABLE;
     attribs[count].value.type    = VAGenericValueTypeInteger;
     attribs[count].value.value.i = 4096;
+    count++;
+
+    attribs[count].type          = VASurfaceAttribMemoryType;
+    attribs[count].flags         = VA_SURFACE_ATTRIB_GETTABLE | VA_SURFACE_ATTRIB_SETTABLE;
+    attribs[count].value.type    = VAGenericValueTypeInteger;
+    attribs[count].value.value.i = VA_SURFACE_ATTRIB_MEM_TYPE_VA |
+#ifdef VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2
+                                   VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2 |
+#endif
+                                   VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME;
     count++;
 
     if (!attrib_list) {
@@ -1775,10 +1806,11 @@ v4l2sl_init(VADriverContextP ctx)
     fprintf(stderr, "v4l2stateless: probe VPP    -> %s\n",
             driver_data->dev_vpp[0] ? driver_data->dev_vpp : "(none)");
 
-    /* Set context limits */
+    /* Set context limits. Chrome sizes vaQueryConfigAttributes from
+     * vaMaxNumConfigAttributes() == max_attributes. */
     ctx->max_profiles = NUM_PROFILES;
     ctx->max_entrypoints = 4;
-    ctx->max_attributes = 8;
+    ctx->max_attributes = 32;
     ctx->max_image_formats = 8;
     ctx->max_subpic_formats = 1;
     ctx->max_display_attributes = 0;

@@ -171,11 +171,23 @@ RK3588 主线到 7.1：解码这条能用。缺摄像头、编码器、DDR 变�
 
 ---
 
+
+## 官方 Chrome（VA-API，不是 Chromium 那条 V4L2 直连）
+
+Debian/XtraDeb 的 arm64 Chromium 编的是 `use_v4l2_codec`，直连 `/dev/video*`。官方 Linux arm64 Chrome 编的是 `use_vaapi`，路径是：
+
+`Chrome → libva → LIBVA_DRIVER_NAME=v4l2stateless → v4l2stateless_drv_video.so → /dev/video*`
+
+`vaQueryConfigAttributes` 必须按 libva 规范把 `*num_attribs` 当**纯输出**（Chrome `FillProfileInfo_Locked` 传入时未初始化）。缺 `VAConfigAttribRTFormat` 的 YUV420 会把所有 decode profile 划掉。`max_attributes` 需要 ≥ Chrome 分配的 32。
+
+21 上菜单入口走 `/usr/local/bin/google-chrome-stable` 包装脚本（`~/.local/share/applications/google-chrome.desktop` 覆盖系统桌面文件）。
+
 ## 明确还没做
 
 - HEVC Main10（advertises，没有 10-bit 测试流）
 - 中途改分辨率（没有 renegotiate）
 - Firefox `about:support` Hardware decoding：配置在活跃 profile `~/.mozilla/firefox/xy1kbuh7.default-release-1/user.js`。profiles.ini 里悬空的 `vaapi.default-release` 从未启用。仍需人工确认
+- 官方 Chrome 仍会跳过非 PCI 的 panthor：菜单必须带 `--render-node-override=/dev/dri/renderD128`（以及 `--disable-gpu-sandbox`）。裸跑 `/usr/bin/google-chrome-stable` 不会硬解
 - VP9：本机 hantro 无 VP9 fourcc，没做
 
 ---
