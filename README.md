@@ -3,7 +3,9 @@
 libva backend that translates VA-API decode to the Linux V4L2 Request API (stateless).
 Target: Rockchip RK3588 / Orange Pi 5 on **mainline** Armbian (no vendor BSP, no MPP).
 
-Applications that only speak VA-API (`ffmpeg -hwaccel vaapi`, mpv, Firefox) can then use:
+Applications that only speak VA-API (`ffmpeg -hwaccel vaapi`, VLC, Firefox, official Linux Chrome) can then use the VPU. Desktop wiring (Chrome wrapper, Firefox `user.js`, VLC `avcodec-hw`) is in [APPS.md](APPS.md).
+
+Codecs:
 
 | Codec | Device (this RK3588) | Status |
 |---|---|---|
@@ -53,6 +55,20 @@ bash tests/run_full_matrix.sh
 ```
 
 On Orange Pi 5 (kernel 7.1.8-edge-rockchip64) this matrix is **22/22**: H.264 (CB/Main/High/B/all-P/slices/4K/QCIF), HEVC (Main/WPP/4K), AV1 (libaom 8+49, SVT 32, 4K, default 16), VP8 (480+720), MPEG-2 vs GST (IP/B/1080), plus unit probe/fill and `vainfo`.
+
+
+## Desktop apps (Chrome / Firefox / VLC)
+
+All of them need `LIBVA_DRIVER_NAME=v4l2stateless` in the **graphical** environment
+(`~/.config/environment.d/90-libva.conf`), not only in an interactive shell.
+
+| App | Extra |
+|---|---|
+| Official Chrome arm64 | Wrapper [`scripts/google-chrome-vaapi`](scripts/google-chrome-vaapi): `--render-node-override` + `--disable-gpu-sandbox`. Distro Chromium arm64 does **not** use this `.so`. |
+| Firefox | [`scripts/firefox-vaapi-user.js`](scripts/firefox-vaapi-user.js) into the active profile. Use Mozilla's `.deb` repo, not Ubuntu's snap stub. |
+| VLC | `avcodec-hw=vaapi` in `vlcrc`. |
+
+Full steps, checks, and caveats: **[APPS.md](APPS.md)**.
 
 ## License
 

@@ -1,0 +1,41 @@
+#!/bin/bash
+# Force official Linux Chrome through the VA-API -> V4L2-stateless bridge.
+# RK3588 panthor is a platform DRM device; Chrome only auto-picks PCI nodes.
+set -u
+export LIBVA_DRIVER_NAME="${LIBVA_DRIVER_NAME:-v4l2stateless}"
+
+RENDER_NODE="${CHROME_RENDER_NODE:-/dev/dri/renderD128}"
+CHROME_REAL="${CHROME_REAL:-/opt/google/chrome/google-chrome}"
+if [[ ! -x "$CHROME_REAL" ]]; then
+  echo "google-chrome-vaapi: missing $CHROME_REAL" >&2
+  exit 127
+fi
+
+args=()
+has_render_override=0
+has_hw_device=0
+has_ignore_blocklist=0
+has_disable_gpu_sandbox=0
+has_ozone_hint=0
+has_enable_features=0
+for a in "$@"; do
+  case "$a" in
+    --render-node-override|--render-node-override=*) has_render_override=1 ;;
+    --hardware-video-device-path|--hardware-video-device-path=*) has_hw_device=1 ;;
+    --ignore-gpu-blocklist) has_ignore_blocklist=1 ;;
+    --disable-gpu-sandbox) has_disable_gpu_sandbox=1 ;;
+    --ozone-platform-hint|--ozone-platform-hint=*) has_ozone_hint=1 ;;
+    --enable-features|--enable-features=*) has_enable_features=1 ;;
+  esac
+done
+
+[[ "$has_render_override" = 0 ]] && args+=(--render-node-override="$RENDER_NODE")
+[[ "$has_hw_device" = 0 ]] && args+=(--hardware-video-device-path="$RENDER_NODE")
+[[ "$has_ignore_blocklist" = 0 ]] && args+=(--ignore-gpu-blocklist)
+[[ "$has_disable_gpu_sandbox" = 0 ]] && args+=(--disable-gpu-sandbox)
+[[ "$has_ozone_hint" = 0 ]] && args+=(--ozone-platform-hint=auto)
+if [[ "$has_enable_features" = 0 ]]; then
+  args+=(--enable-features=AcceleratedVideoDecoder,AcceleratedVideoDecodeLinuxGL,VaapiIgnoreDriverChecks)
+fi
+
+exec "$CHROME_REAL" "${args[@]}" "$@"

@@ -1,0 +1,195 @@
+# Desktop apps: Chrome, Firefox, VLC
+
+How to make GUI players talk to this libva backend (`v4l2stateless_drv_video.so`)
+instead of a real i915/AMD VA driver or a vendor MPP stack.
+
+This is the RK3588 / Orange Pi 5 setup used on the development NAS. Codec
+support and the `hwdownload` success rule are in [README.md](README.md).
+
+## One environment variable for everyone
+
+Every VA-API client must load **this** driver, not `panthor_drv_video.so`:
+
+```bash
+export LIBVA_DRIVER_NAME=v4l2stateless
+```
+
+Persist it for graphical sessions (systemd user environment, not only `~/.bashrc`):
+
+```bash
+# ~/.config/environment.d/90-libva.conf
+LIBVA_DRIVER_NAME=v4l2stateless
+```
+
+and/or `~/.profile`. Then:
+
+```text
+app  →  libva  →  v4l2stateless_drv_video.so  →  /dev/video* (rkvdec / hantro)
+```
+
+Install the `.so` first (see README). Check:
+
+```bash
+LIBVA_DRIVER_NAME=v4l2stateless vainfo --display drm --device /dev/dri/renderD128
+```
+
+You should see `v4l2stateless` and H.264 / HEVC / AV1 VLD. If `vainfo` loads
+`panthor`, the env var is not reaching that process.
+
+**Do not** treat a silent software fallback as success (ffmpeg does that).
+VP9 is not implemented here; forcing it can wedge the VPU.
+
+| App | Speaks | Path on this board |
+|---|---|---|
+| ffmpeg / VLC | VA-API | libva → this `.so` |
+| Firefox (Linux) | FFmpeg VA-API hwaccel | same |
+| Official Linux **Chrome** arm64 | VA-API (`VaapiWrapper`) | same, **plus** extra flags (below) |
+| Debian/XtraDeb **Chromium** arm64 | V4L2-stateless compiled in | **bypasses** this `.so`, ioctls `/dev/video*` directly |
+
+Official Chrome and distro Chromium are different binaries. You cannot flip
+Chrome onto Chromium's V4L2 path with a flag.
+
+---
+
+## Chrome (official `.deb`, VA-API)
+
+Google's Linux arm64 Chrome is built with `use_vaapi=true`. Two extra
+problems on RK3588:
+
+1. DRM probe **skips non-PCI** devices. panthor is a platform device, so Chrome
+   reports `failed to find a suitable render node` unless you pass
+   `--render-node-override=/dev/dri/renderD128`.
+2. The GPU process must `open(/dev/videoN)`. The sandbox blocks that, so
+   `--disable-gpu-sandbox` is required for decode (not for browsing).
+
+The driver side of Chrome's `FillProfileInfo_Locked` (RTFormat / `num_attribs`)
+is already handled in `src/v4l2stateless.c`.
+
+### Wrapper
+
+[`scripts/google-chrome-vaapi`](scripts/google-chrome-vaapi) prepends the flags
+and sets `LIBVA_DRIVER_NAME`. Install:
+
+```bash
+sudo install -m 0755 scripts/google-chrome-vaapi /usr/local/bin/google-chrome-vaapi
+sudo ln -sfn google-chrome-vaapi /usr/local/bin/google-chrome-stable
+sudo ln -sfn google-chrome-vaapi /usr/local/bin/google-chrome
+```
+
+`/usr/local/bin` is ahead of `/usr/bin` on PATH, so a terminal
+`google-chrome-stable` also hits the wrapper. Menu launchers often hardcode
+`/usr/bin/google-chrome-stable`; override that with a user desktop file
+(`~/.local/share/applications/google-chrome.desktop`) whose `Exec=` is:
+
+```text
+Exec=/usr/local/bin/google-chrome-stable %U
+```
+
+Copy the same `Exec=` for the New Window / Incognito actions. Then:
+
+```bash
+update-desktop-database ~/.local/share/applications
+xdg-settings set default-web-browser google-chrome.desktop
+```
+
+An apt upgrade of `google-chrome-stable` overwrites
+`/usr/share/applications/google-chrome.desktop` and `/usr/bin/google-chrome-stable`.
+It does **not** touch `/usr/local/bin/google-chrome-vaapi` or the user `.desktop`.
+
+Do **not** start `/usr/bin/google-chrome-stable` or `/opt/google/chrome/google-chrome`
+by full path if you want hardware decode.
+
+### Check
+
+Open `chrome://gpu` → **Video Acceleration Information**. H.264 / HEVC / AV1
+should list Hardware. Start with 1080p; 4K HDR / VP9 will not use this bridge.
+
+---
+
+## Firefox (deb from packages.mozilla.org, not the Ubuntu snap stub)
+
+Linux Firefox with `media.ffmpeg.vaapi.enabled` uses **system FFmpeg's VA-API
+hwaccel**, the same stack this driver was written against. It does **not** run
+Chrome's `FillProfileInfo_Locked` checks.
+
+Ubuntu's `firefox` package is often `1:1snap1` (a snap wrapper). Prefer Mozilla's
+apt repo (`https://packages.mozilla.org/apt`) and pin it above Ubuntu:
+
+```text
+Package: *
+Pin: origin packages.mozilla.org
+Pin-Priority: 1000
+
+Package: firefox*
+Pin: release o=Ubuntu
+Pin-Priority: -1
+```
+
+Copy [`scripts/firefox-vaapi-user.js`](scripts/firefox-vaapi-user.js) to the
+**active** profile's `user.js` (see `about:profiles`):
+
+```bash
+cp scripts/firefox-vaapi-user.js ~/.mozilla/firefox/<profile>/user.js
+```
+
+`media.hardware-video-decoding.force-enabled` stays **false**. YouTube 4K is
+often VP9; forcing hardware there has hung this VPU. H.264 / HEVC / AV1 8-bit
+will still pick VA-API when the env var is set.
+
+Graphical Firefox must see `LIBVA_DRIVER_NAME` from `environment.d` / PAM,
+not only from a bashrc that login never sources.
+
+### Check
+
+`about:support` → **Codec Support** / hardware decoding. Process logs should
+show `v4l2stateless: opened /dev/video` and FFmpeg `VAAPI_VLD`, not only
+software.
+
+---
+
+## VLC
+
+VLC's avcodec module can use VA-API when FFmpeg is built with it (Debian/Ubuntu
+`vlc` + distro ffmpeg).
+
+1. Environment, same as above: `LIBVA_DRIVER_NAME=v4l2stateless`.
+2. Tools → Preferences → Input / Codecs → Hardware-accelerated decoding →
+   **VA-API video decoder**, or in `~/.config/vlc/vlcrc`:
+
+   ```text
+   avcodec-hw=vaapi
+   ```
+
+3. Optional menu override so the GUI always exports the driver name:
+
+   ```text
+   Exec=env LIBVA_DRIVER_NAME=v4l2stateless /usr/bin/vlc --started-from-file %U
+   ```
+
+   in `~/.local/share/applications/vlc.desktop`.
+
+Codec → **Codec information** while playing: you want a VA-API / hardware
+decoder, not `avcodec` software. Same VP9 / 10-bit HDR caveat as Firefox.
+
+---
+
+## ffmpeg (ground truth)
+
+```bash
+export LIBVA_DRIVER_NAME=v4l2stateless
+ffmpeg -hwaccel vaapi -hwaccel_output_format vaapi \
+  -vaapi_device /dev/dri/renderD128 -i FILE \
+  -vf "hwdownload,format=nv12" -pix_fmt yuv420p -frames:v 8 -f framemd5 -
+```
+
+Compare to a software decode of the same file. The matrix script is
+`tests/run_full_matrix.sh`.
+
+---
+
+## What this board will not hardware-decode
+
+- **VP9** — no VP9 OUTPUT fourcc on the mainline hantro node here
+- **AV1 / HEVC / H.264 10-bit HDR playback in browsers** — do not force it
+- Mid-stream resolution changes in Chrome/Firefox — poorly tested
+- Chromium-with-V4L2: it never opens this `.so`; that is expected

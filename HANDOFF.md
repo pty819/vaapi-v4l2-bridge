@@ -172,6 +172,9 @@ RK3588 主线到 7.1：解码这条能用。缺摄像头、编码器、DDR 变�
 ---
 
 
+
+桌面应用（Chrome 包装脚本、Firefox user.js、VLC vaapi）的可复制说明在仓库 [APPS.md](APPS.md)，包装脚本在 `scripts/google-chrome-vaapi`。
+
 ## 官方 Chrome（VA-API，不是 Chromium 那条 V4L2 直连）
 
 Debian/XtraDeb 的 arm64 Chromium 编的是 `use_v4l2_codec`，直连 `/dev/video*`。官方 Linux arm64 Chrome 编的是 `use_vaapi`，路径是：
