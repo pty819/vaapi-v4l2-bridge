@@ -1,85 +1,63 @@
 # VA-API to V4L2 Stateless Bridge Driver
 
-## What This Is
+## What this is
 
-A libva backend driver (`v4l2stateless_drv_video.so`) that bridges VA-API to the Linux V4L2 Request API, enabling applications that only support VA-API (Firefox, VLC, mpv) to use V4L2 stateless hardware decoders on ARM SoCs.
+A libva backend (`v4l2stateless_drv_video.so`) that maps VA-API to the Linux V4L2 Request API (stateless decode) plus stateful JPEG encode and RGA VPP. Apps that only speak VA-API (ffmpeg, VLC, Firefox, official Linux Chrome) can use mainline rkvdec/hantro on RK3588.
 
-**Primary target:** Rockchip RK3588S (Orange Pi 5) with Mali G610 GPU.
+**Primary target:** Rockchip RK3588 (Orange Pi 5), Mali-G610 / panthor, **mainline** kernel (no vendor BSP, no MPP).
 
 ## Why
 
-- Firefox, VLC, mpv only support VA-API for hardware video decoding on Linux
-- RK3588S has excellent V4L2 stateless hardware decoders (rkvdec, hantro) but no VA-API driver
-- No modern VA-API → V4L2 stateless bridge exists (bootlin/libva-v4l2-request is 7+ years old, Allwinner-only)
-- This creates a gap: V4L2 stateless works perfectly (GStreamer, Clapper) but mainstream apps can't use it
+- Firefox / VLC / official Chrome / ffmpeg-vaapi do not talk V4L2-stateless themselves
+- RK3588 has working mainline V4L2-stateless nodes; there is no upstream VA-API driver for them
+- bootlin/libva-v4l2-request is 2019, Allwinner-only
+- Distro Chromium arm64 often compiles `use_v4l2_codec` and **bypasses** this `.so`; official Chrome compiles `use_vaapi` and uses it
 
 ## Architecture
 
 ```
-Application (Firefox/VLC/mpv)
+Application (ffmpeg / Firefox / VLC / official Chrome)
     ↓ VA-API (libva)
-v4l2stateless_drv_video.so (our driver)
-    ↓ V4L2 Request API (ioctl)
-    ↓ MEDIA_IOC_REQUEST_ALLOC
-    ↓ VIDIOC_S_EXT_CTRLS (stateless controls)
-Kernel: rkvdec (H.264/HEVC) / hantro (AV1)
-    ↓ DMA-BUF output
-Application (render)
+v4l2stateless_drv_video.so
+    ↓ V4L2 Request API (decode) or stateful M2M (JPEG / RGA)
+Kernel: rkvdec (H.264/HEVC) / hantro (AV1, VP8, MPEG-2, JPEG) / RGA (VPP)
 ```
 
-## Target Hardware
+## Devices on this RK3588 (probed by fourcc, numbers can move)
 
-| Device | Driver | Codecs | Kernel |
-|--------|--------|--------|--------|
-| /dev/video1 | rkvdec (VDPU381) | H.264, HEVC | 7.0+ |
-| /dev/video2 | hantro G1 | VP8, MPEG-2 | 7.0+ |
-| /dev/video4 | hantro AV1 | AV1 | 7.1+ |
+| Node | Driver | Role |
+|------|--------|------|
+| `/dev/video1` | rkvdec | H.264, HEVC |
+| `/dev/video2` | hantro G1 | VP8, MPEG-2 |
+| `/dev/video3` | hantro VEPU121 | JPEG encode |
+| `/dev/video4` | hantro AV1 | AV1 (+ matching `/dev/media*`) |
+| `/dev/video0` | RGA | VPP |
+| `/dev/dri/renderD128` | panthor | libva DRM display |
 
-## Key Constraints
+## Constraints
 
-- **Kernel:** Linux 7.1+ mainline (V4L2 stateless API)
-- **libva:** 2.20.0 (installed at /usr/lib/aarch64-linux-gnu/)
-- **Language:** C (matching libva driver conventions)
-- **Build:** Meson + Ninja
-- **Reference:** bootlin/libva-v4l2-request (outdated but structurally useful)
-- **V4L2 headers:** /usr/include/linux/v4l2-controls.h, videodev2.h, media.h
-- **VA-API headers:** /usr/include/va/va_backend.h, va_dec_*.h
+- Kernel 7.1+ mainline V4L2-stateless
+- C, Meson + Ninja, LGPL-2.1-or-later (same as libva)
+- Success = `hwdownload` framemd5, never silent software fallback
 
 ## Requirements
 
-### Validated
+### Done
 
-(None yet — ship to validate)
+- R1: libva driver loads; vainfo reports the profiles we advertise
+- R2: H.264 decode pipeline
+- R3: HEVC decode pipeline (VDPU381)
+- R4: AV1 decode pipeline (refresh flags inferred)
+- R5: Firefox / VLC / official Chrome can load the `.so` (see APPS.md)
+- R6: Meson install of `v4l2stateless_drv_video.so`
 
-### Active
+### Out of scope
 
-- [ ] R1: libva driver skeleton that loads and reports H.264/HEVC/AV1 profiles
-- [ ] R2: H.264 decode pipeline (VA-API params → V4L2 stateless controls → decode → DMA-BUF export)
-- [ ] R3: HEVC decode pipeline (including RPS controls for VDPU381)
-- [ ] R4: AV1 decode pipeline
-- [ ] R5: Integration test with Firefox, VLC, mpv (vainfo → actual video playback)
-- [ ] R6: Meson build system with proper install targets
-
-### Out of Scope
-
-- VP9 — rkvdec on RK3588S doesn't expose VP9 format
-- Encoding — only decode for now
-- ChromeOS-specific paths — targeting standard Linux desktop
-- Multi-instance concurrent decode — single context first
-
-## Key Decisions
-
-| Decision | Rationale | Outcome |
-|----------|-----------|---------|
-| Pure C (no C++) | libva drivers are C, bootlin reference is C | — Pending |
-| Meson build | Matches GStreamer/libva conventions | — Pending |
-| DMA-BUF for output | Zero-copy frame passing to application | — Pending |
-| Per-codec source files | va_v4l2_h264.c, va_v4l2_hevc.c, va_v4l2_av1.c | — Pending |
-| Use bootlin as skeleton | Driver init/teardown structure is reusable | — Pending |
+- VP9 (this board's mainline hantro has no VP9 fourcc)
+- Vendor MPP / BSP kernels
+- ChromeOS-only builds
+- Guaranteed multi-instance 4K HDR in browsers
 
 ## Evolution
 
-This document evolves at phase transitions and milestone boundaries.
-
----
-*Last updated: 2026-06-19 after initialization*
+Updated 2026-08-29 to match shipped code. Detail lives in [HANDOFF.md](../HANDOFF.md) and [README.md](../README.md).

@@ -1,5 +1,7 @@
 # vaapi-v4l2-bridge
 
+Last verified **2026-08-29** on Orange Pi 5 (Armbian 26.8.3, kernel 7.1.8-edge-rockchip64). Ops notes: [HANDOFF.md](HANDOFF.md). Snapshot: [STATE.md](STATE.md).
+
 libva backend that translates VA-API decode to the Linux V4L2 Request API (stateless).
 Target: Rockchip RK3588 / Orange Pi 5 on **mainline** Armbian (no vendor BSP, no MPP).
 
@@ -54,7 +56,7 @@ Full host matrix (needs `/dev/video*` and writes clips under `verify/`, gitignor
 bash tests/run_full_matrix.sh
 ```
 
-On Orange Pi 5 (kernel 7.1.8-edge-rockchip64) this matrix is **22/22**: H.264 (CB/Main/High/B/all-P/slices/4K/QCIF), HEVC (Main/WPP/4K), AV1 (libaom 8+49, SVT 32, 4K, default 16), VP8 (480+720), MPEG-2 vs GST (IP/B/1080), plus unit probe/fill and `vainfo`.
+Last recorded host run: **PASS=22 FAIL=0**. The script covers H.264 (CB/Main/High/B/all-P/slices/4K/QCIF), HEVC (Main/WPP/4K/Main10 p010le), AV1 (libaom 8+49, SVT 32, 4K, default 16), VP8 (480+720), MPEG-2 vs GST (IP/B/1080), JPEG `mjpeg_vaapi`, RGA `scale_vaapi`, plus unit probe/fill and `vainfo`.
 
 
 ## Desktop apps (Chrome / Firefox / VLC)

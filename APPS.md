@@ -6,6 +6,9 @@ instead of a real i915/AMD VA driver or a vendor MPP stack.
 This is the RK3588 / Orange Pi 5 setup used on the development NAS. Codec
 support and the `hwdownload` success rule are in [README.md](README.md).
 
+Last verified **2026-08-29** on the development NAS: `LIBVA_DRIVER_NAME=v4l2stateless` is in `~/.config/environment.d/90-libva.conf`; Chrome menu uses `/usr/local/bin/google-chrome-vaapi`; Firefox is Mozilla `.deb` 154.0.1 with `user.js` in both profiles; VLC `avcodec-hw=vaapi`.
+
+
 ## One environment variable for everyone
 
 Every VA-API client must load **this** driver, not `panthor_drv_video.so`:

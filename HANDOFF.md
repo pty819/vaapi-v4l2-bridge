@@ -1,6 +1,6 @@
 # HANDOFF — VA-API → V4L2-stateless 桥接层
 
-写于 **2026-08-27**。机器：Orange Pi 5 NAS `192.168.1.21`，Armbian 26.8.3，kernel **7.1.8-edge-rockchip64**。
+写于 **2026-08-27**，刷新 **2026-08-29**。机器：Orange Pi 5 NAS `192.168.1.21`，Armbian 26.8.3 resolute，kernel **7.1.8-edge-rockchip64**。
 
 全量矩阵 `tests/run_full_matrix.sh`：**PASS=22 FAIL=0**。Git 仓库在 NAS：`https://github.com/pty819/vaapi-v4l2-bridge.git`。
 
@@ -15,10 +15,14 @@ C 驱动 `v4l2stateless_drv_video.so` 把 ffmpeg VA-API 硬解接到主线 V4L2-
 | 编码 | 设备 | 状态 |
 |---|---|---|
 | H.264 CB / Main / High | rkvdec `/dev/video1` | **完成**：含 B / 全 P / 4-slice / 4K / QCIF |
+| H.264 High10 | 同上，capture NV15 | **完成 advertise**；capture 会 renegotiate |
 | HEVC 8-bit Main | 同上 | **完成**：Main + WPP + 4K |
+| HEVC Main10 | 同上，NV15 → P010 | **完成**：`hwdownload,format=p010le` 对软解 |
 | AV1 8-bit Profile0 | hantro `/dev/video4` + `/dev/media3` | **完成**：libaom、libaom realtime、SVT-AV1 RA、4K |
 | VP8 | hantro `/dev/video2` | **完成**：480p / 720p vs ffmpeg SW |
 | MPEG-2 Simple / Main | 同上 `/dev/video2` | **完成**：vs GStreamer `v4l2slmpeg2dec`（hantro IDCT ≠ ffmpeg SW） |
+| JPEG Baseline encode | VEPU121 `/dev/video3` | **完成**：`mjpeg_vaapi`（stateful M2M） |
+| VPP | RGA `/dev/video0` | **完成**：`scale_vaapi` |
 
 约束没变：只走主线 edge，禁止 vendor/BSP/MPP；成功判定必须是 `hwdownload` 后的 framemd5（MPEG-2 对 GST），禁止把静默软解当硬解成功。
 
@@ -35,7 +39,7 @@ C 驱动 `v4l2stateless_drv_video.so` 把 ffmpeg VA-API 硬解接到主线 V4L2-
 | Mac 工作副本 | `~/v4l2bridge-dev/`（改完 scp 到 NAS 再 ninja） |
 | 探针 / dump | Mac `~/v4l2bridge-dev/{ioctlspy.c,ctrldiff.py,av1probe.c,dumpdec.c}` |
 | ffmpeg | **apt** `/usr/bin/ffmpeg` `7:8.0.1-3ubuntu2`，不是本地编的 |
-| 驱动选择 | `~/.profile`：`export LIBVA_DRIVER_NAME=v4l2stateless` |
+| 驱动选择 | `~/.profile` 与 `~/.config/environment.d/90-libva.conf`：`LIBVA_DRIVER_NAME=v4l2stateless` |
 | SSH | `liyifan@192.168.1.21`（密钥） |
 | git | NAS 仓库 `master` → `origin` = `https://github.com/pty819/vaapi-v4l2-bridge.git` |
 
@@ -148,11 +152,13 @@ hantro IDCT 与 ffmpeg SW 不对。验收只对同机 `v4l2slmpeg2dec`。framemd
 
 | 节点 | 角色 |
 |---|---|
+| `/dev/video0` | RGA VPP |
 | `/dev/video1` | rkvdec H.264 / HEVC（frame-based） |
 | `/dev/video2` | hantro VP8 + MPEG-2 |
+| `/dev/video3` | VEPU121 JPEG encode |
 | `/dev/video4` | hantro AV1 |
-| `/dev/media3` | AV1 的 media request 节点 |
-| `/dev/dri/renderD128` | VA-API render 节点 |
+| `/dev/media3` | AV1 的 media request 节点（sysfs 跟 video4，不要写死 media0） |
+| `/dev/dri/renderD128` | VA-API render 节点（panthor，platform DRM，不是 PCI） |
 
 RK3588 主线到 7.1：解码这条能用。缺摄像头、编码器、DDR 变频、suspend。不要为了编解码去刷 vendor kernel。
 
@@ -181,17 +187,17 @@ Debian/XtraDeb 的 arm64 Chromium 编的是 `use_v4l2_codec`，直连 `/dev/vide
 
 `Chrome → libva → LIBVA_DRIVER_NAME=v4l2stateless → v4l2stateless_drv_video.so → /dev/video*`
 
-`vaQueryConfigAttributes` 必须按 libva 规范把 `*num_attribs` 当**纯输出**（Chrome `FillProfileInfo_Locked` 传入时未初始化）。缺 `VAConfigAttribRTFormat` 的 YUV420 会把所有 decode profile 划掉。`max_attributes` 需要 ≥ Chrome 分配的 32。
+驱动里 `vaQueryConfigAttributes` 已按 libva 规范把 `*num_attribs` 当**纯输出**（Chrome `FillProfileInfo_Locked` 传入时未初始化）。缺 `VAConfigAttribRTFormat` 的 YUV420 会把所有 decode profile 划掉。`max_attributes` 为 32。提交 `ae4337f`。
 
-21 上菜单入口走 `/usr/local/bin/google-chrome-stable` 包装脚本（`~/.local/share/applications/google-chrome.desktop` 覆盖系统桌面文件）。
+21 上菜单入口走仓库脚本 `scripts/google-chrome-vaapi`（安装为 `/usr/local/bin/google-chrome-stable`，用户 `.desktop` 覆盖系统菜单项）。Firefox 为 Mozilla `.deb` + `scripts/firefox-vaapi-user.js`。细节见 [APPS.md](APPS.md)。
 
-## 明确还没做
+## 明确还没做 / 已知限制
 
-- HEVC Main10（advertises，没有 10-bit 测试流）
-- 中途改分辨率（没有 renegotiate）
-- Firefox `about:support` Hardware decoding：配置在活跃 profile `~/.mozilla/firefox/xy1kbuh7.default-release-1/user.js`。profiles.ini 里悬空的 `vaapi.default-release` 从未启用。仍需人工确认
-- 官方 Chrome 仍会跳过非 PCI 的 panthor：菜单必须带 `--render-node-override=/dev/dri/renderD128`（以及 `--disable-gpu-sandbox`）。裸跑 `/usr/bin/google-chrome-stable` 不会硬解
-- VP9：本机 hantro 无 VP9 fourcc，没做
+- **VP9**：本机 hantro 无 VP9 fourcc，没做
+- **浏览器强制硬解 VP9 / 10-bit HDR**：不要开 `media.hardware-video-decoding.force-enabled`，这颗 VPU 会被打挂
+- **浏览器中途改分辨率**：驱动会对 capture 做 STREAMOFF / S_FMT / REQBUFS renegotiate；Chrome/Firefox 这条没有矩阵覆盖
+- **H.264 High422**：advertised；ffmpeg 的 vaapi hwaccel 经常仍走软解
+- 官方 Chrome **必须**走包装脚本（`scripts/google-chrome-vaapi` / `/usr/local/bin/google-chrome-stable`）。裸跑 `/usr/bin/google-chrome-stable` 会跳过非 PCI 的 panthor
 
 ---
 
@@ -231,6 +237,12 @@ Debian/XtraDeb 的 arm64 Chromium 编的是 `use_v4l2_codec`，直连 `/dev/vide
 | `src/v4l2stateless_av1.c` | AV1 翻译 + refresh 推断 |
 | `src/v4l2stateless_vp8.c` | VP8 翻译 |
 | `src/v4l2stateless_mpeg2.c` | MPEG-2 翻译 |
+| `src/v4l2stateless_jpeg.c` | JPEG Baseline 编码（stateful M2M） |
+| `src/v4l2stateless_vpp.c` | RGA VPP |
+| `src/v4l2stateless_format.c` | NV12/NV15/P010/YUY2 与 PRIME fourcc |
+| `scripts/google-chrome-vaapi` | 官方 Chrome 包装（render-node + 关 GPU sandbox） |
+| `scripts/firefox-vaapi-user.js` | Firefox VA-API prefs |
+| `APPS.md` | Chrome / Firefox / VLC 接法 |
 | `tests/run_full_matrix.sh` | 主机全量 hwdownload 矩阵 |
 | `tests/test_video_probe.c` | fourcc → 节点（含 live） |
 | `tests/test_vp8_mpeg2_fill.c` | VP8/MPEG-2 control 填充单测 |

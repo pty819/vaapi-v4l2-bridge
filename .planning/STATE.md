@@ -1,20 +1,24 @@
 # STATE — vaapi-v4l2-bridge
 
-## Current Phase
-- **Phase:** 5 — Integration Testing
-- **Status:** Pending
+## Current phase
+- **Phase:** maintenance (codec bridge + desktop VA-API clients)
+- **Status:** decode/VPP/JPEG encode on RK3588 mainline work; docs in README / HANDOFF / APPS
 
 ## Completed
-- ✅ Phase 1: Driver skeleton — vainfo shows H264/HEVC/AV1 profiles (2026-06-19)
-- ✅ Phase 2: H.264 translation + V4L2 device management (2026-06-19)
-- ✅ Phase 3: HEVC translation with RPS for VDPU381 (2026-06-19)
-- ✅ Phase 4: AV1 translation (2026-06-19)
+- Phase 1: driver skeleton — `vainfo` lists H.264/HEVC/AV1/VP8/MPEG-2/JPEG/VPP
+- Phase 2: H.264 (incl. Constrained Baseline, High10 advertised)
+- Phase 3: HEVC Main + Main10
+- Phase 4: AV1 inter + refresh_frame_flags inference (libaom / SVT / RTC)
+- Phase 5: host matrix `tests/run_full_matrix.sh`; Firefox / VLC / official Chrome wiring ([APPS.md](../APPS.md))
+- Phase 6: Meson + README + GitHub `pty819/vaapi-v4l2-bridge`
+
+Also shipped after the original roadmap: VP8, MPEG-2, JPEG encode, RGA VPP, DRM PRIME export, capture renegotiate, Chrome `FillProfileInfo_Locked` attribs.
 
 ## Blockers
-(None)
+(None for the supported 8-bit decode set.)
 
 ## Context
-- Target: RK3588S / Orange Pi 5 / Linux 7.1
-- libva 2.20.0 installed
-- V4L2 stateless devices verified working (H.264, HEVC, AV1 via GStreamer)
-- Reference: bootlin/libva-v4l2-request
+- Orange Pi 5, Armbian 26.8.3, kernel 7.1.8-edge-rockchip64, libva 1.23 / driver init 1.20
+- `LIBVA_DRIVER_NAME=v4l2stateless`
+- Last host matrix record: PASS=22 FAIL=0
+- Last updated: 2026-08-29
