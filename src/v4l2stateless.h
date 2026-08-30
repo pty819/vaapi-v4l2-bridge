@@ -192,6 +192,14 @@ int v4l2sl_queue_output(int fd, int buf_index, const uint8_t *data, uint32_t siz
                         int request_fd, uint64_t timestamp);
 int v4l2sl_queue_capture(int fd, int buf_index, int request_fd);
 int v4l2sl_export_dmabuf(int fd, int buf_index);
+int v4l2sl_surface_alloc_export_fd(struct v4l2sl_surface *s);
+int v4l2sl_bind_capture_export(struct v4l2sl_context *ctx);
+VAStatus v4l2sl_surface_fill_prime(const struct v4l2sl_surface *surf,
+                                   const struct v4l2sl_context *c,
+                                   uint32_t flags,
+                                   void *descriptor);
+typedef int (*v4l2sl_ioctl_fn)(int fd, unsigned long request, void *arg);
+void v4l2sl_set_ioctl_hook(v4l2sl_ioctl_fn fn);
 int v4l2sl_dequeue_buffer(int fd, enum v4l2_buf_type type);
 int v4l2sl_mmap_output_buffers(int fd, int count, void **ptrs, uint32_t *size_out);
 int v4l2sl_set_request_controls(int request_fd, int v4l2_fd, struct v4l2_ext_controls *ctrls);

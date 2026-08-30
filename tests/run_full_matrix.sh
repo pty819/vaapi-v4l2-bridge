@@ -118,8 +118,12 @@ u1=${PIPESTATUS[0]}
 u2=${PIPESTATUS[0]}
 "$ROOT/builddir/test_video_probe" --live | tee "$OUT/live-probe.log"
 u3=${PIPESTATUS[0]}
-if [ "$u1" -ne 0 ] || [ "$u2" -ne 0 ] || [ "$u3" -ne 0 ]; then
-  echo "UNIT_FAIL u1=$u1 u2=$u2 u3=$u3"
+"$ROOT/builddir/test_export_recapture" | tee "$OUT/unit-export.log"
+u4=${PIPESTATUS[0]}
+"$ROOT/builddir/test_format" | tee "$OUT/unit-format.log"
+u5=${PIPESTATUS[0]}
+if [ "$u1" -ne 0 ] || [ "$u2" -ne 0 ] || [ "$u3" -ne 0 ] || [ "$u4" -ne 0 ] || [ "$u5" -ne 0 ]; then
+  echo "UNIT_FAIL u1=$u1 u2=$u2 u3=$u3 u4=$u4 u5=$u5"
   fail=$((fail+1))
 else
   echo "UNIT_PASS"

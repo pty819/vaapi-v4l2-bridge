@@ -510,8 +510,13 @@ v4l2sl_create_surfaces(VADriverContextP ctx,
         if (!surface) {
             /* Clean up already created surfaces */
             for (int j = 0; j < i; j++) {
-                free(driver_data->surfaces[surfaces[j]]);
-                driver_data->surfaces[surfaces[j]] = NULL;
+                if (driver_data->surfaces[surfaces[j]]) {
+                    if (driver_data->surfaces[surfaces[j]]->dma_buf_fd >= 0)
+                        close(driver_data->surfaces[surfaces[j]]->dma_buf_fd);
+                    free(driver_data->surfaces[surfaces[j]]->cpu_ptr);
+                    free(driver_data->surfaces[surfaces[j]]);
+                    driver_data->surfaces[surfaces[j]] = NULL;
+                }
             }
             return VA_STATUS_ERROR_ALLOCATION_FAILED;
         }
@@ -530,6 +535,8 @@ v4l2sl_create_surfaces(VADriverContextP ctx,
                 free(surface);
                 for (int j = 0; j < i; j++) {
                     if (driver_data->surfaces[surfaces[j]]) {
+                        if (driver_data->surfaces[surfaces[j]]->dma_buf_fd >= 0)
+                            close(driver_data->surfaces[surfaces[j]]->dma_buf_fd);
                         free(driver_data->surfaces[surfaces[j]]->cpu_ptr);
                         free(driver_data->surfaces[surfaces[j]]);
                         driver_data->surfaces[surfaces[j]] = NULL;
@@ -538,6 +545,10 @@ v4l2sl_create_surfaces(VADriverContextP ctx,
                 return VA_STATUS_ERROR_ALLOCATION_FAILED;
             }
         }
+        /* dma-buf at create so Chrome/Firefox DRM-PRIME export works
+         * before the first picture. V4L2 EXPBUF replaces this after REQBUFS. */
+        if (v4l2sl_surface_alloc_export_fd(surface) < 0)
+            fprintf(stderr, "v4l2stateless: surface memfd backing failed\n");
 
         /* Allocate ID */
         surfaces[i] = ++driver_data->next_surface_id;
@@ -713,24 +724,16 @@ v4l2sl_create_context(VADriverContextP ctx,
         }
     }
 
-    /* Setup capture queue (decoded output). 10-bit / 4:2:2 configs
-     * ask for NV15/NV16/NV20; 8-bit stays NV12. */
-    context->cap_pixelformat = v4l2sl_capture_fourcc_from_rt(context->rt_format);
+    /* Capture: S_FMT + REQBUFS, then EXPBUF onto render targets so
+     * vaExportSurfaceHandle works before the first picture. */
     if (context->v4l2_fd >= 0) {
-        int n_cap = v4l2sl_setup_capture_queue(context->v4l2_fd,
-                                               picture_width, picture_height,
-                                               context->cap_pixelformat);
-        if (n_cap > 0)
-            context->capture_bufs_allocd = n_cap;
-        else if (context->cap_pixelformat != V4L2_PIX_FMT_NV12) {
+        uint32_t cap = v4l2sl_capture_fourcc_from_rt(context->rt_format);
+        if (v4l2sl_ensure_capture(context, picture_width, picture_height, cap) < 0 &&
+            cap != V4L2_PIX_FMT_NV12) {
             /* SPS not set yet — fall back to NV12, first picture will
              * renegotiate once bit depth is known. */
-            context->cap_pixelformat = V4L2_PIX_FMT_NV12;
-            n_cap = v4l2sl_setup_capture_queue(context->v4l2_fd,
-                                               picture_width, picture_height,
-                                               V4L2_PIX_FMT_NV12);
-            if (n_cap > 0)
-                context->capture_bufs_allocd = n_cap;
+            v4l2sl_ensure_capture(context, picture_width, picture_height,
+                                  V4L2_PIX_FMT_NV12);
         }
     }
 
@@ -752,24 +755,11 @@ v4l2sl_create_context(VADriverContextP ctx,
             context->streamed = 1;
     }
 
-    /* Capture geometry as negotiated by the driver (stride may be padded) */
-    if (context->v4l2_fd >= 0 && context->capture_bufs_allocd > 0 &&
-        v4l2sl_get_capture_geometry(context->v4l2_fd,
-                                    &context->cap_width, &context->cap_height,
-                                    &context->cap_stride,
-                                    &context->cap_sizeimage) == 0) {
-        fprintf(stderr, "v4l2stateless: capture geometry %ux%u stride=%u size=%u\n",
-                context->cap_width, context->cap_height,
-                context->cap_stride, context->cap_sizeimage);
-    }
-
-    /* All buffers start free */
+    /* All output buffers start free. Capture free list is filled by
+     * v4l2sl_ensure_capture. */
     for (int i = 0; i < context->output_bufs_allocd &&
                     i < V4L2SL_NUM_OUTPUT_BUFS; i++)
         context->free_out_bufs[context->n_free_out++] = i;
-    for (int i = 0; i < context->capture_bufs_allocd &&
-                    i < V4L2SL_NUM_CAPTURE_BUFS; i++)
-        context->free_cap_bufs[context->n_free_cap++] = i;
 
     *context_id = ++driver_data->next_context_id;
     context->context_id = *context_id;
@@ -1353,7 +1343,7 @@ v4l2sl_derive_image(VADriverContextP ctx,
     void *map;
     int mmapped = 0;
 
-    if (surf->cpu_ptr && surf->dma_buf_fd < 0) {
+    if (surf->cpu_ptr && surf->buf_index < 0) {
         map = surf->cpu_ptr;
         stride = surf->cpu_stride;
         aligned_h = surf->height;
@@ -1566,7 +1556,7 @@ v4l2sl_get_image(VADriverContextP ctx, VASurfaceID surface,
         dst_stride = v4l2sl_default_image_stride(VA_FOURCC_NV12, copy_w);
     }
 
-    if (surf->dma_buf_fd >= 0) {
+    if (surf->dma_buf_fd >= 0 && surf->buf_index >= 0) {
         map_size = v4l2sl_capture_plane_size(cap_fcc, src_stride, src_alh);
         mapped = mmap(NULL, map_size, PROT_READ, MAP_SHARED, surf->dma_buf_fd, 0);
         if (mapped == MAP_FAILED) {
@@ -1678,9 +1668,6 @@ v4l2sl_export_surface_handle(VADriverContextP ctx, VASurfaceID surface_id,
     struct v4l2sl_driver_data *driver_data = ctx->pDriverData;
     struct v4l2sl_surface *surf = driver_data->surfaces[surface_id];
     struct v4l2sl_context *c;
-    VADRMPRIMESurfaceDescriptor *desc = descriptor;
-    uint32_t stride, alh, cap_fcc, drm_fcc, plane_size;
-    int fd;
 
     if (!surf)
         return VA_STATUS_ERROR_INVALID_SURFACE;
@@ -1690,57 +1677,12 @@ v4l2sl_export_surface_handle(VADriverContextP ctx, VASurfaceID surface_id,
         mem_type != VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME)
         return VA_STATUS_ERROR_UNSUPPORTED_MEMORY_TYPE;
     if (surf->dma_buf_fd < 0)
+        v4l2sl_surface_alloc_export_fd(surf);
+    if (surf->dma_buf_fd < 0)
         return VA_STATUS_ERROR_INVALID_SURFACE;
 
     c = context_for_surface(driver_data, surface_id);
-    stride = surf->stride ? surf->stride : (c && c->cap_stride ? c->cap_stride : surf->width);
-    alh = surf->aligned_h ? surf->aligned_h : (c && c->cap_height ? c->cap_height : surf->height);
-    cap_fcc = surf->cap_fourcc ? surf->cap_fourcc :
-              (c && c->cap_pixelformat ? c->cap_pixelformat : V4L2_PIX_FMT_NV12);
-    drm_fcc = v4l2sl_drm_fourcc_for_capture(cap_fcc);
-    plane_size = v4l2sl_capture_plane_size(cap_fcc, stride, alh);
-
-    fd = dup(surf->dma_buf_fd);
-    if (fd < 0)
-        return VA_STATUS_ERROR_OPERATION_FAILED;
-
-    memset(desc, 0, sizeof(*desc));
-    desc->fourcc = v4l2sl_va_fourcc_for_capture(cap_fcc);
-    if (cap_fcc == V4L2_PIX_FMT_NV12)
-        desc->fourcc = VA_FOURCC_NV12;
-    desc->width = surf->width;
-    desc->height = surf->height;
-    desc->num_objects = 1;
-    desc->objects[0].fd = fd;
-    desc->objects[0].size = plane_size;
-    desc->objects[0].drm_format_modifier = DRM_FORMAT_MOD_LINEAR;
-
-    if (flags & VA_EXPORT_SURFACE_SEPARATE_LAYERS) {
-        desc->num_layers = 2;
-        desc->layers[0].drm_format = (cap_fcc == V4L2_PIX_FMT_NV15) ?
-            DRM_FORMAT_R16 : DRM_FORMAT_R8;
-        desc->layers[0].num_planes = 1;
-        desc->layers[0].object_index[0] = 0;
-        desc->layers[0].offset[0] = 0;
-        desc->layers[0].pitch[0] = stride;
-        desc->layers[1].drm_format = (cap_fcc == V4L2_PIX_FMT_NV15) ?
-            DRM_FORMAT_GR1616 : DRM_FORMAT_GR88;
-        desc->layers[1].num_planes = 1;
-        desc->layers[1].object_index[0] = 0;
-        desc->layers[1].offset[0] = stride * alh;
-        desc->layers[1].pitch[0] = stride;
-    } else {
-        desc->num_layers = 1;
-        desc->layers[0].drm_format = drm_fcc;
-        desc->layers[0].num_planes = 2;
-        desc->layers[0].object_index[0] = 0;
-        desc->layers[0].object_index[1] = 0;
-        desc->layers[0].offset[0] = 0;
-        desc->layers[0].offset[1] = stride * alh;
-        desc->layers[0].pitch[0] = stride;
-        desc->layers[0].pitch[1] = stride;
-    }
-    return VA_STATUS_SUCCESS;
+    return v4l2sl_surface_fill_prime(surf, c, flags, descriptor);
 }
 
 static VAStatus

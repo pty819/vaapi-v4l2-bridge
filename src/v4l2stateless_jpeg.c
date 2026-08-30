@@ -55,6 +55,13 @@ static const uint8_t *surface_nv12(struct v4l2sl_surface *s, size_t *map_size,
 {
     *to_unmap = NULL;
     *map_size = 0;
+    /* Placeholder memfd (buf_index < 0) is for DRM-PRIME export; pixels live
+     * in cpu_ptr until a V4L2 capture buffer is bound. */
+    if (s->cpu_ptr && s->buf_index < 0) {
+        *stride = s->cpu_stride ? s->cpu_stride : s->width;
+        *alh = s->height;
+        return s->cpu_ptr;
+    }
     if (s->dma_buf_fd >= 0 && s->stride && s->aligned_h) {
         size_t sz = v4l2sl_capture_plane_size(
             s->cap_fourcc ? s->cap_fourcc : V4L2_PIX_FMT_NV12,
@@ -230,7 +237,9 @@ VAStatus v4l2sl_jpeg_encode(struct v4l2sl_context *ctx,
         uv_ptr = mmap(NULL, uv_len, PROT_READ | PROT_WRITE, MAP_SHARED, fd,
                       oplanes[1].m.mem_offset);
     }
-    if (y_ptr == MAP_FAILED) {
+    if (y_ptr == MAP_FAILED || (ofmt.fmt.pix_mp.num_planes >= 2 && uv_ptr == MAP_FAILED)) {
+        if (y_ptr != MAP_FAILED)
+            munmap(y_ptr, y_len);
         if (mapped)
             munmap(mapped, map_size);
         return VA_STATUS_ERROR_OPERATION_FAILED;

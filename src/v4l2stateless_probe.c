@@ -8,8 +8,10 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <errno.h>
+#include <dirent.h>
 #include <sys/ioctl.h>
 #include <linux/videodev2.h>
+#include <linux/media.h>
 
 #include "v4l2stateless_probe.h"
 
@@ -74,12 +76,74 @@ const char *v4l2sl_pick_device_for_codec(enum v4l2sl_codec codec,
     for (i = 0; i < n_nodes; i++) {
         if (!nodes[i].path || !nodes[i].fourccs)
             continue;
+        if (nodes[i].request_api == V4L2SL_REQAPI_NO)
+            continue;
         for (j = 0; j < nodes[i].n_fourccs; j++) {
             if (nodes[i].fourccs[j] == want)
                 return nodes[i].path;
         }
     }
     return NULL;
+}
+
+int v4l2sl_find_media_path(const char *video_path, char *out, unsigned out_len)
+{
+    const char *base;
+    char sysdir[128];
+    DIR *d;
+    struct dirent *de;
+    int found = 0;
+
+    if (!out || out_len == 0)
+        return -1;
+    out[0] = 0;
+    if (!video_path)
+        return -1;
+
+    base = strrchr(video_path, '/');
+    base = base ? base + 1 : video_path;
+    snprintf(sysdir, sizeof(sysdir), "/sys/class/video4linux/%s/device", base);
+    d = opendir(sysdir);
+    if (!d)
+        return -1;
+    while ((de = readdir(d))) {
+        if (strncmp(de->d_name, "media", 5) != 0)
+            continue;
+        snprintf(out, out_len, "/dev/%s", de->d_name);
+        found = 1;
+        break;
+    }
+    closedir(d);
+    return found ? 0 : -1;
+}
+
+int v4l2sl_video_has_request_api(const char *video_path)
+{
+    char media_path[128];
+    int mfd, reqfd = -1;
+
+    if (v4l2sl_find_media_path(video_path, media_path, sizeof(media_path)) < 0)
+        return 0;
+    mfd = open(media_path, O_RDWR);
+    if (mfd < 0)
+        return 0;
+    if (ioctl(mfd, MEDIA_IOC_REQUEST_ALLOC, &reqfd) < 0) {
+        close(mfd);
+        return 0;
+    }
+    if (reqfd >= 0)
+        close(reqfd);
+    close(mfd);
+    return 1;
+}
+
+static int fourcc_is_coded(uint32_t fcc)
+{
+    return fcc == V4L2_PIX_FMT_H264_SLICE ||
+           fcc == V4L2_PIX_FMT_HEVC_SLICE ||
+           fcc == V4L2_PIX_FMT_AV1_FRAME ||
+           fcc == V4L2_PIX_FMT_VP8_FRAME ||
+           fcc == V4L2_PIX_FMT_MPEG2_SLICE;
 }
 
 int v4l2sl_enum_output_fourccs(int fd, uint32_t *out, unsigned max)
@@ -166,6 +230,21 @@ int v4l2sl_scan_decoder_paths_ex(char *h264_out, char *hevc_out, char *av1_out,
         nodes[n_nodes].path = paths[n_nodes];
         nodes[n_nodes].fourccs = fourccs[n_nodes];
         nodes[n_nodes].n_fourccs = (unsigned)nfmt;
+        nodes[n_nodes].request_api = v4l2sl_video_has_request_api(paths[n_nodes])
+            ? V4L2SL_REQAPI_YES : V4L2SL_REQAPI_NO;
+        if (nodes[n_nodes].request_api == V4L2SL_REQAPI_NO) {
+            unsigned k;
+            int coded = 0;
+
+            for (k = 0; k < nodes[n_nodes].n_fourccs; k++) {
+                if (fourcc_is_coded(fourccs[n_nodes][k]))
+                    coded = 1;
+            }
+            if (coded)
+                fprintf(stderr,
+                        "v4l2stateless: skip %s (coded fourcc, no media request)\n",
+                        paths[n_nodes]);
+        }
         n_nodes++;
     }
 

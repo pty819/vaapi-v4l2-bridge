@@ -17,20 +17,30 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <errno.h>
-#include <dirent.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <linux/media.h>
 #include <linux/videodev2.h>
+#include <va/va_drmcommon.h>
+#include <drm_fourcc.h>
 
 #include "v4l2stateless.h"
+#include "v4l2stateless_probe.h"
+
+static v4l2sl_ioctl_fn g_ioctl_hook;
+
+void v4l2sl_set_ioctl_hook(v4l2sl_ioctl_fn fn)
+{
+    g_ioctl_hook = fn;
+}
 
 /* Helper to call ioctl with retry */
 static int xioctl(int fd, unsigned long request, void *arg)
 {
     int r;
     do {
-        r = ioctl(fd, request, arg);
+        r = g_ioctl_hook ? g_ioctl_hook(fd, request, arg)
+                         : ioctl(fd, request, arg);
     } while (r == -1 && errno == EINTR);
     return r;
 }
@@ -71,36 +81,16 @@ int v4l2sl_open_device(const char *path)
 int v4l2sl_open_media_for_device(const char *video_path)
 {
     /* /dev/videoN lives next to /dev/mediaM on the same platform device.
-     * Walk /sys/class/video4linux/<name>/device/media* — do not assume
-     * mediaN == videoN (AV1 has been video4 → media3). */
-    const char *base = strrchr(video_path, '/');
-    base = base ? base + 1 : video_path;
-
-    char sysdir[128];
-    snprintf(sysdir, sizeof(sysdir), "/sys/class/video4linux/%s/device", base);
-
+     * Walk sysfs — do not assume mediaN == videoN (AV1 has been video4 → media3). */
     char media_path[128];
-    int found = 0;
-    DIR *d = opendir(sysdir);
-    if (d) {
-        struct dirent *de;
-        while ((de = readdir(d))) {
-            if (strncmp(de->d_name, "media", 5) != 0)
-                continue;
-            snprintf(media_path, sizeof(media_path), "/dev/%s", de->d_name);
-            found = 1;
-            break;
-        }
-        closedir(d);
-    }
+    int fd;
 
-    if (!found) {
-        fprintf(stderr, "v4l2stateless: no sysfs media* for %s (%s)\n",
-                video_path, sysdir);
+    if (v4l2sl_find_media_path(video_path, media_path, sizeof(media_path)) < 0) {
+        fprintf(stderr, "v4l2stateless: no sysfs media* for %s\n", video_path);
         return -1;
     }
 
-    int fd = open(media_path, O_RDWR);
+    fd = open(media_path, O_RDWR);
     if (fd < 0)
         fprintf(stderr, "v4l2stateless: open %s (for %s): %s\n",
                 media_path, video_path, strerror(errno));
@@ -314,7 +304,11 @@ int v4l2sl_ensure_capture(struct v4l2sl_context *ctx, int width, int height,
         req.count = 0;
         req.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
         req.memory = V4L2_MEMORY_MMAP;
-        xioctl(ctx->v4l2_fd, VIDIOC_REQBUFS, &req);
+        if (xioctl(ctx->v4l2_fd, VIDIOC_REQBUFS, &req) < 0) {
+            fprintf(stderr, "v4l2stateless: REQBUFS(0) capture failed: %s\n",
+                    strerror(errno));
+            return -1;
+        }
         ctx->capture_bufs_allocd = 0;
         ctx->n_free_cap = 0;
     }
@@ -352,6 +346,7 @@ int v4l2sl_ensure_capture(struct v4l2sl_context *ctx, int width, int height,
                 ctx->cap_width, ctx->cap_height, ctx->cap_stride, ctx->cap_sizeimage,
                 (char *)&fourcc);
     }
+    v4l2sl_bind_capture_export(ctx);
     return 0;
 }
 
@@ -511,6 +506,143 @@ int v4l2sl_export_dmabuf(int fd, int buf_index)
     }
 
     return exp.fd;
+}
+
+int v4l2sl_surface_alloc_export_fd(struct v4l2sl_surface *s)
+{
+    uint32_t stride, h, sz;
+    int fd;
+
+    if (!s || s->width == 0 || s->height == 0)
+        return -1;
+    if (s->dma_buf_fd >= 0)
+        return 0;
+
+    stride = s->cpu_stride ? s->cpu_stride : s->width;
+    h = s->height;
+    sz = v4l2sl_va_image_size(s->format ? s->format : VA_FOURCC_NV12, stride, h);
+    if (!sz)
+        sz = stride * h * 3 / 2;
+
+    fd = memfd_create("v4l2sl-surf", MFD_CLOEXEC);
+    if (fd < 0)
+        return -1;
+    if (ftruncate(fd, (off_t)sz) < 0) {
+        close(fd);
+        return -1;
+    }
+    s->dma_buf_fd = fd;
+    if (!s->stride)
+        s->stride = stride;
+    if (!s->aligned_h)
+        s->aligned_h = h;
+    if (!s->cap_fourcc)
+        s->cap_fourcc = V4L2_PIX_FMT_NV12;
+    return 0;
+}
+
+int v4l2sl_bind_capture_export(struct v4l2sl_context *ctx)
+{
+    int i, n;
+
+    if (!ctx || !ctx->driver_data || ctx->v4l2_fd < 0 ||
+        ctx->capture_bufs_allocd <= 0)
+        return -1;
+
+    n = ctx->num_render_targets;
+    if (n > ctx->capture_bufs_allocd)
+        n = ctx->capture_bufs_allocd;
+
+    for (i = 0; i < n; i++) {
+        VASurfaceID id;
+        struct v4l2sl_surface *s;
+        int fd;
+
+        if (!ctx->render_targets)
+            break;
+        id = ctx->render_targets[i];
+        if (id == VA_INVALID_ID || (unsigned)id >= 4096)
+            continue;
+        s = ctx->driver_data->surfaces[id];
+        if (!s)
+            continue;
+        fd = v4l2sl_export_dmabuf(ctx->v4l2_fd, i);
+        if (fd < 0)
+            continue;
+        if (s->dma_buf_fd >= 0)
+            close(s->dma_buf_fd);
+        s->dma_buf_fd = fd;
+        s->stride = ctx->cap_stride;
+        s->aligned_h = ctx->cap_height;
+        s->cap_fourcc = ctx->cap_pixelformat;
+    }
+    return 0;
+}
+
+VAStatus v4l2sl_surface_fill_prime(const struct v4l2sl_surface *surf,
+                                   const struct v4l2sl_context *c,
+                                   uint32_t flags,
+                                   void *descriptor)
+{
+    VADRMPRIMESurfaceDescriptor *desc = descriptor;
+    uint32_t stride, alh, cap_fcc, drm_fcc, plane_size;
+    int fd;
+
+    if (!surf || !descriptor)
+        return VA_STATUS_ERROR_INVALID_PARAMETER;
+    if (surf->dma_buf_fd < 0)
+        return VA_STATUS_ERROR_INVALID_SURFACE;
+
+    stride = surf->stride ? surf->stride :
+             (c && c->cap_stride ? c->cap_stride : surf->width);
+    alh = surf->aligned_h ? surf->aligned_h :
+          (c && c->cap_height ? c->cap_height : surf->height);
+    cap_fcc = surf->cap_fourcc ? surf->cap_fourcc :
+              (c && c->cap_pixelformat ? c->cap_pixelformat : V4L2_PIX_FMT_NV12);
+    drm_fcc = v4l2sl_drm_fourcc_for_capture(cap_fcc);
+    plane_size = v4l2sl_capture_plane_size(cap_fcc, stride, alh);
+
+    fd = dup(surf->dma_buf_fd);
+    if (fd < 0)
+        return VA_STATUS_ERROR_OPERATION_FAILED;
+
+    memset(desc, 0, sizeof(*desc));
+    desc->fourcc = v4l2sl_va_fourcc_for_capture(cap_fcc);
+    if (cap_fcc == V4L2_PIX_FMT_NV12)
+        desc->fourcc = VA_FOURCC_NV12;
+    desc->width = surf->width;
+    desc->height = surf->height;
+    desc->num_objects = 1;
+    desc->objects[0].fd = fd;
+    desc->objects[0].size = plane_size;
+    desc->objects[0].drm_format_modifier = DRM_FORMAT_MOD_LINEAR;
+
+    if (flags & VA_EXPORT_SURFACE_SEPARATE_LAYERS) {
+        desc->num_layers = 2;
+        desc->layers[0].drm_format = (cap_fcc == V4L2_PIX_FMT_NV15) ?
+            DRM_FORMAT_R16 : DRM_FORMAT_R8;
+        desc->layers[0].num_planes = 1;
+        desc->layers[0].object_index[0] = 0;
+        desc->layers[0].offset[0] = 0;
+        desc->layers[0].pitch[0] = stride;
+        desc->layers[1].drm_format = (cap_fcc == V4L2_PIX_FMT_NV15) ?
+            DRM_FORMAT_GR1616 : DRM_FORMAT_GR88;
+        desc->layers[1].num_planes = 1;
+        desc->layers[1].object_index[0] = 0;
+        desc->layers[1].offset[0] = stride * alh;
+        desc->layers[1].pitch[0] = stride;
+    } else {
+        desc->num_layers = 1;
+        desc->layers[0].drm_format = drm_fcc;
+        desc->layers[0].num_planes = 2;
+        desc->layers[0].object_index[0] = 0;
+        desc->layers[0].object_index[1] = 0;
+        desc->layers[0].offset[0] = 0;
+        desc->layers[0].offset[1] = stride * alh;
+        desc->layers[0].pitch[0] = stride;
+        desc->layers[0].pitch[1] = stride;
+    }
+    return VA_STATUS_SUCCESS;
 }
 
 /*

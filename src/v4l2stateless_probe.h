@@ -12,21 +12,33 @@
 #define V4L2SL_PROBE_MAX_FOURCCS 32
 #define V4L2SL_PROBE_MAX_NODES   64
 
+/* request_api: 0 = not probed (eligible), 1 = usable, 2 = skip. */
+#define V4L2SL_REQAPI_UNKNOWN 0
+#define V4L2SL_REQAPI_YES     1
+#define V4L2SL_REQAPI_NO      2
+
 struct v4l2sl_node_fmts {
     const char *path;
     const uint32_t *fourccs;
     unsigned n_fourccs;
+    int request_api;
 };
 
 int v4l2sl_codec_coded_fourcc(enum v4l2sl_codec codec, uint32_t *fourcc_out);
 const char *v4l2sl_codec_name(enum v4l2sl_codec codec);
 void v4l2sl_fourcc_to_str(uint32_t fourcc, char out[5]);
 
-/* First node whose OUTPUT fourcc list contains the codec's coded format.
+/* First node whose OUTPUT fourcc list contains the codec's coded format
+ * and whose request_api is not V4L2SL_REQAPI_NO.
  * Returns NULL if none match. Does not open devices. */
 const char *v4l2sl_pick_device_for_codec(enum v4l2sl_codec codec,
                                          const struct v4l2sl_node_fmts *nodes,
                                          unsigned n_nodes);
+
+/* Sysfs videoN → /dev/mediaM. 0 on success. */
+int v4l2sl_find_media_path(const char *video_path, char *out, unsigned out_len);
+/* 1 if MEDIA_IOC_REQUEST_ALLOC works on the sibling media node. */
+int v4l2sl_video_has_request_api(const char *video_path);
 
 int v4l2sl_enum_output_fourccs(int fd, uint32_t *out, unsigned max);
 

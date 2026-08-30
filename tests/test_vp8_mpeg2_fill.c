@@ -130,10 +130,71 @@ static void test_mpeg2_fcode_and_defaults(void)
     expect_true(q.non_intra_quantiser_matrix[0] == 16, "mpeg2-default-nonintra");
 }
 
+static void test_h264_sps_pps(void)
+{
+    VAPictureParameterBufferH264 pic;
+    VASliceParameterBufferH264 slice;
+    struct v4l2_ctrl_h264_sps sps;
+    struct v4l2_ctrl_h264_pps pps;
+    struct v4l2_ctrl_h264_decode_params dec;
+    VAIQMatrixBufferH264 iq;
+    struct v4l2_ctrl_h264_scaling_matrix sm;
+
+    memset(&pic, 0, sizeof(pic));
+    memset(&slice, 0, sizeof(slice));
+    pic.picture_width_in_mbs_minus1 = 119;
+    pic.picture_height_in_mbs_minus1 = 67;
+    pic.bit_depth_luma_minus8 = 0;
+    pic.bit_depth_chroma_minus8 = 0;
+    pic.num_ref_frames = 4;
+    pic.seq_fields.bits.chroma_format_idc = 1;
+    pic.seq_fields.bits.frame_mbs_only_flag = 1;
+    pic.seq_fields.bits.log2_max_frame_num_minus4 = 0;
+    pic.pic_fields.bits.entropy_coding_mode_flag = 1;
+    pic.pic_fields.bits.transform_8x8_mode_flag = 1;
+    pic.pic_init_qp_minus26 = 0;
+    slice.slice_type = 2;
+    slice.num_ref_idx_l0_active_minus1 = 0;
+    slice.num_ref_idx_l1_active_minus1 = 0;
+
+    h264_fill_sps(&sps, &pic, VAProfileH264High);
+    expect_true(sps.profile_idc == 100, "h264-high-idc");
+    expect_true(sps.pic_width_in_mbs_minus1 == 119, "h264-mb-w");
+    expect_true(sps.pic_height_in_map_units_minus1 == 67, "h264-mb-h");
+    expect_true(sps.flags & V4L2_H264_SPS_FLAG_FRAME_MBS_ONLY, "h264-frame-mbs");
+
+    h264_fill_sps(&sps, &pic, VAProfileH264ConstrainedBaseline);
+    expect_true(sps.profile_idc == 66, "h264-baseline-idc");
+    h264_fill_sps(&sps, &pic, VAProfileH264High10);
+    expect_true(sps.profile_idc == 110, "h264-high10-idc");
+    h264_fill_sps(&sps, &pic, VAProfileH264High422);
+    expect_true(sps.profile_idc == 122, "h264-high422-idc");
+
+    h264_fill_pps(&pps, &pic, &slice);
+    expect_true(pps.flags & V4L2_H264_PPS_FLAG_ENTROPY_CODING_MODE, "h264-cabac");
+    expect_true(pps.flags & V4L2_H264_PPS_FLAG_TRANSFORM_8X8_MODE, "h264-8x8");
+
+    pic.frame_num = 0;
+    pic.pic_fields.bits.reference_pic_flag = 1;
+    for (int i = 0; i < 16; i++)
+        pic.ReferenceFrames[i].flags = VA_PICTURE_H264_INVALID;
+    h264_fill_decode_params(&dec, &pic, NULL, &slice);
+    expect_true(dec.flags & V4L2_H264_DECODE_PARAM_FLAG_IDR_PIC, "h264-idr");
+    expect_true(dec.frame_num == 0, "h264-fn0");
+
+    memset(&iq, 0, sizeof(iq));
+    iq.ScalingList4x4[0][0] = 16;
+    iq.ScalingList8x8[0][0] = 16;
+    h264_fill_scaling_matrix(&sm, &iq);
+    expect_true(sm.scaling_list_4x4[0][0] == 16, "h264-scale4");
+    expect_true(sm.scaling_list_8x8[0][0] == 16, "h264-scale8");
+}
+
 int main(void)
 {
     test_vp8_key_polarity();
     test_vp8_quant_deltas();
     test_mpeg2_fcode_and_defaults();
+    test_h264_sps_pps();
     return g_fail ? 1 : 0;
 }

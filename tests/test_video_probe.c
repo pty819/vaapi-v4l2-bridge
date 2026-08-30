@@ -63,18 +63,18 @@ static int run_unit(void)
         v4l2_fourcc('M', 'G', '2', 'S'), v4l2_fourcc('V', 'P', '8', 'F')
     };
     struct v4l2sl_node_fmts current[] = {
-        { "/dev/video0", rga, 1 },
-        { "/dev/video1", rkvdec, 2 },
-        { "/dev/video2", mpegvp8, 2 },
-        { "/dev/video3", rga, 1 },
-        { "/dev/video4", av1, 1 },
+        { "/dev/video0", rga, 1, V4L2SL_REQAPI_UNKNOWN },
+        { "/dev/video1", rkvdec, 2, V4L2SL_REQAPI_UNKNOWN },
+        { "/dev/video2", mpegvp8, 2, V4L2SL_REQAPI_UNKNOWN },
+        { "/dev/video3", rga, 1, V4L2SL_REQAPI_UNKNOWN },
+        { "/dev/video4", av1, 1, V4L2SL_REQAPI_UNKNOWN },
     };
     struct v4l2sl_node_fmts swapped[] = {
-        { "/dev/video1", av1, 1 },
-        { "/dev/video4", rkvdec, 2 },
+        { "/dev/video1", av1, 1, V4L2SL_REQAPI_UNKNOWN },
+        { "/dev/video4", rkvdec, 2, V4L2SL_REQAPI_UNKNOWN },
     };
     struct v4l2sl_node_fmts none[] = {
-        { "/dev/video0", rga, 1 },
+        { "/dev/video0", rga, 1, V4L2SL_REQAPI_UNKNOWN },
     };
     uint32_t fcc;
     char tag[8];
@@ -102,6 +102,40 @@ static int run_unit(void)
               NULL, "vp8-swapped-missing");
     expect_eq(v4l2sl_pick_device_for_codec(V4L2SL_CODEC_MPEG2, swapped, 2),
               NULL, "mpeg2-swapped-missing");
+
+    printf("== AV1 stub without request API, later sibling usable ==\n");
+    {
+        struct v4l2sl_node_fmts stub_then_real[] = {
+            { "/dev/video3", av1, 1, V4L2SL_REQAPI_NO },
+            { "/dev/video4", av1, 1, V4L2SL_REQAPI_YES },
+        };
+        expect_eq(v4l2sl_pick_device_for_codec(V4L2SL_CODEC_AV1, stub_then_real, 2),
+                  "/dev/video4", "av1-skip-stub");
+    }
+    printf("== swapped numbers plus AV1 stub at video1 ==\n");
+    {
+        struct v4l2sl_node_fmts swapped_stub[] = {
+            { "/dev/video1", av1, 1, V4L2SL_REQAPI_NO },
+            { "/dev/video2", av1, 1, V4L2SL_REQAPI_YES },
+            { "/dev/video4", rkvdec, 2, V4L2SL_REQAPI_YES },
+        };
+        expect_eq(v4l2sl_pick_device_for_codec(V4L2SL_CODEC_AV1, swapped_stub, 3),
+                  "/dev/video2", "av1-swapped-skip-stub");
+        expect_eq(v4l2sl_pick_device_for_codec(V4L2SL_CODEC_H264, swapped_stub, 3),
+                  "/dev/video4", "h264-swapped-skip-stub");
+        expect_eq(v4l2sl_pick_device_for_codec(V4L2SL_CODEC_HEVC, swapped_stub, 3),
+                  "/dev/video4", "hevc-swapped-skip-stub");
+    }
+
+    printf("== all AV1 nodes lack request API ==\n");
+    {
+        struct v4l2sl_node_fmts all_stub[] = {
+            { "/dev/video3", av1, 1, V4L2SL_REQAPI_NO },
+            { "/dev/video4", av1, 1, V4L2SL_REQAPI_NO },
+        };
+        expect_eq(v4l2sl_pick_device_for_codec(V4L2SL_CODEC_AV1, all_stub, 2),
+                  NULL, "av1-all-stubs");
+    }
 
     printf("== missing fourcc ==\n");
     expect_eq(v4l2sl_pick_device_for_codec(V4L2SL_CODEC_H264, none, 1),
@@ -177,6 +211,20 @@ static int run_live(void)
             g_fail++;
         } else {
             printf("OK live AV1 %s has AV1F\n", av1);
+        }
+        if (av1[0]) {
+            char media[64];
+
+            if (!v4l2sl_video_has_request_api(av1)) {
+                fprintf(stderr, "FAIL live AV1 %s has no media request\n", av1);
+                g_fail++;
+            } else {
+                printf("OK live AV1 %s has request API\n", av1);
+            }
+            if (v4l2sl_find_media_path(av1, media, sizeof(media)) == 0)
+                printf("live AV1 media -> %s\n", media);
+            else
+                printf("live AV1 media -> (none)\n");
         }
     }
     if (v4l2sl_codec_coded_fourcc(V4L2SL_CODEC_VP8, &fcc) == 0) {

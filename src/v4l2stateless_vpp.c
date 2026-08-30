@@ -215,7 +215,7 @@ VAStatus v4l2sl_vpp_run(struct v4l2sl_context *ctx,
               (dst_fcc == VA_FOURCC_ARGB || dst_fcc == VA_FOURCC_BGRA ||
                dst_fcc == VA_FOURCC_BGRX) ? 4 : 1;
 
-    if (src->dma_buf_fd >= 0 && src->stride) {
+    if (src->dma_buf_fd >= 0 && src->buf_index >= 0 && src->stride) {
         src_map_sz = v4l2sl_capture_plane_size(
             src->cap_fourcc ? src->cap_fourcc : V4L2_PIX_FMT_NV12,
             src->stride, src->aligned_h ? src->aligned_h : src->height);

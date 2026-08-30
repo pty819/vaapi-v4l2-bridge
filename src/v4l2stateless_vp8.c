@@ -197,6 +197,12 @@ VAStatus v4l2sl_vp8_translate(struct v4l2sl_context *ctx,
         return VA_STATUS_ERROR_OPERATION_FAILED;
     }
 
+    if (v4l2sl_ensure_capture(ctx, pic_param->frame_width, pic_param->frame_height,
+                              V4L2_PIX_FMT_NV12) < 0) {
+        fprintf(stderr, "v4l2stateless: VP8 capture reconfig failed\n");
+        return VA_STATUS_ERROR_OPERATION_FAILED;
+    }
+
     if (!ctx->streamed) {
         if (v4l2sl_streamon(v4l2_fd, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE) < 0 ||
             v4l2sl_streamon(v4l2_fd, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE) < 0) {

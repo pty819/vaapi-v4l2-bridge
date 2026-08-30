@@ -936,6 +936,19 @@ VAStatus v4l2sl_av1_translate(struct v4l2sl_context *ctx,
         return VA_STATUS_ERROR_OPERATION_FAILED;
     }
 
+    {
+        int w = (int)pic_param->frame_width_minus1 + 1;
+        int h = (int)pic_param->frame_height_minus1 + 1;
+        int chroma_idc = pic_param->seq_info_fields.fields.subsampling_x ? 1 : 2;
+        uint32_t cap = v4l2sl_capture_fourcc_from_sps(
+            pic_param->bit_depth_idx * 2, chroma_idc);
+
+        if (v4l2sl_ensure_capture(ctx, w, h, cap) < 0) {
+            fprintf(stderr, "v4l2stateless: AV1 capture reconfig failed\n");
+            return VA_STATUS_ERROR_OPERATION_FAILED;
+        }
+    }
+
     if (!ctx->streamed) {
         if (v4l2sl_streamon(v4l2_fd, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE) < 0 ||
             v4l2sl_streamon(v4l2_fd, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE) < 0) {

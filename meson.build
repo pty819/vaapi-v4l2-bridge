@@ -65,9 +65,38 @@ test_vp8_mpeg2_fill = executable('test_vp8_mpeg2_fill',
   files('tests/test_vp8_mpeg2_fill.c',
         'src/v4l2stateless_vp8.c',
         'src/v4l2stateless_mpeg2.c',
-        'src/v4l2stateless_device.c'),
+        'src/v4l2stateless_h264.c',
+        'src/v4l2stateless_device.c',
+        'src/v4l2stateless_format.c',
+        'src/v4l2stateless_probe.c'),
   include_directories: inc,
   dependencies: [libva_dep, libdrm_dep],
 )
 
 test('vp8_mpeg2_fill', test_vp8_mpeg2_fill)
+
+test_export_recapture = executable('test_export_recapture',
+  files('tests/test_export_recapture.c',
+        'src/v4l2stateless_device.c',
+        'src/v4l2stateless_format.c',
+        'src/v4l2stateless_probe.c',
+        'src/v4l2stateless_av1.c',
+        'src/v4l2stateless_h264.c',
+        'src/v4l2stateless_hevc.c',
+        'src/v4l2stateless_vp8.c',
+        'src/v4l2stateless_mpeg2.c'),
+  include_directories: inc,
+  dependencies: [libva_dep, libdrm_dep],
+)
+
+test('export_recapture', test_export_recapture)
+
+test_format = executable('test_format',
+  files('tests/test_format.c',
+        'src/v4l2stateless_format.c',
+        'src/v4l2stateless_vpp.c'),
+  include_directories: inc,
+  dependencies: [libva_dep, libdrm_dep],
+)
+
+test('format', test_format)
