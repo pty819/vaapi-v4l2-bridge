@@ -252,10 +252,8 @@ static void release_ctx_capture_surfaces(struct v4l2sl_context *ctx)
         s = ctx->driver_data->surfaces[id];
         if (!s)
             continue;
-        if (s->dma_buf_fd >= 0) {
-            close(s->dma_buf_fd);
-            s->dma_buf_fd = -1;
-        }
+        /* Keep the create-time memfd. Closing a V4L2 EXPBUF fd while the
+         * GPU still holds a dup hangs the RK3588 CMA pool. */
         s->buf_index = -1;
     }
 }
@@ -541,22 +539,85 @@ int v4l2sl_surface_alloc_export_fd(struct v4l2sl_surface *s)
     return 0;
 }
 
+int v4l2sl_surface_grow_memfd(struct v4l2sl_surface *s, uint32_t size)
+{
+    if (!s)
+        return -1;
+    if (s->dma_buf_fd < 0 && v4l2sl_surface_alloc_export_fd(s) < 0)
+        return -1;
+    if (size == 0 || s->dma_buf_fd < 0)
+        return 0;
+    if (ftruncate(s->dma_buf_fd, (off_t)size) < 0)
+        return -1;
+    return 0;
+}
+
+int v4l2sl_surface_pull_capture(struct v4l2sl_context *ctx,
+                                struct v4l2sl_surface *surf, int buf_index)
+{
+    int vfd;
+    uint32_t sz, stride, alh, fcc;
+    void *src, *dst;
+
+    if (!ctx || !surf || ctx->v4l2_fd < 0 || buf_index < 0)
+        return -1;
+
+    stride = ctx->cap_stride ? ctx->cap_stride : (uint32_t)ctx->width;
+    alh = ctx->cap_height ? ctx->cap_height : (uint32_t)ctx->height;
+    fcc = ctx->cap_pixelformat ? ctx->cap_pixelformat : V4L2_PIX_FMT_NV12;
+    sz = ctx->cap_sizeimage ? ctx->cap_sizeimage :
+         v4l2sl_capture_plane_size(fcc, stride, alh);
+    if (!sz)
+        return -1;
+
+    vfd = v4l2sl_export_dmabuf(ctx->v4l2_fd, buf_index);
+    if (vfd < 0)
+        return -1;
+    if (v4l2sl_surface_grow_memfd(surf, sz) < 0) {
+        close(vfd);
+        return -1;
+    }
+
+    src = mmap(NULL, sz, PROT_READ, MAP_SHARED, vfd, 0);
+    dst = mmap(NULL, sz, PROT_READ | PROT_WRITE, MAP_SHARED, surf->dma_buf_fd, 0);
+    if (src == MAP_FAILED || dst == MAP_FAILED) {
+        if (src != MAP_FAILED)
+            munmap(src, sz);
+        if (dst != MAP_FAILED)
+            munmap(dst, sz);
+        close(vfd);
+        return -1;
+    }
+    memcpy(dst, src, sz);
+    munmap(src, sz);
+    munmap(dst, sz);
+    close(vfd);
+
+    surf->buf_index = buf_index;
+    surf->stride = stride;
+    surf->aligned_h = alh;
+    surf->cap_fourcc = fcc;
+    return 0;
+}
+
 int v4l2sl_bind_capture_export(struct v4l2sl_context *ctx)
 {
     int i, n;
+    uint32_t sz;
 
-    if (!ctx || !ctx->driver_data || ctx->v4l2_fd < 0 ||
-        ctx->capture_bufs_allocd <= 0)
+    if (!ctx || !ctx->driver_data || ctx->capture_bufs_allocd <= 0)
         return -1;
 
-    n = ctx->num_render_targets;
-    if (n > ctx->capture_bufs_allocd)
-        n = ctx->capture_bufs_allocd;
+    sz = ctx->cap_sizeimage;
+    if (!sz)
+        sz = v4l2sl_capture_plane_size(ctx->cap_pixelformat ? ctx->cap_pixelformat
+                                                            : V4L2_PIX_FMT_NV12,
+                                       ctx->cap_stride, ctx->cap_height);
 
+    n = ctx->num_render_targets;
     for (i = 0; i < n; i++) {
         VASurfaceID id;
         struct v4l2sl_surface *s;
-        int fd;
 
         if (!ctx->render_targets)
             break;
@@ -566,12 +627,8 @@ int v4l2sl_bind_capture_export(struct v4l2sl_context *ctx)
         s = ctx->driver_data->surfaces[id];
         if (!s)
             continue;
-        fd = v4l2sl_export_dmabuf(ctx->v4l2_fd, i);
-        if (fd < 0)
+        if (v4l2sl_surface_grow_memfd(s, sz) < 0)
             continue;
-        if (s->dma_buf_fd >= 0)
-            close(s->dma_buf_fd);
-        s->dma_buf_fd = fd;
         s->stride = ctx->cap_stride;
         s->aligned_h = ctx->cap_height;
         s->cap_fourcc = ctx->cap_pixelformat;

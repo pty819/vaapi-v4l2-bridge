@@ -193,6 +193,9 @@ int v4l2sl_queue_output(int fd, int buf_index, const uint8_t *data, uint32_t siz
 int v4l2sl_queue_capture(int fd, int buf_index, int request_fd);
 int v4l2sl_export_dmabuf(int fd, int buf_index);
 int v4l2sl_surface_alloc_export_fd(struct v4l2sl_surface *s);
+int v4l2sl_surface_grow_memfd(struct v4l2sl_surface *s, uint32_t size);
+int v4l2sl_surface_pull_capture(struct v4l2sl_context *ctx,
+                                struct v4l2sl_surface *surf, int buf_index);
 int v4l2sl_bind_capture_export(struct v4l2sl_context *ctx);
 VAStatus v4l2sl_surface_fill_prime(const struct v4l2sl_surface *surf,
                                    const struct v4l2sl_context *c,

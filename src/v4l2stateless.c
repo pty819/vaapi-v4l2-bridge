@@ -1025,10 +1025,7 @@ v4l2sl_begin_picture(VADriverContextP ctx,
             context->n_free_cap < V4L2SL_NUM_CAPTURE_BUFS)
             context->free_cap_bufs[context->n_free_cap++] = surface->buf_index;
         surface->buf_index = -1;
-        if (surface->dma_buf_fd >= 0) {
-            close(surface->dma_buf_fd);
-            surface->dma_buf_fd = -1;
-        }
+        /* Keep memfd so DRM-PRIME clients retain a stable fd. */
     }
 
     /* Allocate a V4L2 request for this picture */

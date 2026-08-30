@@ -448,15 +448,8 @@ VAStatus v4l2sl_hevc_translate(struct v4l2sl_context *ctx,
 
     struct v4l2sl_surface *surf = ctx->current_surface;
     if (surf) {
-        if (surf->dma_buf_fd >= 0)
-            close(surf->dma_buf_fd);
-        surf->buf_index = done_cap;
-        surf->dma_buf_fd = v4l2sl_export_dmabuf(v4l2_fd, done_cap);
-        if (ctx->cap_stride) {
-            surf->stride = ctx->cap_stride;
-            surf->aligned_h = ctx->cap_height;
-            surf->cap_fourcc = ctx->cap_pixelformat;
-        }
+        if (v4l2sl_surface_pull_capture(ctx, surf, done_cap) < 0)
+            fprintf(stderr, "v4l2stateless: HEVC pull capture failed\n");
     } else {
         ctx->free_cap_bufs[ctx->n_free_cap++] = done_cap;
     }

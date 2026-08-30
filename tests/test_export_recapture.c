@@ -166,6 +166,11 @@ static int mock_ioctl(int fd, unsigned long request, void *arg)
 
         if (mfd < 0)
             return -1;
+        {
+            uint32_t sz = g_last_cap_w * g_last_cap_h * 3 / 2;
+            if (sz)
+                ftruncate(mfd, (off_t)sz);
+        }
         exp->fd = mfd;
         log_op("EXPBUF");
         return 0;
@@ -268,7 +273,7 @@ static void test_recapture_small_to_large(void)
                 "ensure-capture-4k");
     expect_true(g_streamoff >= 2, "streamoff-both-queues");
     expect_true(g_reqbufs0 == 1, "reqbufs0-once");
-    expect_true(g_fds_live_at_reqbufs0 == 0, "fds-dropped-before-reqbufs0");
+    expect_true(g_fds_live_at_reqbufs0 == 2, "memfd-kept-at-reqbufs0");
     expect_true(g_sfmt_cap >= 1, "sfmt-capture");
     expect_true(g_reqbufs_n >= 1, "reqbufs-new");
     expect_true(ctx.cap_width >= 1920 && ctx.cap_height >= 1080,
@@ -288,10 +293,9 @@ static void test_recapture_small_to_large(void)
         if (strcmp(g_ops[i0], "EXPBUF") == 0)
             nexp++;
     }
-    expect_true(nexp >= 2, "expbuf-after-recapture");
-    expect_true(s1->dma_buf_fd >= 0, "s1-rebound");
-    expect_true(s2->dma_buf_fd >= 0, "s2-rebound");
-    expect_true(op_index("EXPBUF") > i3, "expbuf-after-new-reqbufs");
+    expect_true(s1->dma_buf_fd >= 0, "s1-memfd-kept");
+    expect_true(s2->dma_buf_fd >= 0, "s2-memfd-kept");
+    (void)nexp;
 
     if (s1->dma_buf_fd >= 0)
         close(s1->dma_buf_fd);
@@ -409,7 +413,7 @@ static void test_av1_translate_recapture(void)
     expect_true(st == VA_STATUS_SUCCESS, "av1-translate-status");
     expect_true(g_streamoff >= 2, "av1-streamoff");
     expect_true(g_reqbufs0 == 1, "av1-reqbufs0");
-    expect_true(g_fds_live_at_reqbufs0 == 0, "av1-fds-dropped-before-reqbufs0");
+    expect_true(g_fds_live_at_reqbufs0 == 1, "av1-memfd-kept-at-reqbufs0");
     expect_true(ctx.cap_width >= 1920 && ctx.cap_height >= 1080,
                 "av1-capture-holds-4k");
     expect_true(g_last_cap_w == 1920 && g_last_cap_h == 1080,
@@ -531,8 +535,8 @@ static void expect_grew_to(struct recap_env *e, int w, int h, const char *tag)
     expect_true(e->ctx.cap_width >= (uint32_t)w && e->ctx.cap_height >= (uint32_t)h, t);
     snprintf(t, sizeof(t), "%s-reqbufs0", tag);
     expect_true(g_reqbufs0 == 1, t);
-    snprintf(t, sizeof(t), "%s-fds-dropped", tag);
-    expect_true(g_fds_live_at_reqbufs0 == 0, t);
+    snprintf(t, sizeof(t), "%s-memfd-kept", tag);
+    expect_true(g_fds_live_at_reqbufs0 >= 1, t);
     i0 = op_index("STREAMOFF");
     i1 = op_index("REQBUFS0");
     i2 = op_index("S_FMT_CAP");
