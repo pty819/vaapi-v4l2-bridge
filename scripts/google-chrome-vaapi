@@ -17,11 +17,17 @@
 # for 1080p H.264 (the v4l2stateless driver logs "capture mmap idx=" per
 # decoded VPU buffer when V4L2SL_DEBUG is set).
 #
-# Zero-copy GL import is disabled on purpose. This bridge copies VPU frames
-# into a memfd (EXPBUF dma-buf hangs the RK3588 CMA pool), so Chrome's
-# AcceleratedVideoDecodeLinuxZeroCopyGL path always fails eglCreateImage
-# (EGL_BAD_ALLOC 0x3003) and LOG(ERROR)s every frame. Disabling that
-# feature keeps VaapiVideoDecoder but skips the doomed import+log loop.
+# Zero-copy GL display path WORKS since 2026-09-03 (GBM display surfaces):
+# the driver exports every Chrome-visible surface as a driver-owned linear
+# GBM bo (single-object NV12 dmabuf - the shape Chromium requires), while
+# the VPU/CMA buffers stay in the kernel (EXPBUF chip-bug ban untouched).
+# The default AcceleratedVideoDecodeLinuxZeroCopyGL path then imports every
+# frame successfully: hardware decode AND a visible picture, zero
+# eglCreateImage errors (verified live 1080p).
+#
+# Do NOT disable ZeroCopyGL: that pushes VaapiVideoDecoder into the
+# ImageProcessor output path, which does not exist on this platform, and
+# Chrome silently drops to FFmpeg software for the whole session.
 set -u
 export LIBVA_DRIVER_NAME="${LIBVA_DRIVER_NAME:-v4l2stateless}"
 

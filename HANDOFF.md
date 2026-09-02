@@ -248,7 +248,7 @@ Debian/XtraDeb 的 arm64 Chromium 编的是 `use_v4l2_codec`，直连 `/dev/vide
 | `tests/test_vp8_mpeg2_fill.c` | VP8/MPEG-2 control 填充单测 |
 
 GStreamer AV1 对照：`gstv4l2codecav1dec.c`。内核：`drivers/media/platform/verisilicon/rockchip_vpu981_hw_av1_dec.c`。
-- **7ec4e39 的 ZeroCopyGL disable 曾把 Chrome 硬解修坏（09-02 深夜定位并已修复）**：真实根因不是流——包装脚本  把 VaapiVideoDecoder 逼进 ImageProcessor 输出路径，本平台没有 ImageProcessor（vmodule 实锤："Unable to find ImageProcessor to convert format" + CroStatus 6 → PIPELINE_ERROR_DECODE），Chrome 静默降级 FFmpeg 软解且整个会话不再重试。ZeroCopyGL 保持默认开：每帧 EGLImage 导入失败会刷 stderr（~26 行/s，已知噪音）但 Chrome 回退 CPU 拷贝、硬解继续。包装脚本已改回只禁 Vulkan 并写了长注释防再犯；bilibili 直播实测 VaapiVideoDecoder 稳定、GPU 进程 61 个解码 surface。更早的 mid-GDP 首帧理论作废
+- **7ec4e39 的 ZeroCopyGL disable 曾把 Chrome 硬解修坏（09-02 深夜定位并已修复）**：真实根因不是流——包装脚本  把 VaapiVideoDecoder 逼进 ImageProcessor 输出路径，本平台没有 ImageProcessor（vmodule 实锤："Unable to find ImageProcessor to convert format" + CroStatus 6 → PIPELINE_ERROR_DECODE），Chrome 静默降级 FFmpeg 软解且整个会话不再重试。ZeroCopyGL 保持默认开。（**此句 09-03 起过时**：GBM 显示 surface 落地后零拷贝导入每帧成功、零 eglCreateImage 错误，见下方 09-03 段；当时的“失败刷噪音+回退 CPU 拷贝”描述作废。）包装脚本已改回只禁 Vulkan 并写了长注释防再犯；bilibili 直播实测 VaapiVideoDecoder 稳定、GPU 进程 61 个解码 surface。更早的 mid-GDP 首帧理论作废
 
 ## 2026-09-03 — GBM display surfaces (Chrome hw decode + visible picture)
 

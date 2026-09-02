@@ -6,7 +6,7 @@ instead of a real i915/AMD VA driver or a vendor MPP stack.
 This is the RK3588 / Orange Pi 5 setup used on the development NAS. Codec
 support and the `hwdownload` success rule are in [README.md](README.md).
 
-Last verified **2026-08-29** on the development NAS: `LIBVA_DRIVER_NAME=v4l2stateless` is in `~/.config/environment.d/90-libva.conf`; Chrome menu uses `/usr/local/bin/google-chrome-vaapi`; Firefox is Mozilla `.deb` 154.0.1 with `user.js` in both profiles; VLC `avcodec-hw=vaapi`.
+Last verified **2026-09-03** on the development NAS (Chrome live hw decode + visible picture on bilibili 1080p): `LIBVA_DRIVER_NAME=v4l2stateless` is in `~/.config/environment.d/90-libva.conf`; Chrome menu uses `/usr/local/bin/google-chrome-vaapi`; Firefox is Mozilla `.deb` 154.0.1 with `user.js` in both profiles; VLC `avcodec-hw=vaapi`.
 
 
 ## One environment variable for everyone
@@ -127,13 +127,41 @@ kIsPlatformVideoDecode     true
 
 The driver side prints `H.264 config uses /dev/videoN` per session. Per-buffer
 `capture mmap idx=` lines are gated behind `V4L2SL_DEBUG=1`. Verified
-2026-09-02 with a 1080p/60s testsrc clip.
+2026-09-03 live on bilibili 1080p: `VaapiVideoDecoder` + non-black canvas
+frames + GPU process holds the rkvdec node + zero `eglCreateImage` errors.
 
-The wrapper also disables `AcceleratedVideoDecodeLinuxZeroCopyGL`. Frames from
-this bridge live in a memfd, not a dma-buf, so Chrome's zero-copy EGLImage
-import always fails (`eglCreateImage` EGL_BAD_ALLOC) and used to `LOG(ERROR)`
-every frame. Hardware decode still uses `VaapiVideoDecoder`; only the doomed
-zero-copy import is skipped.
+### Zero-copy display path (GBM surfaces, since 2026-09-03)
+
+Chrome's zero-copy GL path (default `AcceleratedVideoDecodeLinuxZeroCopyGL`)
+works end to end. The driver exports every Chrome-visible surface as a
+driver-owned **linear GBM bo** on `/dev/dri/renderD128` — a real
+single-object NV12 dma-buf (Y@0, UV@stride*h; Chromium rejects
+`num_objects != 1`) — while the VPU/CMA buffers are still never exported
+(the EXPBUF chip-bug ban is untouched). Verified live on bilibili 1080p:
+`VaapiVideoDecoder`, zero `eglCreateImage` errors, non-black frames,
+~44 `MEDIA_REQUEST_IOC_QUEUE`/s on rkvdec.
+
+Do **not** disable `AcceleratedVideoDecodeLinuxZeroCopyGL`: that pushes
+VaapiVideoDecoder into the ImageProcessor output path, which does not exist
+on this platform; Chrome then silently drops to FFmpeg software for the
+whole session (it caches the first VA failure and never retries Vaapi
+in-session).
+
+Operating notes:
+
+- **Restart Chrome after updating the driver `.so`.** Same failure cache as
+  above: a session that saw a broken driver stays on software until
+  relaunch, even after you fix and reinstall the driver.
+- **10-bit / 4:2:2 content decodes in software.** The GBM export is
+  NV12-only for now (10-bit would need an R16-bo P010 layout). 8-bit 4:2:0
+  H.264 / HEVC / VP8 goes through the VPU.
+- GBM allocation follows `V4L2SL_RENDER_NODE` (default
+  `/dev/dri/renderD128`). A failed GBM init degrades export to
+  `VA_STATUS_ERROR_UNIMPLEMENTED` (clean software fallback), never breaks
+  the decode path.
+- Black-video triage: `LD_PRELOAD` `tests/ioctl_interpose.so` into Chrome
+  and read stderr — `PRIME_FD_TO_HANDLE target=/dmabuf:` is the good path;
+  `target=/memfd:v4l2sl-surf` means the memfd export lie came back.
 
 ---
 

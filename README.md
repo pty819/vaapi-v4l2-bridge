@@ -66,7 +66,7 @@ All of them need `LIBVA_DRIVER_NAME=v4l2stateless` in the **graphical** environm
 
 | App | Extra |
 |---|---|
-| Official Chrome arm64 | Wrapper [`scripts/google-chrome-vaapi`](scripts/google-chrome-vaapi): `--render-node-override` + `--disable-gpu-sandbox`. Distro Chromium arm64 does **not** use this `.so`. |
+| Official Chrome arm64 | Wrapper [`scripts/google-chrome-vaapi`](scripts/google-chrome-vaapi): render-node override, GPU-sandbox off, pure Wayland + ANGLE/GLES, Vulkan off (details in [APPS.md](APPS.md)); hw decode + zero-copy picture verified 2026-09-03. Distro Chromium arm64 does **not** use this `.so`. |
 | Firefox | [`scripts/firefox-vaapi-user.js`](scripts/firefox-vaapi-user.js) into the active profile. Use Mozilla's `.deb` repo, not Ubuntu's snap stub. |
 | VLC | `avcodec-hw=vaapi` in `vlcrc`. |
 
