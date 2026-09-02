@@ -105,8 +105,11 @@ int v4l2sl_gbm_surface_ensure(struct v4l2sl_surface *s)
         return -1;
     if (s->gbm_bo)
         return 0;
-    /* First release: NV12 only; everything else keeps the clean fallback. */
+    /* NV12 only; everything else keeps the clean fallback. cap_fourcc is
+     * set by decode; VPP/upload surfaces carry the VA fourcc instead. */
     if (s->cap_fourcc && s->cap_fourcc != V4L2_PIX_FMT_NV12)
+        return -1;
+    if (s->format && s->format != VA_FOURCC_NV12)
         return -1;
     dev = v4l2sl_gbm_device();
     if (!dev)
@@ -120,18 +123,32 @@ int v4l2sl_gbm_surface_ensure(struct v4l2sl_surface *s)
         return -1;
     }
     s->gbm_stride = gbm_bo_get_stride_for_plane(s->gbm_bo, 0);
-    /* Bring the bo up to date: by export time pull_capture has filled the
-     * memfd for this surface (export happens after vaSyncSurface). */
-    if (s->dma_buf_fd >= 0 && s->stride && s->aligned_h) {
+    v4l2sl_gbm_surface_sync(s);
+    return 0;
+}
+
+/* Upload the surface's current pixel data into its bo. The pixels live in
+ * either cpu_ptr (VPP output, vaPutImage uploads; image layout: Y@0,
+ * UV@cpu_stride*h) or the memfd (decode pull_capture; capture layout).
+ * The gbm_src marker says which writer touched it last. */
+int v4l2sl_gbm_surface_sync(struct v4l2sl_surface *s)
+{
+    if (!s || !s->gbm_bo)
+        return -1;
+    if (s->gbm_src == 1 && s->cpu_ptr && s->cpu_stride)
+        return v4l2sl_gbm_surface_upload(s, s->cpu_ptr, s->cpu_stride,
+                                         s->height);
+    if (s->gbm_src == 2 && s->dma_buf_fd >= 0 && s->stride && s->aligned_h) {
         uint32_t sz = v4l2sl_capture_plane_size(V4L2_PIX_FMT_NV12,
                                                 s->stride, s->aligned_h);
         void *m = mmap(NULL, sz, PROT_READ, MAP_SHARED, s->dma_buf_fd, 0);
-        if (m != MAP_FAILED) {
-            v4l2sl_gbm_surface_upload(s, m, s->stride, s->aligned_h);
-            munmap(m, sz);
-        }
+        if (m == MAP_FAILED)
+            return -1;
+        int r = v4l2sl_gbm_surface_upload(s, m, s->stride, s->aligned_h);
+        munmap(m, sz);
+        return r;
     }
-    return 0;
+    return -1;
 }
 
 void v4l2sl_gbm_surface_destroy(struct v4l2sl_surface *s)

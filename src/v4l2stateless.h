@@ -60,6 +60,7 @@ struct v4l2sl_surface {
     uint32_t cpu_stride;
     struct gbm_bo *gbm_bo;   /* driver-owned display copy (linear, R8) */
     uint32_t gbm_stride;
+    uint8_t gbm_src;         /* last writer of pixel data: 1=cpu_ptr, 2=memfd */
 };
 
 /* Parameter buffer */
@@ -273,6 +274,7 @@ VAStatus v4l2sl_surface_fill_prime(const struct v4l2sl_surface *surf,
  * decode surfaces. VPU capture buffers are never exported (chip bug); the
  * bo is panthor system memory kept in sync by pull_capture. */
 int v4l2sl_gbm_surface_ensure(struct v4l2sl_surface *s);
+int v4l2sl_gbm_surface_sync(struct v4l2sl_surface *s);
 int v4l2sl_gbm_surface_upload(struct v4l2sl_surface *s, const void *src,
                               uint32_t src_stride, uint32_t src_alh);
 void v4l2sl_gbm_surface_destroy(struct v4l2sl_surface *s);

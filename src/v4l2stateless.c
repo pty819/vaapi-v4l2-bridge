@@ -1754,6 +1754,10 @@ v4l2sl_put_image(VADriverContextP ctx,
     copy_h = (int)src_height < surf->height ? (int)src_height : surf->height;
     v4l2sl_copy_nv12(surf->cpu_ptr, surf->cpu_stride, src,
                      (uint32_t)copy_w, copy_h, copy_w, copy_h);
+    surf->gbm_src = 1;
+    if (surf->gbm_bo)
+        v4l2sl_gbm_surface_upload(surf, surf->cpu_ptr, surf->cpu_stride,
+                                  surf->height);
     pthread_mutex_unlock(&g_v4l2sl_lock);
     return VA_STATUS_SUCCESS;
 }
@@ -1826,7 +1830,8 @@ v4l2sl_export_surface_handle(VADriverContextP ctx, VASurfaceID surface_id,
      */
     c = context_for_surface(driver_data, surface_id);
     if (surf->buf_index >= 0 ||
-        (c && c->entrypoint == VAEntrypointVLD)) {
+        (c && c->entrypoint == VAEntrypointVLD) ||
+        surf->format == VA_FOURCC_NV12) {
         if (v4l2sl_gbm_surface_ensure(surf) < 0) {
             pthread_mutex_unlock(&g_v4l2sl_lock);
             return VA_STATUS_ERROR_UNIMPLEMENTED;

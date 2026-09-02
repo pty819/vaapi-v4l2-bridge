@@ -98,9 +98,10 @@ test('export_recapture', test_export_recapture)
 test_format = executable('test_format',
   files('tests/test_format.c',
         'src/v4l2stateless_format.c',
+        'src/v4l2stateless_gbm.c',
         'src/v4l2stateless_vpp.c'),
   include_directories: inc,
-  dependencies: [libva_dep, libdrm_dep],
+  dependencies: [libva_dep, libdrm_dep, gbm_dep],
 )
 
 test('format', test_format)
