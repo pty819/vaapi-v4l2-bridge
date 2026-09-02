@@ -52,4 +52,14 @@ int v4l2sl_scan_decoder_paths_ex(char *h264_out, char *hevc_out, char *av1_out,
 int v4l2sl_enum_capture_fourccs(int fd, uint32_t *out, unsigned max);
 int v4l2sl_scan_aux_paths(char *jpeg_enc_out, char *vpp_out, unsigned out_len);
 
+/* One-pass scan of /dev/video0..63 for every node type, cached across
+ * processes for the lifetime of the boot (XDG_RUNTIME_DIR, keyed by
+ * boot_id). Kills the per-vaInitialize reopen storm over every VPU node —
+ * vainfo / Chrome / Firefox startups all hit this path. Set
+ * V4L2SL_PROBE_NOCACHE=1 to force a fresh scan. */
+int v4l2sl_scan_all_cached(char *h264_out, char *hevc_out, char *av1_out,
+                           char *vp8_out, char *mpeg2_out,
+                           char *jpeg_enc_out, char *vpp_out,
+                           unsigned out_len);
+
 #endif

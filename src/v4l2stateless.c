@@ -27,7 +27,11 @@
 #include "v4l2stateless_probe.h"
 
 /* Global driver-wide lock — statically initialized, immune to struct-layout
- * or init-order issues; libva does not serialize client threads. */
+ * or init-order issues. libva dispatches to the backend without serializing
+ * client threads (its threading model makes thread safety a backend
+ * requirement), so every stateful vtable entry takes this lock. Decode
+ * (vaEndPicture) holds it across the synchronous request — callers on other
+ * threads may block up to the 3 s decode timeout. */
 static pthread_mutex_t g_v4l2sl_lock = PTHREAD_MUTEX_INITIALIZER;
 
 /* Supported profiles */
@@ -39,7 +43,9 @@ static const VAProfile v4l2sl_profiles[] = {
     VAProfileH264High422,
     VAProfileHEVCMain,
     VAProfileHEVCMain10,
-    VAProfileAV1Profile0,
+    /* AV1 (VPU981) is not advertised: short VA-API sessions reopen
+     * /dev/video4 and can hang the SoC. Desktop AV1 stays on
+     * Chromium/GStreamer native V4L2. */
     VAProfileVP8Version0_3,
     VAProfileMPEG2Simple,
     VAProfileMPEG2Main,
@@ -61,7 +67,6 @@ static const struct {
     { VAProfileH264High422,    VA_RT_FORMAT_YUV422 | VA_RT_FORMAT_YUV422_10 },
     { VAProfileHEVCMain,       VA_RT_FORMAT_YUV420 },
     { VAProfileHEVCMain10,     VA_RT_FORMAT_YUV420_10 },
-    { VAProfileAV1Profile0,    VA_RT_FORMAT_YUV420 },
     { VAProfileVP8Version0_3,  VA_RT_FORMAT_YUV420 },
     { VAProfileMPEG2Simple,    VA_RT_FORMAT_YUV420 },
     { VAProfileMPEG2Main,      VA_RT_FORMAT_YUV420 },
@@ -81,7 +86,6 @@ static const struct {
     { VAProfileH264High422, V4L2SL_CODEC_H264 },
     { VAProfileHEVCMain,    V4L2SL_CODEC_HEVC },
     { VAProfileHEVCMain10,  V4L2SL_CODEC_HEVC },
-    { VAProfileAV1Profile0, V4L2SL_CODEC_AV1  },
     { VAProfileVP8Version0_3, V4L2SL_CODEC_VP8 },
     { VAProfileMPEG2Simple, V4L2SL_CODEC_MPEG2 },
     { VAProfileMPEG2Main,   V4L2SL_CODEC_MPEG2 },
@@ -130,6 +134,16 @@ v4l2sl_terminate(VADriverContextP ctx)
 
     if (!driver_data)
         return VA_STATUS_SUCCESS;
+
+    pthread_mutex_lock(&g_v4l2sl_lock);
+    while (driver_data->contexts) {
+        struct v4l2sl_context *context = driver_data->contexts;
+        driver_data->contexts = context->next;
+        v4l2sl_release_context_device(context);
+        free(context->render_targets);
+        free(context);
+    }
+    pthread_mutex_unlock(&g_v4l2sl_lock);
 
     if (driver_data->media_fd >= 0)
         close(driver_data->media_fd);
@@ -312,9 +326,11 @@ v4l2sl_create_config(VADriverContextP ctx,
     }
 
     /* Simple ID allocation */
+    pthread_mutex_lock(&g_v4l2sl_lock);
     config->config_id = ++driver_data->next_config_id;
     config->next = driver_data->configs;
     driver_data->configs = config;
+    pthread_mutex_unlock(&g_v4l2sl_lock);
 
     *config_id = config->config_id;
     return VA_STATUS_SUCCESS;
@@ -326,15 +342,18 @@ v4l2sl_destroy_config(VADriverContextP ctx, VAConfigID config_id)
     struct v4l2sl_driver_data *driver_data = ctx->pDriverData;
     struct v4l2sl_config **pp = &driver_data->configs;
 
+    pthread_mutex_lock(&g_v4l2sl_lock);
     while (*pp) {
         if ((*pp)->config_id == config_id) {
             struct v4l2sl_config *config = *pp;
             *pp = config->next;
             free(config);
+            pthread_mutex_unlock(&g_v4l2sl_lock);
             return VA_STATUS_SUCCESS;
         }
         pp = &(*pp)->next;
     }
+    pthread_mutex_unlock(&g_v4l2sl_lock);
 
     return VA_STATUS_ERROR_INVALID_CONFIG;
 }
@@ -505,20 +524,27 @@ v4l2sl_create_surfaces(VADriverContextP ctx,
     else if (format == VA_RT_FORMAT_RGB32)
         format = VA_FOURCC_BGRX;
 
+    pthread_mutex_lock(&g_v4l2sl_lock);
     for (int i = 0; i < num_surfaces; i++) {
         struct v4l2sl_surface *surface = calloc(1, sizeof(*surface));
-        if (!surface) {
-            /* Clean up already created surfaces */
-            for (int j = 0; j < i; j++) {
-                if (driver_data->surfaces[surfaces[j]]) {
-                    if (driver_data->surfaces[surfaces[j]]->dma_buf_fd >= 0)
-                        close(driver_data->surfaces[surfaces[j]]->dma_buf_fd);
-                    free(driver_data->surfaces[surfaces[j]]->cpu_ptr);
-                    free(driver_data->surfaces[surfaces[j]]);
-                    driver_data->surfaces[surfaces[j]] = NULL;
-                }
-            }
-            return VA_STATUS_ERROR_ALLOCATION_FAILED;
+        VASurfaceID id;
+
+        if (!surface)
+            goto fail;
+
+        /* Recycle an ID or take the next free one; never index past the
+         * fixed table. */
+        if (driver_data->n_free_surface_ids > 0)
+            id = driver_data->free_surface_ids[--driver_data->n_free_surface_ids];
+        else if (driver_data->next_surface_id + 1 < V4L2SL_MAX_SURFACES)
+            id = ++driver_data->next_surface_id;
+        else {
+            free(surface);
+            goto fail;
+        }
+        if (driver_data->surfaces[id]) {
+            free(surface);
+            goto fail;
         }
 
         surface->width = width;
@@ -533,16 +559,7 @@ v4l2sl_create_surfaces(VADriverContextP ctx,
             surface->cpu_ptr = calloc(1, surface->cpu_size);
             if (!surface->cpu_ptr) {
                 free(surface);
-                for (int j = 0; j < i; j++) {
-                    if (driver_data->surfaces[surfaces[j]]) {
-                        if (driver_data->surfaces[surfaces[j]]->dma_buf_fd >= 0)
-                            close(driver_data->surfaces[surfaces[j]]->dma_buf_fd);
-                        free(driver_data->surfaces[surfaces[j]]->cpu_ptr);
-                        free(driver_data->surfaces[surfaces[j]]);
-                        driver_data->surfaces[surfaces[j]] = NULL;
-                    }
-                }
-                return VA_STATUS_ERROR_ALLOCATION_FAILED;
+                goto fail;
             }
         }
         /* dma-buf at create so Chrome/Firefox DRM-PRIME export works
@@ -550,12 +567,31 @@ v4l2sl_create_surfaces(VADriverContextP ctx,
         if (v4l2sl_surface_alloc_export_fd(surface) < 0)
             fprintf(stderr, "v4l2stateless: surface memfd backing failed\n");
 
-        /* Allocate ID */
-        surfaces[i] = ++driver_data->next_surface_id;
-        driver_data->surfaces[surfaces[i]] = surface;
+        surfaces[i] = id;
+        driver_data->surfaces[id] = surface;
     }
 
+    pthread_mutex_unlock(&g_v4l2sl_lock);
     return VA_STATUS_SUCCESS;
+
+fail:
+    pthread_mutex_unlock(&g_v4l2sl_lock);
+    /* Clean up already created surfaces */
+    for (int j = 0; j < num_surfaces; j++) {
+        struct v4l2sl_surface *s = v4l2sl_surface_by_id(driver_data, surfaces[j]);
+
+        if (s) {
+            if (s->dma_buf_fd >= 0)
+                close(s->dma_buf_fd);
+            free(s->cpu_ptr);
+            free(s);
+            driver_data->surfaces[surfaces[j]] = NULL;
+            driver_data->free_surface_ids[driver_data->n_free_surface_ids++] =
+                surfaces[j];
+            surfaces[j] = VA_INVALID_ID;
+        }
+    }
+    return VA_STATUS_ERROR_ALLOCATION_FAILED;
 }
 
 static VAStatus
@@ -600,16 +636,22 @@ v4l2sl_destroy_surfaces(VADriverContextP ctx,
 {
     struct v4l2sl_driver_data *driver_data = ctx->pDriverData;
 
+    pthread_mutex_lock(&g_v4l2sl_lock);
     for (int i = 0; i < num_surfaces; i++) {
-        struct v4l2sl_surface *surface = driver_data->surfaces[surfaces[i]];
+        struct v4l2sl_surface *surface = v4l2sl_surface_by_id(driver_data,
+                                                              surfaces[i]);
         if (surface) {
             if (surface->dma_buf_fd >= 0)
                 close(surface->dma_buf_fd);
             free(surface->cpu_ptr);
             free(surface);
             driver_data->surfaces[surfaces[i]] = NULL;
+            if (driver_data->n_free_surface_ids < V4L2SL_MAX_SURFACES)
+                driver_data->free_surface_ids[driver_data->n_free_surface_ids++] =
+                    surfaces[i];
         }
     }
+    pthread_mutex_unlock(&g_v4l2sl_lock);
 
     return VA_STATUS_SUCCESS;
 }
@@ -634,6 +676,8 @@ v4l2sl_create_context(VADriverContextP ctx,
     if (!context)
         return VA_STATUS_ERROR_ALLOCATION_FAILED;
 
+    pthread_mutex_lock(&g_v4l2sl_lock);
+
     context->config_id = config_id;
     context->driver_data = driver_data;
     context->width = picture_width;
@@ -643,6 +687,7 @@ v4l2sl_create_context(VADriverContextP ctx,
     context->render_targets = calloc(num_render_targets, sizeof(VASurfaceID));
     if (!context->render_targets) {
         free(context);
+        pthread_mutex_unlock(&g_v4l2sl_lock);
         return VA_STATUS_ERROR_ALLOCATION_FAILED;
     }
     memcpy(context->render_targets, render_targets,
@@ -668,9 +713,7 @@ v4l2sl_create_context(VADriverContextP ctx,
     context->v4l2_fd = v4l2sl_open_device(context->device_path);
     if (context->v4l2_fd < 0) {
         fprintf(stderr, "v4l2stateless: failed to open %s\n", context->device_path);
-        free(context->render_targets);
-        free(context);
-        return VA_STATUS_ERROR_OPERATION_FAILED;
+        goto fail;
     }
 
     /* JPEG encode and RGA VPP are stateful M2M — no request API. */
@@ -680,6 +723,7 @@ v4l2sl_create_context(VADriverContextP ctx,
         context->context_id = *context_id;
         context->next = driver_data->contexts;
         driver_data->contexts = context;
+        pthread_mutex_unlock(&g_v4l2sl_lock);
         return VA_STATUS_SUCCESS;
     }
 
@@ -688,10 +732,7 @@ v4l2sl_create_context(VADriverContextP ctx,
     if (context->media_fd < 0) {
         fprintf(stderr, "v4l2stateless: no media request node for %s\n",
                 context->device_path);
-        close(context->v4l2_fd);
-        free(context->render_targets);
-        free(context);
-        return VA_STATUS_ERROR_OPERATION_FAILED;
+        goto fail;
     }
 
     /* Determine V4L2 codec format */
@@ -710,30 +751,34 @@ v4l2sl_create_context(VADriverContextP ctx,
                                           picture_width, picture_height);
     if (n_out <= 0) {
         fprintf(stderr, "v4l2stateless: failed to setup output queue\n");
-        close(context->v4l2_fd);
-        context->v4l2_fd = -1;
-        /* Continue — decode won't work but driver can still load */
-    } else {
-        context->output_bufs_allocd = n_out;
-        /* Mmap the output buffers for writing compressed data */
-        if (v4l2sl_mmap_output_buffers(context->v4l2_fd, n_out,
-                                       context->output_buf_ptr,
-                                       &context->output_buf_size) < 0) {
-            fprintf(stderr, "v4l2stateless: warning: failed to mmap output buffers\n");
-            /* Non-fatal: we'll fall back to per-frame mmap */
-        }
+        goto fail;
+    }
+    context->output_bufs_allocd = n_out;
+    /* Mmap the output buffers for writing compressed data */
+    if (v4l2sl_mmap_output_buffers(context->v4l2_fd, n_out,
+                                   context->output_buf_ptr,
+                                   &context->output_buf_size) < 0) {
+        fprintf(stderr, "v4l2stateless: warning: failed to mmap output buffers\n");
+        /* Non-fatal: we'll fall back to per-frame mmap */
     }
 
-    /* Capture: S_FMT + REQBUFS, then EXPBUF onto render targets so
-     * vaExportSurfaceHandle works before the first picture. */
-    if (context->v4l2_fd >= 0) {
+    /* Capture: S_FMT + REQBUFS (degrades the buffer count under CMA
+     * pressure). Failing the context outright beats a zombie fd that
+     * errors on every frame — ffmpeg/Chrome fall back to software. */
+    {
         uint32_t cap = v4l2sl_capture_fourcc_from_rt(context->rt_format);
-        if (v4l2sl_ensure_capture(context, picture_width, picture_height, cap) < 0 &&
-            cap != V4L2_PIX_FMT_NV12) {
+        int ok = v4l2sl_ensure_capture(context, picture_width, picture_height,
+                                       cap) == 0;
+
+        if (!ok && cap != V4L2_PIX_FMT_NV12) {
             /* SPS not set yet — fall back to NV12, first picture will
              * renegotiate once bit depth is known. */
-            v4l2sl_ensure_capture(context, picture_width, picture_height,
-                                  V4L2_PIX_FMT_NV12);
+            ok = v4l2sl_ensure_capture(context, picture_width, picture_height,
+                                       V4L2_PIX_FMT_NV12) == 0;
+        }
+        if (!ok) {
+            fprintf(stderr, "v4l2stateless: capture queue setup failed\n");
+            goto fail;
         }
     }
 
@@ -746,7 +791,7 @@ v4l2sl_create_context(VADriverContextP ctx,
     if (context->codec != V4L2SL_CODEC_HEVC &&
         context->codec != V4L2SL_CODEC_AV1 &&
         context->codec != V4L2SL_CODEC_MPEG2 &&
-        context->v4l2_fd >= 0 && context->output_bufs_allocd > 0 &&
+        context->output_bufs_allocd > 0 &&
         context->capture_bufs_allocd > 0) {
         if (v4l2sl_streamon(context->v4l2_fd, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE) < 0 ||
             v4l2sl_streamon(context->v4l2_fd, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE) < 0)
@@ -759,14 +804,22 @@ v4l2sl_create_context(VADriverContextP ctx,
      * v4l2sl_ensure_capture. */
     for (int i = 0; i < context->output_bufs_allocd &&
                     i < V4L2SL_NUM_OUTPUT_BUFS; i++)
-        context->free_out_bufs[context->n_free_out++] = i;
+        v4l2sl_out_pool_push(context, i);
 
     *context_id = ++driver_data->next_context_id;
     context->context_id = *context_id;
     context->next = driver_data->contexts;
     driver_data->contexts = context;
 
+    pthread_mutex_unlock(&g_v4l2sl_lock);
     return VA_STATUS_SUCCESS;
+
+fail:
+    v4l2sl_release_context_device(context);
+    free(context->render_targets);
+    free(context);
+    pthread_mutex_unlock(&g_v4l2sl_lock);
+    return VA_STATUS_ERROR_OPERATION_FAILED;
 }
 
 static VAStatus
@@ -775,31 +828,21 @@ v4l2sl_destroy_context(VADriverContextP ctx, VAContextID context_id)
     struct v4l2sl_driver_data *driver_data = ctx->pDriverData;
     struct v4l2sl_context **pp = &driver_data->contexts;
 
+    pthread_mutex_lock(&g_v4l2sl_lock);
     while (*pp) {
         if ((*pp)->context_id == context_id) {
             struct v4l2sl_context *context = *pp;
             *pp = context->next;
 
-            /* Unmap output buffers */
-            for (int i = 0; i < context->output_bufs_allocd; i++) {
-                if (context->output_buf_ptr[i] && context->output_buf_ptr[i] != MAP_FAILED) {
-                    munmap(context->output_buf_ptr[i], context->output_buf_size);
-                    context->output_buf_ptr[i] = NULL;
-                }
-            }
-
-            if (context->v4l2_fd >= 0)
-                close(context->v4l2_fd);
-            if (context->media_fd >= 0)
-                close(context->media_fd);
-            if (context->request_fd >= 0)
-                close(context->request_fd);
+            v4l2sl_release_context_device(context);
             free(context->render_targets);
             free(context);
+            pthread_mutex_unlock(&g_v4l2sl_lock);
             return VA_STATUS_SUCCESS;
         }
         pp = &(*pp)->next;
     }
+    pthread_mutex_unlock(&g_v4l2sl_lock);
 
     return VA_STATUS_ERROR_INVALID_CONTEXT;
 }
@@ -964,27 +1007,35 @@ v4l2sl_buffer_set_num_elements(VADriverContextP ctx,
                                unsigned int num_elements)
 {
     struct v4l2sl_driver_data *driver_data = ctx->pDriverData;
+    struct v4l2sl_context *context;
+    VAStatus st = VA_STATUS_ERROR_INVALID_BUFFER;
 
-    struct v4l2sl_context *context = driver_data->contexts;
+    pthread_mutex_lock(&g_v4l2sl_lock);
+    context = driver_data->contexts;
     while (context) {
         struct v4l2sl_buffer *buf = context->buffers;
         while (buf) {
             if (buf->buffer_id == buf_id) {
                 if (num_elements > buf->num_elements) {
                     void *new_data = realloc(buf->data, buf->size * num_elements);
-                    if (!new_data)
+                    if (!new_data) {
+                        pthread_mutex_unlock(&g_v4l2sl_lock);
                         return VA_STATUS_ERROR_ALLOCATION_FAILED;
+                    }
                     buf->data = new_data;
                 }
                 buf->num_elements = num_elements;
-                return VA_STATUS_SUCCESS;
+                st = VA_STATUS_SUCCESS;
+                goto out;
             }
             buf = buf->next;
         }
         context = context->next;
     }
 
-    return VA_STATUS_ERROR_INVALID_BUFFER;
+out:
+    pthread_mutex_unlock(&g_v4l2sl_lock);
+    return st;
 }
 
 /*
@@ -997,19 +1048,25 @@ v4l2sl_begin_picture(VADriverContextP ctx,
                      VASurfaceID render_target)
 {
     struct v4l2sl_driver_data *driver_data = ctx->pDriverData;
+    struct v4l2sl_surface *surface;
+    struct v4l2sl_context *context;
+    VAStatus st;
 
-    /* Find context */
-    struct v4l2sl_context *context = driver_data->contexts;
+    pthread_mutex_lock(&g_v4l2sl_lock);
+    context = driver_data->contexts;
     while (context && context->context_id != context_id)
         context = context->next;
 
-    if (!context)
-        return VA_STATUS_ERROR_INVALID_CONTEXT;
+    if (!context) {
+        st = VA_STATUS_ERROR_INVALID_CONTEXT;
+        goto out;
+    }
 
-    /* Find surface */
-    struct v4l2sl_surface *surface = driver_data->surfaces[render_target];
-    if (!surface)
-        return VA_STATUS_ERROR_INVALID_SURFACE;
+    surface = v4l2sl_surface_by_id(driver_data, render_target);
+    if (!surface) {
+        st = VA_STATUS_ERROR_INVALID_SURFACE;
+        goto out;
+    }
 
     context->current_surface = surface;
     context->current_surface_id = render_target;
@@ -1021,9 +1078,8 @@ v4l2sl_begin_picture(VADriverContextP ctx,
     if (surface->buf_index >= 0) {
         /* Userspace bookkeeping only: hand the buffer back to the free pool.
          * The kernel QBUF happens exactly once, in the decode path. */
-        if (surface->buf_index < context->capture_bufs_allocd &&
-            context->n_free_cap < V4L2SL_NUM_CAPTURE_BUFS)
-            context->free_cap_bufs[context->n_free_cap++] = surface->buf_index;
+        if (surface->buf_index < context->capture_bufs_allocd)
+            v4l2sl_cap_pool_push(context, surface->buf_index);
         surface->buf_index = -1;
         /* Keep memfd so DRM-PRIME clients retain a stable fd. */
     }
@@ -1040,7 +1096,11 @@ v4l2sl_begin_picture(VADriverContextP ctx,
      * from the timeval we set on the OUTPUT buffer. */
     surface->timestamp = (uint64_t)context->frame_count++ * 1000;
 
-    return VA_STATUS_SUCCESS;
+    st = VA_STATUS_SUCCESS;
+
+out:
+    pthread_mutex_unlock(&g_v4l2sl_lock);
+    return st;
 }
 
 static VAStatus
@@ -1050,13 +1110,18 @@ v4l2sl_render_picture(VADriverContextP ctx,
                       int num_buffers)
 {
     struct v4l2sl_driver_data *driver_data = ctx->pDriverData;
+    struct v4l2sl_context *context;
+    VAStatus st;
 
-    struct v4l2sl_context *context = driver_data->contexts;
+    pthread_mutex_lock(&g_v4l2sl_lock);
+    context = driver_data->contexts;
     while (context && context->context_id != context_id)
         context = context->next;
 
-    if (!context)
+    if (!context) {
+        pthread_mutex_unlock(&g_v4l2sl_lock);
         return VA_STATUS_ERROR_INVALID_CONTEXT;
+    }
 
     /* Collect buffer references for this picture */
     for (int i = 0; i < num_buffers; i++) {
@@ -1068,6 +1133,7 @@ v4l2sl_render_picture(VADriverContextP ctx,
                     context->pending_buffers[context->num_pending_buffers++] = b;
                 } else {
                     fprintf(stderr, "v4l2stateless: pending buffer overflow\n");
+                    pthread_mutex_unlock(&g_v4l2sl_lock);
                     return VA_STATUS_ERROR_MAX_NUM_EXCEEDED;
                 }
                 break;
@@ -1075,68 +1141,64 @@ v4l2sl_render_picture(VADriverContextP ctx,
             b = b->next;
         }
 
-        if (!b)
+        if (!b) {
+            pthread_mutex_unlock(&g_v4l2sl_lock);
             return VA_STATUS_ERROR_INVALID_BUFFER;
+        }
     }
 
-    return VA_STATUS_SUCCESS;
+    st = VA_STATUS_SUCCESS;
+    pthread_mutex_unlock(&g_v4l2sl_lock);
+    return st;
 }
 
 /*
- * Wait for a V4L2 decode to complete on the given fd.
- * Uses poll() on the video device; dequeues the capture buffer when ready.
- * Returns the capture buffer index, or -1 on error/timeout.
+ * Decode pipeline — the per-frame V4L2 submit/poll/DQBUF lives in
+ * v4l2sl_decode_submit (v4l2stateless_device.c); vaEndPicture calls it via
+ * the codec translators.
  */
-static int v4l2sl_wait_and_dequeue(int v4l2_fd, int timeout_ms)
-{
-    struct pollfd pfd = { .fd = v4l2_fd, .events = POLLOUT };
-    int ret = poll(&pfd, 1, timeout_ms);
-    if (ret < 0) {
-        fprintf(stderr, "v4l2stateless: poll failed: %s\n", strerror(errno));
-        return -1;
-    }
-    if (ret == 0) {
-        fprintf(stderr, "v4l2stateless: decode timeout (%d ms)\n", timeout_ms);
-        return -1;
-    }
-
-    /* Dequeue capture buffer (decoded frame) */
-    return v4l2sl_dequeue_buffer(v4l2_fd, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE);
-}
-
 static VAStatus
 v4l2sl_end_picture(VADriverContextP ctx,
                    VAContextID context_id)
 {
     struct v4l2sl_driver_data *driver_data = ctx->pDriverData;
+    struct v4l2sl_context *context;
+    VAStatus va_status;
 
-    struct v4l2sl_context *context = driver_data->contexts;
+    pthread_mutex_lock(&g_v4l2sl_lock);
+    context = driver_data->contexts;
     while (context && context->context_id != context_id)
         context = context->next;
 
-    if (!context)
+    if (!context) {
+        pthread_mutex_unlock(&g_v4l2sl_lock);
         return VA_STATUS_ERROR_INVALID_CONTEXT;
+    }
 
-    if (!context->current_surface)
+    if (!context->current_surface) {
+        pthread_mutex_unlock(&g_v4l2sl_lock);
         return VA_STATUS_ERROR_INVALID_SURFACE;
+    }
 
     if (context->codec == V4L2SL_CODEC_JPEG_ENC) {
-        VAStatus st = v4l2sl_jpeg_encode(context, context->pending_buffers,
-                                         context->num_pending_buffers);
+        va_status = v4l2sl_jpeg_encode(context, context->pending_buffers,
+                                       context->num_pending_buffers);
         context->current_surface->status =
-            (st == VA_STATUS_SUCCESS) ? VASurfaceReady : VASurfaceSkipped;
+            (va_status == VA_STATUS_SUCCESS) ? VASurfaceReady : VASurfaceSkipped;
         context->current_surface = NULL;
         context->num_pending_buffers = 0;
-        return st;
+        pthread_mutex_unlock(&g_v4l2sl_lock);
+        return va_status;
     }
     if (context->codec == V4L2SL_CODEC_VPP) {
-        VAStatus st = v4l2sl_vpp_run(context, context->pending_buffers,
-                                     context->num_pending_buffers);
+        va_status = v4l2sl_vpp_run(context, context->pending_buffers,
+                                   context->num_pending_buffers);
         context->current_surface->status =
-            (st == VA_STATUS_SUCCESS) ? VASurfaceReady : VASurfaceSkipped;
+            (va_status == VA_STATUS_SUCCESS) ? VASurfaceReady : VASurfaceSkipped;
         context->current_surface = NULL;
         context->num_pending_buffers = 0;
-        return st;
+        pthread_mutex_unlock(&g_v4l2sl_lock);
+        return va_status;
     }
 
     if (context->v4l2_fd < 0 || context->request_fd < 0) {
@@ -1148,11 +1210,11 @@ v4l2sl_end_picture(VADriverContextP ctx,
             close(context->request_fd);
             context->request_fd = -1;
         }
+        pthread_mutex_unlock(&g_v4l2sl_lock);
         return VA_STATUS_SUCCESS;
     }
 
     /* Call codec-specific translation */
-    VAStatus va_status;
     switch (context->codec) {
     case V4L2SL_CODEC_H264:
         va_status = v4l2sl_h264_translate(context,
@@ -1194,6 +1256,7 @@ v4l2sl_end_picture(VADriverContextP ctx,
             close(context->request_fd);
             context->request_fd = -1;
         }
+        pthread_mutex_unlock(&g_v4l2sl_lock);
         return va_status;
     }
 
@@ -1202,7 +1265,8 @@ v4l2sl_end_picture(VADriverContextP ctx,
     context->current_surface = NULL;
     context->num_pending_buffers = 0;
 
-    /* Don't close request_fd here — sync_surface will dequeue and close it */
+    pthread_mutex_unlock(&g_v4l2sl_lock);
+    /* request_fd lifecycle is owned by decode_submit / begin_picture */
     return VA_STATUS_SUCCESS;
 }
 
@@ -1213,16 +1277,21 @@ static VAStatus
 v4l2sl_sync_surface(VADriverContextP ctx, VASurfaceID render_target)
 {
     struct v4l2sl_driver_data *driver_data = ctx->pDriverData;
-    struct v4l2sl_surface *surface = driver_data->surfaces[render_target];
+    struct v4l2sl_surface *surface;
 
-    if (!surface)
+    pthread_mutex_lock(&g_v4l2sl_lock);
+    surface = v4l2sl_surface_by_id(driver_data, render_target);
+    if (!surface) {
+        pthread_mutex_unlock(&g_v4l2sl_lock);
         return VA_STATUS_ERROR_INVALID_SURFACE;
+    }
 
     /* Decoding runs synchronously inside vaEndPicture (single request in
      * flight), so by the time the client syncs, the frame — if it decoded —
      * is already attached to the surface as a capture-buffer DMA-BUF. */
     surface->status = VASurfaceReady;
 
+    pthread_mutex_unlock(&g_v4l2sl_lock);
     return VA_STATUS_SUCCESS;
 }
 
@@ -1232,13 +1301,17 @@ v4l2sl_query_surface_status(VADriverContextP ctx,
                             VASurfaceStatus *status)
 {
     struct v4l2sl_driver_data *driver_data = ctx->pDriverData;
-    struct v4l2sl_surface *surface = driver_data->surfaces[render_target];
+    struct v4l2sl_surface *surface;
+    VAStatus st = VA_STATUS_ERROR_INVALID_SURFACE;
 
-    if (!surface)
-        return VA_STATUS_ERROR_INVALID_SURFACE;
-
-    *status = surface->status;
-    return VA_STATUS_SUCCESS;
+    pthread_mutex_lock(&g_v4l2sl_lock);
+    surface = v4l2sl_surface_by_id(driver_data, render_target);
+    if (surface) {
+        *status = surface->status;
+        st = VA_STATUS_SUCCESS;
+    }
+    pthread_mutex_unlock(&g_v4l2sl_lock);
+    return st;
 }
 
 static VAStatus
@@ -1303,14 +1376,20 @@ v4l2sl_derive_image(VADriverContextP ctx,
                     VAImage *image)
 {
     struct v4l2sl_driver_data *driver_data = ctx->pDriverData;
-    struct v4l2sl_surface *surf = driver_data->surfaces[surface];
+    struct v4l2sl_surface *surf;
 
-    if (!surf)
+    pthread_mutex_lock(&g_v4l2sl_lock);
+    surf = v4l2sl_surface_by_id(driver_data, surface);
+
+    if (!surf) {
+        pthread_mutex_unlock(&g_v4l2sl_lock);
         return VA_STATUS_ERROR_INVALID_SURFACE;
+    }
 
     if ((surf->dma_buf_fd < 0 || surf->buf_index < 0) && !surf->cpu_ptr) {
         fprintf(stderr, "v4l2stateless: derive_image: surface %d has no decoded frame\n",
                 surface);
+        pthread_mutex_unlock(&g_v4l2sl_lock);
         return VA_STATUS_ERROR_INVALID_SURFACE;
     }
 
@@ -1353,6 +1432,7 @@ v4l2sl_derive_image(VADriverContextP ctx,
         if (map == MAP_FAILED) {
             fprintf(stderr, "v4l2stateless: derive_image: mmap dmabuf failed: %s\n",
                     strerror(errno));
+            pthread_mutex_unlock(&g_v4l2sl_lock);
             return VA_STATUS_ERROR_OPERATION_FAILED;
         }
         mmapped = 1;
@@ -1369,9 +1449,9 @@ v4l2sl_derive_image(VADriverContextP ctx,
     struct v4l2sl_buffer *ib = calloc(1, sizeof(*ib));
     if (!ib) {
         munmap(map, data_size);
+        pthread_mutex_unlock(&g_v4l2sl_lock);
         return VA_STATUS_ERROR_ALLOCATION_FAILED;
     }
-    pthread_mutex_lock(&g_v4l2sl_lock);
     VABufferID id = ++driver_data->next_buffer_id;
     ib->buffer_id = id;
     ib->type = VAImageBufferType;
@@ -1380,7 +1460,6 @@ v4l2sl_derive_image(VADriverContextP ctx,
     ib->mmapped = mmapped;
     ib->next = driver_data->orphan_buffers;
     driver_data->orphan_buffers = ib;
-    pthread_mutex_unlock(&g_v4l2sl_lock);
 
     memset(image, 0, sizeof(*image));
     image->image_id = id;
@@ -1402,6 +1481,7 @@ v4l2sl_derive_image(VADriverContextP ctx,
     }
     image->data_size = data_size;
 
+    pthread_mutex_unlock(&g_v4l2sl_lock);
     return VA_STATUS_SUCCESS;
 }
 
@@ -1452,6 +1532,9 @@ v4l2sl_create_image(VADriverContextP ctx, VAImageFormat *format,
                     int width, int height, VAImage *image)
 {
     struct v4l2sl_driver_data *driver_data = ctx->pDriverData;
+    struct v4l2sl_buffer *ib;
+    uint32_t stride, aligned_h, data_size;
+    VABufferID id;
 
     if (!format)
         return VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT;
@@ -1463,11 +1546,11 @@ v4l2sl_create_image(VADriverContextP ctx, VAImageFormat *format,
     if (width <= 0 || height <= 0)
         return VA_STATUS_ERROR_INVALID_PARAMETER;
 
-    uint32_t stride = v4l2sl_default_image_stride(format->fourcc, width);
-    uint32_t aligned_h = height;
-    uint32_t data_size = v4l2sl_va_image_size(format->fourcc, stride, aligned_h);
+    stride = v4l2sl_default_image_stride(format->fourcc, width);
+    aligned_h = height;
+    data_size = v4l2sl_va_image_size(format->fourcc, stride, aligned_h);
 
-    struct v4l2sl_buffer *ib = calloc(1, sizeof(*ib));
+    ib = calloc(1, sizeof(*ib));
     if (!ib)
         return VA_STATUS_ERROR_ALLOCATION_FAILED;
     ib->data = malloc(data_size);
@@ -1476,7 +1559,7 @@ v4l2sl_create_image(VADriverContextP ctx, VAImageFormat *format,
         return VA_STATUS_ERROR_ALLOCATION_FAILED;
     }
     pthread_mutex_lock(&g_v4l2sl_lock);
-    VABufferID id = ++driver_data->next_buffer_id;
+    id = ++driver_data->next_buffer_id;
     ib->buffer_id = id;
     ib->type = VAImageBufferType;
     ib->size = data_size;
@@ -1513,20 +1596,27 @@ v4l2sl_get_image(VADriverContextP ctx, VASurfaceID surface,
                  VAImageID image_id)
 {
     struct v4l2sl_driver_data *driver_data = ctx->pDriverData;
-    struct v4l2sl_surface *surf = driver_data->surfaces[surface];
-
-    if (!surf)
-        return VA_STATUS_ERROR_INVALID_SURFACE;
-    if (x != 0 || y != 0)
-        return VA_STATUS_ERROR_INVALID_PARAMETER;
+    struct v4l2sl_surface *surf;
+    struct v4l2sl_buffer *ib;
 
     pthread_mutex_lock(&g_v4l2sl_lock);
-    struct v4l2sl_buffer *ib = driver_data->orphan_buffers;
+    surf = v4l2sl_surface_by_id(driver_data, surface);
+    if (!surf) {
+        pthread_mutex_unlock(&g_v4l2sl_lock);
+        return VA_STATUS_ERROR_INVALID_SURFACE;
+    }
+    if (x != 0 || y != 0) {
+        pthread_mutex_unlock(&g_v4l2sl_lock);
+        return VA_STATUS_ERROR_INVALID_PARAMETER;
+    }
+
+    ib = driver_data->orphan_buffers;
     while (ib && ib->buffer_id != image_id)
         ib = ib->next;
-    pthread_mutex_unlock(&g_v4l2sl_lock);
-    if (!ib)
+    if (!ib) {
+        pthread_mutex_unlock(&g_v4l2sl_lock);
         return VA_STATUS_ERROR_INVALID_IMAGE;
+    }
     struct v4l2sl_context *c = context_for_surface(driver_data, surface);
     uint32_t src_stride = surf->stride ? surf->stride :
                           ((c && c->cap_stride) ? c->cap_stride : surf->width);
@@ -1559,6 +1649,7 @@ v4l2sl_get_image(VADriverContextP ctx, VASurfaceID surface,
         if (mapped == MAP_FAILED) {
             fprintf(stderr, "v4l2stateless: get_image: mmap dmabuf failed: %s\n",
                     strerror(errno));
+            pthread_mutex_unlock(&g_v4l2sl_lock);
             return VA_STATUS_ERROR_OPERATION_FAILED;
         }
         src = mapped;
@@ -1570,6 +1661,7 @@ v4l2sl_get_image(VADriverContextP ctx, VASurfaceID surface,
         dst_fourcc = VA_FOURCC_NV12;
         dst_stride = v4l2sl_default_image_stride(VA_FOURCC_NV12, copy_w);
     } else {
+        pthread_mutex_unlock(&g_v4l2sl_lock);
         return VA_STATUS_ERROR_INVALID_SURFACE;
     }
 
@@ -1584,6 +1676,7 @@ v4l2sl_get_image(VADriverContextP ctx, VASurfaceID surface,
 
     if (mapped)
         munmap(mapped, map_size);
+    pthread_mutex_unlock(&g_v4l2sl_lock);
     return VA_STATUS_SUCCESS;
 }
 
@@ -1597,33 +1690,43 @@ v4l2sl_put_image(VADriverContextP ctx,
                  unsigned int dest_width, unsigned int dest_height)
 {
     struct v4l2sl_driver_data *driver_data = ctx->pDriverData;
-    struct v4l2sl_surface *surf = driver_data->surfaces[surface];
+    struct v4l2sl_surface *surf;
     struct v4l2sl_buffer *ib;
     uint8_t *src;
     int copy_w, copy_h;
 
     (void)dest_width;
     (void)dest_height;
-    if (!surf)
-        return VA_STATUS_ERROR_INVALID_SURFACE;
-    if (src_x || src_y || dest_x || dest_y)
-        return VA_STATUS_ERROR_UNIMPLEMENTED;
-    if (!surf->cpu_ptr)
-        return VA_STATUS_ERROR_OPERATION_FAILED;
 
     pthread_mutex_lock(&g_v4l2sl_lock);
+    surf = v4l2sl_surface_by_id(driver_data, surface);
+    if (!surf) {
+        pthread_mutex_unlock(&g_v4l2sl_lock);
+        return VA_STATUS_ERROR_INVALID_SURFACE;
+    }
+    if (src_x || src_y || dest_x || dest_y) {
+        pthread_mutex_unlock(&g_v4l2sl_lock);
+        return VA_STATUS_ERROR_UNIMPLEMENTED;
+    }
+    if (!surf->cpu_ptr) {
+        pthread_mutex_unlock(&g_v4l2sl_lock);
+        return VA_STATUS_ERROR_OPERATION_FAILED;
+    }
+
     ib = driver_data->orphan_buffers;
     while (ib && ib->buffer_id != image)
         ib = ib->next;
-    pthread_mutex_unlock(&g_v4l2sl_lock);
-    if (!ib)
+    if (!ib) {
+        pthread_mutex_unlock(&g_v4l2sl_lock);
         return VA_STATUS_ERROR_INVALID_IMAGE;
+    }
 
     src = ib->data;
     copy_w = (int)src_width < surf->width ? (int)src_width : surf->width;
     copy_h = (int)src_height < surf->height ? (int)src_height : surf->height;
     v4l2sl_copy_nv12(surf->cpu_ptr, surf->cpu_stride, src,
                      (uint32_t)copy_w, copy_h, copy_w, copy_h);
+    pthread_mutex_unlock(&g_v4l2sl_lock);
     return VA_STATUS_SUCCESS;
 }
 
@@ -1663,23 +1766,37 @@ v4l2sl_export_surface_handle(VADriverContextP ctx, VASurfaceID surface_id,
                              uint32_t mem_type, uint32_t flags, void *descriptor)
 {
     struct v4l2sl_driver_data *driver_data = ctx->pDriverData;
-    struct v4l2sl_surface *surf = driver_data->surfaces[surface_id];
+    struct v4l2sl_surface *surf;
     struct v4l2sl_context *c;
+    VAStatus st;
 
-    if (!surf)
+    pthread_mutex_lock(&g_v4l2sl_lock);
+    surf = v4l2sl_surface_by_id(driver_data, surface_id);
+
+    if (!surf) {
+        pthread_mutex_unlock(&g_v4l2sl_lock);
         return VA_STATUS_ERROR_INVALID_SURFACE;
-    if (!descriptor)
+    }
+    if (!descriptor) {
+        pthread_mutex_unlock(&g_v4l2sl_lock);
         return VA_STATUS_ERROR_INVALID_PARAMETER;
+    }
     if (mem_type != VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2 &&
-        mem_type != VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME)
+        mem_type != VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME) {
+        pthread_mutex_unlock(&g_v4l2sl_lock);
         return VA_STATUS_ERROR_UNSUPPORTED_MEMORY_TYPE;
+    }
     if (surf->dma_buf_fd < 0)
         v4l2sl_surface_alloc_export_fd(surf);
-    if (surf->dma_buf_fd < 0)
+    if (surf->dma_buf_fd < 0) {
+        pthread_mutex_unlock(&g_v4l2sl_lock);
         return VA_STATUS_ERROR_INVALID_SURFACE;
+    }
 
     c = context_for_surface(driver_data, surface_id);
-    return v4l2sl_surface_fill_prime(surf, c, flags, descriptor);
+    st = v4l2sl_surface_fill_prime(surf, c, flags, descriptor);
+    pthread_mutex_unlock(&g_v4l2sl_lock);
+    return st;
 }
 
 static VAStatus
@@ -1724,18 +1841,18 @@ v4l2sl_init(VADriverContextP ctx)
     pthread_mutex_init(&driver_data->lock, NULL);
     ctx->pDriverData = driver_data;
 
-    v4l2sl_scan_decoder_paths_ex(driver_data->dev_h264, driver_data->dev_hevc,
-                                 driver_data->dev_av1, driver_data->dev_vp8,
-                                 driver_data->dev_mpeg2,
-                                 sizeof(driver_data->dev_h264));
-    v4l2sl_scan_aux_paths(driver_data->dev_jpeg_enc, driver_data->dev_vpp,
-                          sizeof(driver_data->dev_jpeg_enc));
+    v4l2sl_scan_all_cached(driver_data->dev_h264, driver_data->dev_hevc,
+                           driver_data->dev_av1, driver_data->dev_vp8,
+                           driver_data->dev_mpeg2,
+                           driver_data->dev_jpeg_enc, driver_data->dev_vpp,
+                           sizeof(driver_data->dev_h264));
     fprintf(stderr, "v4l2stateless: probe H.264  -> %s\n",
             driver_data->dev_h264[0] ? driver_data->dev_h264 : "(none)");
     fprintf(stderr, "v4l2stateless: probe HEVC   -> %s\n",
             driver_data->dev_hevc[0] ? driver_data->dev_hevc : "(none)");
-    fprintf(stderr, "v4l2stateless: probe AV1    -> %s\n",
-            driver_data->dev_av1[0] ? driver_data->dev_av1 : "(none)");
+    /* Do not publish AV1 to libva clients. Probe still sees the node. */
+    driver_data->dev_av1[0] = 0;
+    fprintf(stderr, "v4l2stateless: probe AV1    -> (not advertised)\n");
     fprintf(stderr, "v4l2stateless: probe VP8    -> %s\n",
             driver_data->dev_vp8[0] ? driver_data->dev_vp8 : "(none)");
     fprintf(stderr, "v4l2stateless: probe MPEG-2 -> %s\n",

@@ -94,17 +94,6 @@ static void hevc_fill_pps(struct v4l2_ctrl_hevc_pps *pps,
         pps->column_width_minus1[i] = pic->column_width_minus1[i];
     for (int i = 0; i < 21; i++)
         pps->row_height_minus1[i] = pic->row_height_minus1[i];
-    /* No explicit geometry means uniform spacing — the kernel expects the
-     * flag whenever the column/row tables are zero. */
-    {
-        int uniform = 1;
-        for (int i = 0; i < 19; i++)
-            if (pps->column_width_minus1[i]) uniform = 0;
-        for (int i = 0; i < 21; i++)
-            if (pps->row_height_minus1[i]) uniform = 0;
-        if (uniform)
-            pps->flags |= V4L2_HEVC_PPS_FLAG_UNIFORM_SPACING;
-    }
 
     pps->flags = 0;
     if (pic->pic_fields.bits.sign_data_hiding_enabled_flag)
@@ -143,6 +132,19 @@ static void hevc_fill_pps(struct v4l2_ctrl_hevc_pps *pps,
         pps->flags |= V4L2_HEVC_PPS_FLAG_LISTS_MODIFICATION_PRESENT;
     if (pic->slice_parsing_fields.bits.slice_segment_header_extension_present_flag)
         pps->flags |= V4L2_HEVC_PPS_FLAG_SLICE_SEGMENT_HEADER_EXTENSION_PRESENT;
+
+    /* No explicit geometry means uniform spacing — the kernel expects the
+     * flag whenever the column/row tables are zero. (Set after flags is
+     * zeroed above, or it gets wiped.) */
+    {
+        int uniform = 1;
+        for (int i = 0; i < 19; i++)
+            if (pps->column_width_minus1[i]) uniform = 0;
+        for (int i = 0; i < 21; i++)
+            if (pps->row_height_minus1[i]) uniform = 0;
+        if (uniform)
+            pps->flags |= V4L2_HEVC_PPS_FLAG_UNIFORM_SPACING;
+    }
 }
 
 /*
@@ -151,9 +153,11 @@ static void hevc_fill_pps(struct v4l2_ctrl_hevc_pps *pps,
 static uint64_t hevc_find_ref_timestamp(struct v4l2sl_driver_data *dd,
                                         VASurfaceID picture_id)
 {
+    struct v4l2sl_surface *surf;
+
     if (!dd || picture_id == VA_INVALID_SURFACE)
         return 0;
-    struct v4l2sl_surface *surf = dd->surfaces[picture_id];
+    surf = v4l2sl_surface_by_id(dd, picture_id);
     if (surf)
         return surf->timestamp;
     return 0;
@@ -366,13 +370,6 @@ VAStatus v4l2sl_hevc_translate(struct v4l2sl_context *ctx,
     }
     int out_buf_idx = ctx->free_out_bufs[--ctx->n_free_out];
 
-    if (ctx->n_free_cap == 0) {
-        fprintf(stderr, "v4l2stateless: HEVC no free capture buffer\n");
-        ctx->n_free_out++;
-        return VA_STATUS_ERROR_OPERATION_FAILED;
-    }
-    int cap_buf_idx = ctx->free_cap_bufs[--ctx->n_free_cap];
-
     uint64_t timestamp = ctx->current_surface ? ctx->current_surface->timestamp : 0;
 
     /* Concatenate all slices into the pre-mapped output buffer, prepending
@@ -389,8 +386,7 @@ VAStatus v4l2sl_hevc_translate(struct v4l2sl_context *ctx,
     }
     if (total > ctx->output_buf_size) {
         fprintf(stderr, "v4l2stateless: HEVC slice data too large\n");
-        ctx->n_free_out++;
-        ctx->n_free_cap++;
+        v4l2sl_out_pool_push(ctx, out_buf_idx);
         return VA_STATUS_ERROR_OPERATION_FAILED;
     }
     if (ctx->output_buf_ptr[out_buf_idx]) {
@@ -405,58 +401,21 @@ VAStatus v4l2sl_hevc_translate(struct v4l2sl_context *ctx,
         }
     }
 
-    if (v4l2sl_queue_output(v4l2_fd, out_buf_idx,
-                            ctx->output_buf_ptr[out_buf_idx] ? ctx->output_buf_ptr[out_buf_idx] : slice_datas[0],
-                            total, request_fd, timestamp) < 0) {
-        fprintf(stderr, "v4l2stateless: failed to queue HEVC output buffer\n");
-        ctx->n_free_out++;
-        ctx->n_free_cap++;
+    /* On failure decode_submit resets both queues — nothing stays queued
+     * in the kernel and the pools are rebuilt. */
+    int done_cap = v4l2sl_decode_submit(ctx, out_buf_idx, (uint32_t)total, timestamp);
+    if (done_cap < 0)
         return VA_STATUS_ERROR_OPERATION_FAILED;
-    }
-
-    if (v4l2sl_queue_capture(v4l2_fd, cap_buf_idx, request_fd) < 0) {
-        fprintf(stderr, "v4l2stateless: failed to queue HEVC capture buffer\n");
-        ctx->n_free_cap++;
-        return VA_STATUS_ERROR_OPERATION_FAILED;
-    }
-
-    if (v4l2sl_submit_request(request_fd) < 0) {
-        fprintf(stderr, "v4l2stateless: failed to submit HEVC request\n");
-        return VA_STATUS_ERROR_OPERATION_FAILED;
-    }
-
-    struct pollfd pfd = { .fd = v4l2_fd, .events = POLLIN };
-    if (poll(&pfd, 1, 3000) <= 0) {
-        fprintf(stderr, "v4l2stateless: HEVC decode timed out\n");
-        return VA_STATUS_ERROR_OPERATION_FAILED;
-    }
-
-    int done_cap = v4l2sl_dequeue_buffer(v4l2_fd, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE);
-    if (done_cap < 0) {
-        fprintf(stderr, "v4l2stateless: HEVC decode failed\n");
-        return VA_STATUS_ERROR_OPERATION_FAILED;
-    }
-
-    int done_out = v4l2sl_dequeue_buffer(v4l2_fd, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE);
-    if (done_out < 0) {
-        struct pollfd pout = { .fd = v4l2_fd, .events = POLLOUT };
-        if (poll(&pout, 1, 200) > 0)
-            done_out = v4l2sl_dequeue_buffer(v4l2_fd, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE);
-    }
-    if (done_out >= 0)
-        ctx->free_out_bufs[ctx->n_free_out++] = done_out;
 
     struct v4l2sl_surface *surf = ctx->current_surface;
     if (surf) {
-        if (v4l2sl_surface_pull_capture(ctx, surf, done_cap) < 0)
+        if (v4l2sl_surface_pull_capture(ctx, surf, done_cap) < 0) {
             fprintf(stderr, "v4l2stateless: HEVC pull capture failed\n");
+            v4l2sl_cap_pool_push(ctx, done_cap);
+        }
     } else {
-        ctx->free_cap_bufs[ctx->n_free_cap++] = done_cap;
+        v4l2sl_cap_pool_push(ctx, done_cap);
     }
-
-    close(request_fd);
-    if (ctx->request_fd == request_fd)
-        ctx->request_fd = -1;
 
     return VA_STATUS_SUCCESS;
 }

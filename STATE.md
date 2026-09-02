@@ -36,10 +36,34 @@ Chrome `FillProfileInfo_Locked` attrib query is implemented (`vaQueryConfigAttri
 - **Browser mid-stream resolution changes** — capture renegotiate exists in the driver; Chrome/Firefox path is not matrix-tested
 - **Vendor BSP / MPP** — out of scope (mainline only)
 
+## 2026-09-02 stability fixes (hardware matrix NOT re-run)
+
+Static review + kernel-UAPI verification round (dev-stateless-decoder spec,
+rkvdec driver source, libva threading contract). Unit tests PASS 4/4; host
+codec matrix still pending. Changes:
+
+- Decode submit unified in `v4l2sl_decode_submit`: timeout / DQBUF /
+  request-queue failure now STREAMOFFs both queues and rebuilds the free
+  pools (`v4l2sl_decode_reset`). A wedged job is never left in the kernel.
+- Full driver lock: every stateful vtable entry takes `g_v4l2sl_lock`
+  (libva's threading model makes backend thread safety mandatory).
+- Surface table: IDs recycled via a free stack, all lookups bounds-checked
+  (fixes OOB past `surfaces[4096]` in long-lived processes).
+- Free-pool pushes bounded + de-duplicated (fixes potential OOB write
+  past `free_cap_bufs[24]` on error paths).
+- Probe results cached per boot (`$XDG_RUNTIME_DIR/v4l2stateless-probe.cache`,
+  keyed by boot_id; `V4L2SL_PROBE_NOCACHE=1` bypasses): vaInitialize no
+  longer opens all 64 video nodes / fires REQUEST_ALLOC in every process.
+- Renegotiate rebuilds the OUTPUT queue too (S_FMT is EBUSY while buffers
+  are allocated); capture REQBUFS degrades 24→8→4 under CMA pressure;
+  `vaCreateContext` fails cleanly instead of leaving a zombie fd.
+- HEVC PPS uniform-spacing flag no longer wiped by the flags reset.
+- VPP/JPEG error paths always STREAMOFF + REQBUFS(0).
+
 ## Layout
 
 | Path | Role |
 |---|---|
-| NAS git | `/home/liyifan/vaapi-v4l2-bridge/` |
-| Mac work copy | `~/v4l2bridge-dev/` (scp → NAS → ninja) |
+| NAS git | `/home/liyifan/vaapi-v4l2-bridge/` — **only source of truth** |
+| Mac work copy | deleted 2026-09-02 (stale dma-heap experiment; that approach has a chip bug) |
 | Install | `/usr/lib/aarch64-linux-gnu/dri/v4l2stateless_drv_video.so` |

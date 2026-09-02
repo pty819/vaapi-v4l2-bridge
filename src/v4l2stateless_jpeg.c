@@ -106,6 +106,7 @@ VAStatus v4l2sl_jpeg_encode(struct v4l2sl_context *ctx,
     void *y_ptr, *uv_ptr;
     uint32_t y_len, uv_len;
     int jpeg_size;
+    VAStatus st;
 
     for (i = 0; i < num_buffers; i++) {
         if (!buffers[i] || !buffers[i]->data)
@@ -295,9 +296,8 @@ VAStatus v4l2sl_jpeg_encode(struct v4l2sl_context *ctx,
     cbuf.m.planes = cplanes;
     if (xioctl(fd, VIDIOC_QBUF, &cbuf) < 0) {
         fprintf(stderr, "v4l2stateless: JPEG QBUF cap: %s\n", strerror(errno));
-        if (mapped)
-            munmap(mapped, map_size);
-        return VA_STATUS_ERROR_OPERATION_FAILED;
+        st = VA_STATUS_ERROR_OPERATION_FAILED;
+        goto out;
     }
     memset(&obuf, 0, sizeof(obuf));
     memset(oplanes, 0, sizeof(oplanes));
@@ -317,25 +317,22 @@ VAStatus v4l2sl_jpeg_encode(struct v4l2sl_context *ctx,
     if (xioctl(fd, VIDIOC_QBUF, &obuf) < 0) {
         fprintf(stderr, "v4l2stateless: JPEG QBUF out: %s (planes=%u yused=%u)\n",
                 strerror(errno), ofmt.fmt.pix_mp.num_planes, oplanes[0].bytesused);
-        if (mapped)
-            munmap(mapped, map_size);
-        return VA_STATUS_ERROR_OPERATION_FAILED;
+        st = VA_STATUS_ERROR_OPERATION_FAILED;
+        goto out;
     }
     {
         enum v4l2_buf_type t;
         t = V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE;
         if (xioctl(fd, VIDIOC_STREAMON, &t) < 0) {
             fprintf(stderr, "v4l2stateless: JPEG STREAMON out: %s\n", strerror(errno));
-            if (mapped)
-                munmap(mapped, map_size);
-            return VA_STATUS_ERROR_OPERATION_FAILED;
+            st = VA_STATUS_ERROR_OPERATION_FAILED;
+            goto out;
         }
         t = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
         if (xioctl(fd, VIDIOC_STREAMON, &t) < 0) {
             fprintf(stderr, "v4l2stateless: JPEG STREAMON cap: %s\n", strerror(errno));
-            if (mapped)
-                munmap(mapped, map_size);
-            return VA_STATUS_ERROR_OPERATION_FAILED;
+            st = VA_STATUS_ERROR_OPERATION_FAILED;
+            goto out;
         }
     }
 
@@ -343,9 +340,8 @@ VAStatus v4l2sl_jpeg_encode(struct v4l2sl_context *ctx,
     pfd.events = POLLIN | POLLOUT;
     if (poll(&pfd, 1, 2000) <= 0) {
         fprintf(stderr, "v4l2stateless: JPEG encode timeout\n");
-        if (mapped)
-            munmap(mapped, map_size);
-        return VA_STATUS_ERROR_OPERATION_FAILED;
+        st = VA_STATUS_ERROR_OPERATION_FAILED;
+        goto out;
     }
 
     memset(&cbuf, 0, sizeof(cbuf));
@@ -356,9 +352,8 @@ VAStatus v4l2sl_jpeg_encode(struct v4l2sl_context *ctx,
     cbuf.m.planes = cplanes;
     if (xioctl(fd, VIDIOC_DQBUF, &cbuf) < 0) {
         fprintf(stderr, "v4l2stateless: JPEG DQBUF: %s\n", strerror(errno));
-        if (mapped)
-            munmap(mapped, map_size);
-        return VA_STATUS_ERROR_OPERATION_FAILED;
+        st = VA_STATUS_ERROR_OPERATION_FAILED;
+        goto out;
     }
     jpeg_size = (int)cplanes[0].bytesused;
     {
@@ -368,9 +363,8 @@ VAStatus v4l2sl_jpeg_encode(struct v4l2sl_context *ctx,
         if (sizeof(*seg) < cap)
             cap -= (uint32_t)sizeof(*seg);
         if (jp == MAP_FAILED) {
-            if (mapped)
-                munmap(mapped, map_size);
-            return VA_STATUS_ERROR_OPERATION_FAILED;
+            st = VA_STATUS_ERROR_OPERATION_FAILED;
+            goto out;
         }
         if (jpeg_size > (int)cap)
             jpeg_size = (int)cap;
@@ -382,12 +376,17 @@ VAStatus v4l2sl_jpeg_encode(struct v4l2sl_context *ctx,
         munmap(jp, cplanes[0].length);
     }
 
-    munmap(y_ptr, y_len);
-    if (uv_ptr)
+    st = VA_STATUS_SUCCESS;
+
+out:
+    if (y_ptr && y_ptr != MAP_FAILED)
+        munmap(y_ptr, y_len);
+    if (uv_ptr && uv_ptr != MAP_FAILED)
         munmap(uv_ptr, uv_len);
     if (mapped)
         munmap(mapped, map_size);
-
+    /* Always tear down: leaving VEPU streaming wedges every later call on
+     * this fd. */
     {
         enum v4l2_buf_type t = V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE;
         xioctl(fd, VIDIOC_STREAMOFF, &t);
@@ -399,8 +398,9 @@ VAStatus v4l2sl_jpeg_encode(struct v4l2sl_context *ctx,
         xioctl(fd, VIDIOC_REQBUFS, &creq);
     }
 
-    fprintf(stderr, "v4l2stateless: JPEG encoded %dx%d quality=%d bytes=%d planes=%u\n",
-            w, h, quality, jpeg_size, ofmt.fmt.pix_mp.num_planes);
+    if (st == VA_STATUS_SUCCESS)
+        fprintf(stderr, "v4l2stateless: JPEG encoded %dx%d quality=%d bytes=%d planes=%u\n",
+                w, h, quality, jpeg_size, ofmt.fmt.pix_mp.num_planes);
     (void)surface_by_id;
-    return VA_STATUS_SUCCESS;
+    return st;
 }

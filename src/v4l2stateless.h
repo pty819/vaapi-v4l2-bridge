@@ -73,6 +73,10 @@ struct v4l2sl_buffer {
 #define V4L2SL_NUM_OUTPUT_BUFS  4
 #define V4L2SL_NUM_CAPTURE_BUFS 24
 
+/* Surface table size; IDs are recycled via a free stack so a long-lived
+ * process can never index past the table. */
+#define V4L2SL_MAX_SURFACES 4096
+
 /* Per-context state (one decode session) */
 struct v4l2sl_context {
     VAContextID context_id;
@@ -115,6 +119,9 @@ struct v4l2sl_context {
     /* Capture (decoded frame) buffer management */
     int capture_bufs_allocd;
     int streamed;         /* STREAMON done (HEVC defers it past SPS) */
+    void *capture_buf_ptr[V4L2SL_NUM_CAPTURE_BUFS];
+    uint32_t capture_buf_size;
+    int capture_buf_anon; /* calloc stub when ioctl hook is installed */
     int free_cap_bufs[V4L2SL_NUM_CAPTURE_BUFS];
     int n_free_cap;
     uint32_t cap_width;        /* driver-chosen capture geometry */
@@ -141,15 +148,16 @@ struct v4l2sl_context {
 /* Driver global state */
 struct v4l2sl_driver_data {
     int media_fd;                /* unused leftover; decode uses per-context media_fd */
-    pthread_mutex_t lock;        /* serializes buffer id/list access across
-                                    client threads (libva does not lock) */
+    pthread_mutex_t lock;        /* unused — see g_v4l2sl_lock in v4l2stateless.c */
 
     struct v4l2sl_config *configs;
     VAConfigID next_config_id;
 
     /* Simple surface table */
-    struct v4l2sl_surface *surfaces[4096];
+    struct v4l2sl_surface *surfaces[V4L2SL_MAX_SURFACES];
     VASurfaceID next_surface_id;
+    VASurfaceID free_surface_ids[V4L2SL_MAX_SURFACES];
+    int n_free_surface_ids;
 
     struct v4l2sl_context *contexts;
     VAContextID next_context_id;
@@ -167,13 +175,51 @@ struct v4l2sl_driver_data {
     char dev_vpp[64];
 };
 
+/* Bounds-checked surface lookup. Every surfaces[id] access must go through
+ * this — the table is fixed-size and IDs come from the client. */
+static inline struct v4l2sl_surface *
+v4l2sl_surface_by_id(struct v4l2sl_driver_data *dd, VASurfaceID id)
+{
+    if (!dd || id == VA_INVALID_ID || (unsigned)id >= V4L2SL_MAX_SURFACES)
+        return NULL;
+    return dd->surfaces[id];
+}
+
 static inline uint64_t v4l2sl_surface_ts(struct v4l2sl_driver_data *dd, VASurfaceID id)
 {
-    if (!dd || id == VA_INVALID_ID || (unsigned)id >= 4096)
-        return 0;
-    if (!dd->surfaces[id])
-        return 0;
-    return dd->surfaces[id]->timestamp;
+    struct v4l2sl_surface *s = v4l2sl_surface_by_id(dd, id);
+
+    return s ? s->timestamp : 0;
+}
+
+/* Bounded, duplicate-free pool pushes. A leaked index is better than a
+ * write past the end of free_*_bufs[], which used to corrupt the context. */
+static inline void v4l2sl_out_pool_push(struct v4l2sl_context *ctx, int idx)
+{
+    int i;
+
+    if (!ctx || idx < 0 || idx >= V4L2SL_NUM_OUTPUT_BUFS)
+        return;
+    if (ctx->n_free_out >= V4L2SL_NUM_OUTPUT_BUFS)
+        return;
+    for (i = 0; i < ctx->n_free_out; i++)
+        if (ctx->free_out_bufs[i] == idx)
+            return;
+    ctx->free_out_bufs[ctx->n_free_out++] = idx;
+}
+
+static inline void v4l2sl_cap_pool_push(struct v4l2sl_context *ctx, int idx)
+{
+    int i;
+
+    if (!ctx || idx < 0 || idx >= V4L2SL_NUM_CAPTURE_BUFS)
+        return;
+    if (ctx->n_free_cap >= V4L2SL_NUM_CAPTURE_BUFS)
+        return;
+    for (i = 0; i < ctx->n_free_cap; i++)
+        if (ctx->free_cap_bufs[i] == idx)
+            return;
+    ctx->free_cap_bufs[ctx->n_free_cap++] = idx;
 }
 
 /* Device helpers (v4l2stateless_device.c) */
@@ -182,15 +228,32 @@ int v4l2sl_open_media_for_device(const char *video_path);
 int v4l2sl_request_alloc(int media_fd);
 int v4l2sl_setup_output_queue(int fd, uint32_t codec_format, int width, int height);
 int v4l2sl_setup_capture_queue(int fd, int width, int height, uint32_t pixelformat);
+int v4l2sl_setup_capture_queue_count(int fd, int width, int height,
+                                     uint32_t pixelformat, int count);
 int v4l2sl_streamon(int fd, enum v4l2_buf_type type);
 int v4l2sl_streamoff(int fd, enum v4l2_buf_type type);
+void v4l2sl_release_context_device(struct v4l2sl_context *ctx);
 int v4l2sl_get_capture_geometry(int fd, uint32_t *w, uint32_t *h,
                                 uint32_t *stride, uint32_t *sizeimage);
 int v4l2sl_ensure_capture(struct v4l2sl_context *ctx, int width, int height,
                           uint32_t pixelformat);
-int v4l2sl_queue_output(int fd, int buf_index, const uint8_t *data, uint32_t size,
+int v4l2sl_queue_output(int fd, int buf_index, uint32_t size,
                         int request_fd, uint64_t timestamp);
 int v4l2sl_queue_capture(int fd, int buf_index, int request_fd);
+/*
+ * Submit one synchronous decode: pops a capture buffer, QBUFs the given
+ * OUTPUT buffer (caller already memcpy'd the bitstream into it), queues the
+ * request, waits for the decoded frame and recycles the bitstream buffer.
+ * Returns the decoded capture buffer index, or -1 with both pools fully
+ * restored (STREAMOFF reset) — the caller must NOT push back out_buf_idx
+ * when this fails.
+ */
+int v4l2sl_decode_submit(struct v4l2sl_context *ctx, int out_buf_idx,
+                         uint32_t bytesused, uint64_t timestamp);
+/* STREAMOFF both queues and rebuild the free pools from scratch. Used to
+ * recover from decode timeouts so a wedged job is never left in the kernel
+ * (rkvdec returns every queued buffer in ERROR state on STREAMOFF). */
+void v4l2sl_decode_reset(struct v4l2sl_context *ctx);
 int v4l2sl_export_dmabuf(int fd, int buf_index);
 int v4l2sl_surface_alloc_export_fd(struct v4l2sl_surface *s);
 int v4l2sl_surface_grow_memfd(struct v4l2sl_surface *s, uint32_t size);

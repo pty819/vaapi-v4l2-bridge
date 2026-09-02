@@ -133,7 +133,7 @@ VAStatus v4l2sl_mpeg2_translate(struct v4l2sl_context *ctx,
     struct v4l2_ctrl_mpeg2_picture vpic;
     struct v4l2_ctrl_mpeg2_quantisation quant;
     int request_fd, v4l2_fd;
-    int out_buf_idx, cap_buf_idx;
+    int out_buf_idx, done_cap;
     uint64_t timestamp;
     size_t prefixes[256];
     size_t total = 0;
@@ -240,13 +240,6 @@ VAStatus v4l2sl_mpeg2_translate(struct v4l2sl_context *ctx,
     }
     out_buf_idx = ctx->free_out_bufs[--ctx->n_free_out];
 
-    if (ctx->n_free_cap == 0) {
-        fprintf(stderr, "v4l2stateless: MPEG-2 no free capture buffer\n");
-        ctx->n_free_out++;
-        return VA_STATUS_ERROR_OPERATION_FAILED;
-    }
-    cap_buf_idx = ctx->free_cap_bufs[--ctx->n_free_cap];
-
     timestamp = ctx->current_surface ? ctx->current_surface->timestamp : 0;
 
     for (int i = 0; i < n_slice_data; i++) {
@@ -261,8 +254,7 @@ VAStatus v4l2sl_mpeg2_translate(struct v4l2sl_context *ctx,
     }
     if (total > ctx->output_buf_size) {
         fprintf(stderr, "v4l2stateless: MPEG-2 slice data too large\n");
-        ctx->n_free_out++;
-        ctx->n_free_cap++;
+        v4l2sl_out_pool_push(ctx, out_buf_idx);
         return VA_STATUS_ERROR_OPERATION_FAILED;
     }
     if (ctx->output_buf_ptr[out_buf_idx]) {
@@ -280,65 +272,23 @@ VAStatus v4l2sl_mpeg2_translate(struct v4l2sl_context *ctx,
         }
     }
 
-    if (v4l2sl_queue_output(v4l2_fd, out_buf_idx,
-                            ctx->output_buf_ptr[out_buf_idx]
-                                ? ctx->output_buf_ptr[out_buf_idx]
-                                : slice_datas[0],
-                            (uint32_t)total, request_fd, timestamp) < 0) {
-        fprintf(stderr, "v4l2stateless: failed to queue MPEG-2 output buffer\n");
-        ctx->n_free_out++;
-        ctx->n_free_cap++;
+    /* On failure decode_submit resets both queues — do not push back. */
+    done_cap = v4l2sl_decode_submit(ctx, out_buf_idx, (uint32_t)total, timestamp);
+    if (done_cap < 0)
         return VA_STATUS_ERROR_OPERATION_FAILED;
-    }
-
-    if (v4l2sl_queue_capture(v4l2_fd, cap_buf_idx, request_fd) < 0) {
-        fprintf(stderr, "v4l2stateless: failed to queue MPEG-2 capture buffer\n");
-        ctx->n_free_cap++;
-        return VA_STATUS_ERROR_OPERATION_FAILED;
-    }
-
-    if (v4l2sl_submit_request(request_fd) < 0) {
-        fprintf(stderr, "v4l2stateless: failed to submit MPEG-2 request\n");
-        return VA_STATUS_ERROR_OPERATION_FAILED;
-    }
 
     {
-        struct pollfd pfd = { .fd = v4l2_fd, .events = POLLIN };
-        int done_cap, done_out;
-        struct v4l2sl_surface *surf;
+        struct v4l2sl_surface *surf = ctx->current_surface;
 
-        if (poll(&pfd, 1, 3000) <= 0) {
-            fprintf(stderr, "v4l2stateless: MPEG-2 decode timed out\n");
-            return VA_STATUS_ERROR_OPERATION_FAILED;
-        }
-
-        done_cap = v4l2sl_dequeue_buffer(v4l2_fd, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE);
-        if (done_cap < 0) {
-            fprintf(stderr, "v4l2stateless: MPEG-2 decode failed\n");
-            return VA_STATUS_ERROR_OPERATION_FAILED;
-        }
-
-        done_out = v4l2sl_dequeue_buffer(v4l2_fd, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE);
-        if (done_out < 0) {
-            struct pollfd pout = { .fd = v4l2_fd, .events = POLLOUT };
-            if (poll(&pout, 1, 200) > 0)
-                done_out = v4l2sl_dequeue_buffer(v4l2_fd, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE);
-        }
-        if (done_out >= 0)
-            ctx->free_out_bufs[ctx->n_free_out++] = done_out;
-
-        surf = ctx->current_surface;
         if (surf) {
-            if (v4l2sl_surface_pull_capture(ctx, surf, done_cap) < 0)
+            if (v4l2sl_surface_pull_capture(ctx, surf, done_cap) < 0) {
                 fprintf(stderr, "v4l2stateless: MPEG-2 pull capture failed\n");
+                v4l2sl_cap_pool_push(ctx, done_cap);
+            }
         } else {
-            ctx->free_cap_bufs[ctx->n_free_cap++] = done_cap;
+            v4l2sl_cap_pool_push(ctx, done_cap);
         }
     }
-
-    close(request_fd);
-    if (ctx->request_fd == request_fd)
-        ctx->request_fd = -1;
 
     return VA_STATUS_SUCCESS;
 }

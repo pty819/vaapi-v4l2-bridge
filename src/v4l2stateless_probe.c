@@ -223,7 +223,20 @@ int v4l2sl_scan_decoder_paths_ex(char *h264_out, char *hevc_out, char *av1_out,
 
         nfmt = v4l2sl_enum_output_fourccs(fd, fourccs[n_nodes],
                                           V4L2SL_PROBE_MAX_FOURCCS);
-        close(fd);
+        {
+            uint32_t cap_fcc[V4L2SL_PROBE_MAX_FOURCCS];
+            int ncap, k, jpeg = 0;
+
+            ncap = v4l2sl_enum_capture_fourccs(fd, cap_fcc,
+                                               V4L2SL_PROBE_MAX_FOURCCS);
+            for (k = 0; k < ncap; k++) {
+                if (cap_fcc[k] == V4L2_PIX_FMT_JPEG)
+                    jpeg = 1;
+            }
+            close(fd);
+            if (jpeg)
+                continue;
+        }
         if (nfmt <= 0)
             continue;
 
@@ -338,5 +351,235 @@ int v4l2sl_scan_aux_paths(char *jpeg_enc_out, char *vpp_out, unsigned out_len)
         if (has_rotate && !has_coded && !has_jpeg && vpp_out && out_len && !vpp_out[0])
             copy_path(vpp_out, out_len, path);
     }
+    return 0;
+}
+
+/*
+ * Cached all-in-one scan. Node assignment is static within a boot, so the
+ * result is written to a small file keyed by boot_id under XDG_RUNTIME_DIR
+ * (fallback /tmp) and reused by every process that loads this driver. This
+ * matters for stability: each vaInitialize used to open all 64 video nodes
+ * and fire MEDIA_IOC_REQUEST_ALLOC at every M2M node, and that reopen storm
+ * is exactly what the AV1/SoC hang was traced to.
+ */
+#define PROBE_CACHE_SUFFIX "/v4l2stateless-probe.cache"
+
+static void probe_cache_path(char *out, unsigned len)
+{
+    const char *dir = getenv("XDG_RUNTIME_DIR");
+
+    if (!dir || !dir[0])
+        dir = "/tmp";
+    snprintf(out, len, "%s%s", dir, PROBE_CACHE_SUFFIX);
+}
+
+static int probe_read_boot_id(char *out, unsigned len)
+{
+    FILE *f = fopen("/proc/sys/kernel/random/boot_id", "r");
+    size_t n;
+
+    if (!f)
+        return -1;
+    if (!fgets(out, (int)len, f)) {
+        fclose(f);
+        return -1;
+    }
+    fclose(f);
+    n = strlen(out);
+    while (n > 0 && (out[n - 1] == '\n' || out[n - 1] == '\r'))
+        out[--n] = 0;
+    return n ? 0 : -1;
+}
+
+static int probe_cache_load(const char *path, const char *boot,
+                            char *h264, char *hevc, char *av1, char *vp8,
+                            char *mpeg2, char *jpeg, char *vpp, unsigned len)
+{
+    char line[160];
+    char *val;
+    FILE *f = fopen(path, "r");
+
+    if (!f)
+        return -1;
+    if (!fgets(line, sizeof(line), f)) {
+        fclose(f);
+        return -1;
+    }
+    line[strcspn(line, "\r\n")] = 0;
+    if (strncmp(line, "boot ", 5) != 0 || strcmp(line + 5, boot) != 0) {
+        fclose(f);
+        return -1;
+    }
+    while (fgets(line, sizeof(line), f)) {
+        val = strchr(line, '=');
+        if (!val)
+            continue;
+        *val++ = 0;
+        line[strcspn(line, "\r\n")] = 0;
+        val[strcspn(val, "\r\n")] = 0;
+        if (!strcmp(line, "h264"))
+            copy_path(h264, len, val);
+        else if (!strcmp(line, "hevc"))
+            copy_path(hevc, len, val);
+        else if (!strcmp(line, "av1"))
+            copy_path(av1, len, val);
+        else if (!strcmp(line, "vp8"))
+            copy_path(vp8, len, val);
+        else if (!strcmp(line, "mpeg2"))
+            copy_path(mpeg2, len, val);
+        else if (!strcmp(line, "jpeg"))
+            copy_path(jpeg, len, val);
+        else if (!strcmp(line, "vpp"))
+            copy_path(vpp, len, val);
+    }
+    fclose(f);
+    return 0;
+}
+
+static void probe_cache_store(const char *path, const char *boot,
+                              const char *h264, const char *hevc,
+                              const char *av1, const char *vp8,
+                              const char *mpeg2, const char *jpeg,
+                              const char *vpp)
+{
+    char tmp[300];
+    FILE *f;
+
+    snprintf(tmp, sizeof(tmp), "%s.%d.tmp", path, (int)getpid());
+    f = fopen(tmp, "w");
+    if (!f)
+        return;
+    fprintf(f, "boot %s\n", boot);
+    fprintf(f, "h264=%s\nhevc=%s\nav1=%s\nvp8=%s\nmpeg2=%s\njpeg=%s\nvpp=%s\n",
+            h264, hevc, av1, vp8, mpeg2, jpeg, vpp);
+    if (fclose(f) == 0)
+        rename(tmp, path);
+    else
+        unlink(tmp);
+}
+
+/* Single pass over /dev/video*: decoders by OUTPUT fourcc (skipping JPEG
+ * capture nodes), plus the JPEG encoder and RGA VPP nodes. */
+static int scan_all_uncached(char *h264_out, char *hevc_out, char *av1_out,
+                             char *vp8_out, char *mpeg2_out,
+                             char *jpeg_enc_out, char *vpp_out, unsigned out_len)
+{
+    struct v4l2sl_node_fmts nodes[V4L2SL_PROBE_MAX_NODES];
+    uint32_t fourccs[V4L2SL_PROBE_MAX_NODES][V4L2SL_PROBE_MAX_FOURCCS];
+    uint32_t cap_fcc[V4L2SL_PROBE_MAX_FOURCCS], out_fcc[V4L2SL_PROBE_MAX_FOURCCS];
+    char paths[V4L2SL_PROBE_MAX_NODES][64];
+    const char *p;
+    unsigned n_nodes = 0;
+    int i;
+
+    if (h264_out && out_len) h264_out[0] = 0;
+    if (hevc_out && out_len) hevc_out[0] = 0;
+    if (av1_out && out_len) av1_out[0] = 0;
+    if (vp8_out && out_len) vp8_out[0] = 0;
+    if (mpeg2_out && out_len) mpeg2_out[0] = 0;
+    if (jpeg_enc_out && out_len) jpeg_enc_out[0] = 0;
+    if (vpp_out && out_len) vpp_out[0] = 0;
+
+    for (i = 0; i < 64; i++) {
+        struct v4l2_capability cap;
+        struct v4l2_queryctrl qc;
+        int fd, nout, ncap, k;
+        int has_jpeg, has_coded, has_rotate;
+
+        snprintf(paths[n_nodes], sizeof(paths[n_nodes]), "/dev/video%d", i);
+        fd = open(paths[n_nodes], O_RDWR | O_NONBLOCK);
+        if (fd < 0)
+            continue;
+
+        memset(&cap, 0, sizeof(cap));
+        if (ioctl(fd, VIDIOC_QUERYCAP, &cap) < 0 ||
+            !(cap.capabilities & V4L2_CAP_VIDEO_M2M_MPLANE)) {
+            close(fd);
+            continue;
+        }
+
+        nout = v4l2sl_enum_output_fourccs(fd, out_fcc, V4L2SL_PROBE_MAX_FOURCCS);
+        ncap = v4l2sl_enum_capture_fourccs(fd, cap_fcc, V4L2SL_PROBE_MAX_FOURCCS);
+        memset(&qc, 0, sizeof(qc));
+        qc.id = V4L2_CID_ROTATE;
+        has_rotate = ioctl(fd, VIDIOC_QUERYCTRL, &qc) == 0;
+        close(fd);
+
+        if (nout <= 0 && ncap <= 0)
+            continue;
+
+        has_jpeg = fourcc_in(cap_fcc, (unsigned)ncap, V4L2_PIX_FMT_JPEG);
+        has_coded = 0;
+        for (k = 0; k < nout; k++) {
+            if (fourcc_is_coded(out_fcc[k])) {
+                has_coded = 1;
+                break;
+            }
+        }
+
+        if (has_jpeg && jpeg_enc_out && out_len && !jpeg_enc_out[0])
+            copy_path(jpeg_enc_out, out_len, paths[n_nodes]);
+        if (has_rotate && !has_coded && !has_jpeg && vpp_out && out_len &&
+            !vpp_out[0])
+            copy_path(vpp_out, out_len, paths[n_nodes]);
+
+        if (!has_coded || n_nodes >= V4L2SL_PROBE_MAX_NODES)
+            continue;
+
+        nodes[n_nodes].path = paths[n_nodes];
+        nodes[n_nodes].fourccs = fourccs[n_nodes];
+        nodes[n_nodes].n_fourccs = (unsigned)nout;
+        memcpy(fourccs[n_nodes], out_fcc,
+               (size_t)nout * sizeof(out_fcc[0]));
+        /* REQUEST_ALLOC at most once per candidate node per boot — the
+         * cache makes sure later processes never repeat it. */
+        nodes[n_nodes].request_api = v4l2sl_video_has_request_api(paths[n_nodes])
+            ? V4L2SL_REQAPI_YES : V4L2SL_REQAPI_NO;
+        n_nodes++;
+    }
+
+    p = v4l2sl_pick_device_for_codec(V4L2SL_CODEC_H264, nodes, n_nodes);
+    copy_path(h264_out, out_len, p);
+    p = v4l2sl_pick_device_for_codec(V4L2SL_CODEC_HEVC, nodes, n_nodes);
+    copy_path(hevc_out, out_len, p);
+    p = v4l2sl_pick_device_for_codec(V4L2SL_CODEC_AV1, nodes, n_nodes);
+    copy_path(av1_out, out_len, p);
+    p = v4l2sl_pick_device_for_codec(V4L2SL_CODEC_VP8, nodes, n_nodes);
+    copy_path(vp8_out, out_len, p);
+    p = v4l2sl_pick_device_for_codec(V4L2SL_CODEC_MPEG2, nodes, n_nodes);
+    copy_path(mpeg2_out, out_len, p);
+    return 0;
+}
+
+int v4l2sl_scan_all_cached(char *h264_out, char *hevc_out, char *av1_out,
+                           char *vp8_out, char *mpeg2_out,
+                           char *jpeg_enc_out, char *vpp_out,
+                           unsigned out_len)
+{
+    char path[280];
+    char boot[64];
+
+    probe_cache_path(path, sizeof(path));
+
+    if (!getenv("V4L2SL_PROBE_NOCACHE") &&
+        probe_read_boot_id(boot, sizeof(boot)) == 0 &&
+        probe_cache_load(path, boot, h264_out, hevc_out, av1_out, vp8_out,
+                         mpeg2_out, jpeg_enc_out, vpp_out, out_len) == 0) {
+        fprintf(stderr, "v4l2stateless: probe cache hit (%s)\n", path);
+        return 0;
+    }
+
+    scan_all_uncached(h264_out, hevc_out, av1_out, vp8_out, mpeg2_out,
+                      jpeg_enc_out, vpp_out, out_len);
+
+    if (probe_read_boot_id(boot, sizeof(boot)) == 0)
+        probe_cache_store(path, boot,
+                          h264_out && h264_out[0] ? h264_out : "",
+                          hevc_out && hevc_out[0] ? hevc_out : "",
+                          av1_out && av1_out[0] ? av1_out : "",
+                          vp8_out && vp8_out[0] ? vp8_out : "",
+                          mpeg2_out && mpeg2_out[0] ? mpeg2_out : "",
+                          jpeg_enc_out && jpeg_enc_out[0] ? jpeg_enc_out : "",
+                          vpp_out && vpp_out[0] ? vpp_out : "");
     return 0;
 }

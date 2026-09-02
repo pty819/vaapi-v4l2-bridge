@@ -17,6 +17,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <errno.h>
+#include <poll.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <linux/media.h>
@@ -183,6 +184,13 @@ int v4l2sl_setup_output_queue(int fd, uint32_t codec_format, int width, int heig
  */
 int v4l2sl_setup_capture_queue(int fd, int width, int height, uint32_t pixelformat)
 {
+    return v4l2sl_setup_capture_queue_count(fd, width, height, pixelformat,
+                                            V4L2SL_NUM_CAPTURE_BUFS);
+}
+
+int v4l2sl_setup_capture_queue_count(int fd, int width, int height,
+                                     uint32_t pixelformat, int count)
+{
     /* Set capture format (decoded output). Default NV12; 10-bit/422 use
      * NV15/NV16/NV20 which rkvdec only accepts after a matching SPS. */
     struct v4l2_format fmt = { 0 };
@@ -200,7 +208,7 @@ int v4l2sl_setup_capture_queue(int fd, int width, int height, uint32_t pixelform
 
     /* Request capture buffers */
     struct v4l2_requestbuffers req = { 0 };
-    req.count = V4L2SL_NUM_CAPTURE_BUFS;
+    req.count = count > 0 ? count : V4L2SL_NUM_CAPTURE_BUFS;
     req.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
     req.memory = V4L2_MEMORY_MMAP;
 
@@ -237,6 +245,74 @@ int v4l2sl_streamoff(int fd, enum v4l2_buf_type type)
     return 0;
 }
 
+static void release_ctx_capture_surfaces(struct v4l2sl_context *ctx);
+static void v4l2sl_unmap_capture_buffers(struct v4l2sl_context *ctx);
+static int v4l2sl_mmap_one_capture(struct v4l2sl_context *ctx, int index);
+
+static int reqbufs_zero(int fd, enum v4l2_buf_type type)
+{
+    struct v4l2_requestbuffers req = { 0 };
+
+    req.count = 0;
+    req.type = type;
+    req.memory = V4L2_MEMORY_MMAP;
+    if (xioctl(fd, VIDIOC_REQBUFS, &req) < 0) {
+        fprintf(stderr, "v4l2stateless: REQBUFS(0) type=%u failed: %s\n",
+                type, strerror(errno));
+        return -1;
+    }
+    return 0;
+}
+
+void v4l2sl_release_context_device(struct v4l2sl_context *ctx)
+{
+    int i;
+
+    if (!ctx)
+        return;
+
+    if (ctx->v4l2_fd >= 0 && ctx->streamed) {
+        v4l2sl_streamoff(ctx->v4l2_fd, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE);
+        v4l2sl_streamoff(ctx->v4l2_fd, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE);
+        ctx->streamed = 0;
+    }
+
+    if (ctx->request_fd >= 0) {
+        close(ctx->request_fd);
+        ctx->request_fd = -1;
+    }
+
+    for (i = 0; i < ctx->output_bufs_allocd && i < V4L2SL_NUM_OUTPUT_BUFS; i++) {
+        if (ctx->output_buf_ptr[i] && ctx->output_buf_ptr[i] != MAP_FAILED) {
+            munmap(ctx->output_buf_ptr[i], ctx->output_buf_size);
+            ctx->output_buf_ptr[i] = NULL;
+        }
+    }
+    v4l2sl_unmap_capture_buffers(ctx);
+
+    if (ctx->v4l2_fd >= 0) {
+        if (ctx->output_bufs_allocd > 0) {
+            reqbufs_zero(ctx->v4l2_fd, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE);
+            ctx->output_bufs_allocd = 0;
+            ctx->n_free_out = 0;
+        }
+        if (ctx->capture_bufs_allocd > 0) {
+            reqbufs_zero(ctx->v4l2_fd, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE);
+            ctx->capture_bufs_allocd = 0;
+            ctx->n_free_cap = 0;
+        }
+        close(ctx->v4l2_fd);
+        ctx->v4l2_fd = -1;
+    }
+
+    if (ctx->media_fd >= 0) {
+        close(ctx->media_fd);
+        ctx->media_fd = -1;
+    }
+
+    release_ctx_capture_surfaces(ctx);
+}
+
 static void release_ctx_capture_surfaces(struct v4l2sl_context *ctx)
 {
     int i;
@@ -256,6 +332,138 @@ static void release_ctx_capture_surfaces(struct v4l2sl_context *ctx)
          * GPU still holds a dup hangs the RK3588 CMA pool. */
         s->buf_index = -1;
     }
+}
+
+/* Rebuild both free pools from scratch. Capture indices still claimed by a
+ * render-target surface (surf->buf_index) stay claimed — begin_picture
+ * returns them when the surface is re-targeted. */
+static void rebuild_free_pools(struct v4l2sl_context *ctx)
+{
+    int claimed[V4L2SL_NUM_CAPTURE_BUFS] = { 0 };
+    int i;
+
+    ctx->n_free_out = 0;
+    for (i = 0; i < ctx->output_bufs_allocd && i < V4L2SL_NUM_OUTPUT_BUFS; i++)
+        v4l2sl_out_pool_push(ctx, i);
+
+    if (ctx->driver_data && ctx->render_targets) {
+        for (i = 0; i < ctx->num_render_targets; i++) {
+            struct v4l2sl_surface *s =
+                v4l2sl_surface_by_id(ctx->driver_data, ctx->render_targets[i]);
+
+            if (s && s->buf_index >= 0 && s->buf_index < V4L2SL_NUM_CAPTURE_BUFS)
+                claimed[s->buf_index] = 1;
+        }
+    }
+
+    ctx->n_free_cap = 0;
+    for (i = 0; i < ctx->capture_bufs_allocd && i < V4L2SL_NUM_CAPTURE_BUFS; i++)
+        if (!claimed[i])
+            v4l2sl_cap_pool_push(ctx, i);
+}
+
+void v4l2sl_decode_reset(struct v4l2sl_context *ctx)
+{
+    if (!ctx || ctx->v4l2_fd < 0)
+        return;
+
+    fprintf(stderr, "v4l2stateless: resetting decode queues\n");
+
+    if (ctx->streamed) {
+        v4l2sl_streamoff(ctx->v4l2_fd, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE);
+        v4l2sl_streamoff(ctx->v4l2_fd, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE);
+        ctx->streamed = 0;
+    }
+
+    if (ctx->request_fd >= 0) {
+        close(ctx->request_fd);
+        ctx->request_fd = -1;
+    }
+
+    /* STREAMOFF hands every queued buffer back in ERROR state (rkvdec and
+     * hantro both do this in stop_streaming), so from this point every
+     * allocated index is userspace-owned again. */
+    rebuild_free_pools(ctx);
+}
+
+int v4l2sl_decode_submit(struct v4l2sl_context *ctx, int out_buf_idx,
+                         uint32_t bytesused, uint64_t timestamp)
+{
+    struct pollfd pfd;
+    int cap_buf_idx, done_cap, done_out;
+
+    if (!ctx || ctx->v4l2_fd < 0 || ctx->request_fd < 0)
+        return -1;
+
+    if (ctx->n_free_cap == 0) {
+        fprintf(stderr, "v4l2stateless: no free capture buffer\n");
+        v4l2sl_out_pool_push(ctx, out_buf_idx);
+        return -1;
+    }
+    cap_buf_idx = ctx->free_cap_bufs[--ctx->n_free_cap];
+
+    if (v4l2sl_queue_output(ctx->v4l2_fd, out_buf_idx, bytesused,
+                            ctx->request_fd, timestamp) < 0) {
+        fprintf(stderr, "v4l2stateless: QBUF output[%d] failed\n", out_buf_idx);
+        v4l2sl_out_pool_push(ctx, out_buf_idx);
+        v4l2sl_cap_pool_push(ctx, cap_buf_idx);
+        return -1;
+    }
+
+    /* Capture is queued bare: the stateless decoder spec forbids CAPTURE
+     * buffers in a request (vb2 answers EPERM for them). */
+    if (v4l2sl_queue_capture(ctx->v4l2_fd, cap_buf_idx, ctx->request_fd) < 0) {
+        fprintf(stderr, "v4l2stateless: QBUF capture[%d] failed\n", cap_buf_idx);
+        v4l2sl_cap_pool_push(ctx, cap_buf_idx);
+        /* Recover the bitstream buffer so the pool does not leak. */
+        pfd.fd = ctx->v4l2_fd;
+        pfd.events = POLLOUT;
+        if (poll(&pfd, 1, 200) > 0) {
+            done_out = v4l2sl_dequeue_buffer(ctx->v4l2_fd,
+                                             V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE);
+            if (done_out >= 0)
+                v4l2sl_out_pool_push(ctx, done_out);
+        }
+        return -1;
+    }
+
+    if (v4l2sl_submit_request(ctx->request_fd) < 0) {
+        fprintf(stderr, "v4l2stateless: MEDIA_REQUEST_IOC_QUEUE failed\n");
+        /* The buffers stay queued kernel-side: full reset, not just a
+         * pool push — a request that failed to queue produces nothing. */
+        v4l2sl_decode_reset(ctx);
+        return -1;
+    }
+
+    pfd.fd = ctx->v4l2_fd;
+    pfd.events = POLLIN;
+    if (poll(&pfd, 1, 3000) <= 0) {
+        fprintf(stderr, "v4l2stateless: decode timeout, resetting queues\n");
+        v4l2sl_decode_reset(ctx);
+        return -1;
+    }
+
+    done_cap = v4l2sl_dequeue_buffer(ctx->v4l2_fd, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE);
+    if (done_cap < 0) {
+        fprintf(stderr, "v4l2stateless: no completed capture buffer\n");
+        v4l2sl_decode_reset(ctx);
+        return -1;
+    }
+
+    done_out = v4l2sl_dequeue_buffer(ctx->v4l2_fd, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE);
+    if (done_out < 0) {
+        pfd.events = POLLOUT;
+        if (poll(&pfd, 1, 200) > 0)
+            done_out = v4l2sl_dequeue_buffer(ctx->v4l2_fd,
+                                             V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE);
+    }
+    if (done_out >= 0)
+        v4l2sl_out_pool_push(ctx, done_out);
+
+    close(ctx->request_fd);
+    ctx->request_fd = -1;
+
+    return done_cap;
 }
 
 /*
@@ -296,6 +504,7 @@ int v4l2sl_ensure_capture(struct v4l2sl_context *ctx, int width, int height,
     }
 
     release_ctx_capture_surfaces(ctx);
+    v4l2sl_unmap_capture_buffers(ctx);
 
     if (ctx->capture_bufs_allocd > 0) {
         struct v4l2_requestbuffers req = { 0 };
@@ -311,19 +520,80 @@ int v4l2sl_ensure_capture(struct v4l2sl_context *ctx, int width, int height,
         ctx->n_free_cap = 0;
     }
 
-    if (size_changed && ctx->output_bufs_allocd > 0) {
+    if (size_changed) {
+        /* A bigger coded size also means bigger bitstream buffers. vb2
+         * refuses S_FMT(OUTPUT) with -EBUSY while buffers are allocated,
+         * so the OUTPUT queue has to be rebuilt too (spec: dynamic
+         * resolution change re-runs the OUTPUT S_FMT step). Best effort:
+         * if the re-mmap fails we keep going with empty pointers — the
+         * next QBUF will still carry the right bytesused. */
         struct v4l2_format ofmt = { 0 };
+        struct v4l2_format cur = { 0 };
+        int i, n_out;
+        uint32_t codec_fcc = 0;
+
         ofmt.type = V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE;
-        if (xioctl(ctx->v4l2_fd, VIDIOC_G_FMT, &ofmt) == 0) {
-            ofmt.fmt.pix_mp.width = width;
-            ofmt.fmt.pix_mp.height = height;
-            if (xioctl(ctx->v4l2_fd, VIDIOC_S_FMT, &ofmt) < 0)
-                fprintf(stderr, "v4l2stateless: S_FMT output resize failed: %s\n",
-                        strerror(errno));
+        cur.type = V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE;
+        if (ctx->output_bufs_allocd > 0 &&
+            xioctl(ctx->v4l2_fd, VIDIOC_G_FMT, &cur) == 0 &&
+            (cur.fmt.pix_mp.width < (uint32_t)width ||
+             cur.fmt.pix_mp.height < (uint32_t)height)) {
+            codec_fcc = cur.fmt.pix_mp.pixelformat;
+
+            for (i = 0; i < ctx->output_bufs_allocd &&
+                        i < V4L2SL_NUM_OUTPUT_BUFS; i++) {
+                if (ctx->output_buf_ptr[i] && ctx->output_buf_ptr[i] != MAP_FAILED) {
+                    munmap(ctx->output_buf_ptr[i], ctx->output_buf_size);
+                    ctx->output_buf_ptr[i] = NULL;
+                }
+            }
+            if (reqbufs_zero(ctx->v4l2_fd, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE) == 0) {
+                ctx->output_bufs_allocd = 0;
+                ctx->n_free_out = 0;
+
+                ofmt = cur;
+                ofmt.fmt.pix_mp.width = width;
+                ofmt.fmt.pix_mp.height = height;
+                if (xioctl(ctx->v4l2_fd, VIDIOC_S_FMT, &ofmt) < 0)
+                    fprintf(stderr, "v4l2stateless: S_FMT output resize failed: %s\n",
+                            strerror(errno));
+                n_out = v4l2sl_setup_output_queue(ctx->v4l2_fd, codec_fcc,
+                                                  width, height);
+                if (n_out > 0) {
+                    int j;
+
+                    ctx->output_bufs_allocd = n_out;
+                    if (v4l2sl_mmap_output_buffers(ctx->v4l2_fd, n_out,
+                                                   ctx->output_buf_ptr,
+                                                   &ctx->output_buf_size) < 0)
+                        fprintf(stderr,
+                                "v4l2stateless: warning: output re-mmap failed\n");
+                    for (j = 0; j < n_out && j < V4L2SL_NUM_OUTPUT_BUFS; j++)
+                        v4l2sl_out_pool_push(ctx, j);
+                } else {
+                    fprintf(stderr,
+                            "v4l2stateless: warning: output queue rebuild failed\n");
+                }
+            }
         }
     }
 
-    n_cap = v4l2sl_setup_capture_queue(ctx->v4l2_fd, width, height, fourcc);
+    /* Capture re-allocation with graceful degradation: CMA can be nearly
+     * exhausted (desktop GBM), and a smaller pool beats a dead context.
+     * The spec puts the reference-depth burden on the client — 24 covers
+     * every profile; a degraded pool only hurts deep B-pyramids. */
+    n_cap = v4l2sl_setup_capture_queue_count(ctx->v4l2_fd, width, height, fourcc,
+                                             V4L2SL_NUM_CAPTURE_BUFS);
+    if (n_cap <= 0 && V4L2SL_NUM_CAPTURE_BUFS > 8) {
+        fprintf(stderr, "v4l2stateless: retrying capture REQBUFS with 8 buffers\n");
+        n_cap = v4l2sl_setup_capture_queue_count(ctx->v4l2_fd, width, height,
+                                                 fourcc, 8);
+    }
+    if (n_cap <= 0 && V4L2SL_NUM_CAPTURE_BUFS > 4) {
+        fprintf(stderr, "v4l2stateless: retrying capture REQBUFS with 4 buffers\n");
+        n_cap = v4l2sl_setup_capture_queue_count(ctx->v4l2_fd, width, height,
+                                                 fourcc, 4);
+    }
     if (n_cap <= 0)
         return -1;
 
@@ -332,7 +602,7 @@ int v4l2sl_ensure_capture(struct v4l2sl_context *ctx, int width, int height,
     {
         int i;
         for (i = 0; i < n_cap && i < V4L2SL_NUM_CAPTURE_BUFS; i++)
-            ctx->free_cap_bufs[ctx->n_free_cap++] = i;
+            v4l2sl_cap_pool_push(ctx, i);
     }
     ctx->width = width;
     ctx->height = height;
@@ -344,6 +614,8 @@ int v4l2sl_ensure_capture(struct v4l2sl_context *ctx, int width, int height,
                 ctx->cap_width, ctx->cap_height, ctx->cap_stride, ctx->cap_sizeimage,
                 (char *)&fourcc);
     }
+    /* Map capture slots lazily after DQBUF. Mapping all 24 CMA
+     * buffers here pins ~75MB and hangs the RK3588. */
     v4l2sl_bind_capture_export(ctx);
     return 0;
 }
@@ -371,6 +643,77 @@ int v4l2sl_get_capture_geometry(int fd, uint32_t *w, uint32_t *h,
     return 0;
 }
 
+
+
+static void v4l2sl_unmap_capture_buffers(struct v4l2sl_context *ctx)
+{
+    int i;
+
+    if (!ctx)
+        return;
+    for (i = 0; i < V4L2SL_NUM_CAPTURE_BUFS; i++) {
+        if (!ctx->capture_buf_ptr[i] || ctx->capture_buf_ptr[i] == MAP_FAILED) {
+            ctx->capture_buf_ptr[i] = NULL;
+            continue;
+        }
+        if (ctx->capture_buf_anon)
+            free(ctx->capture_buf_ptr[i]);
+        else
+            munmap(ctx->capture_buf_ptr[i], ctx->capture_buf_size);
+        ctx->capture_buf_ptr[i] = NULL;
+    }
+    ctx->capture_buf_size = 0;
+    ctx->capture_buf_anon = 0;
+}
+
+static int v4l2sl_mmap_one_capture(struct v4l2sl_context *ctx, int index)
+{
+    struct v4l2_buffer buf = { 0 };
+    struct v4l2_plane planes[1] = { 0 };
+    void *ptr;
+    uint32_t length;
+    int anon;
+
+    if (!ctx || ctx->v4l2_fd < 0 || index < 0 ||
+        index >= ctx->capture_bufs_allocd || index >= V4L2SL_NUM_CAPTURE_BUFS)
+        return -1;
+    if (ctx->capture_buf_ptr[index] && ctx->capture_buf_ptr[index] != MAP_FAILED)
+        return 0;
+
+    buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
+    buf.memory = V4L2_MEMORY_MMAP;
+    buf.index = index;
+    buf.length = 1;
+    buf.m.planes = planes;
+    if (xioctl(ctx->v4l2_fd, VIDIOC_QUERYBUF, &buf) < 0) {
+        fprintf(stderr, "v4l2stateless: QUERYBUF capture[%d] failed: %s\n",
+                index, strerror(errno));
+        return -1;
+    }
+    length = planes[0].length;
+    if (!length)
+        return -1;
+    anon = g_ioctl_hook ? 1 : 0;
+    if (anon) {
+        ptr = calloc(1, length);
+        if (!ptr)
+            return -1;
+    } else {
+        ptr = mmap(NULL, length, PROT_READ | PROT_WRITE, MAP_SHARED,
+                   ctx->v4l2_fd, planes[0].m.mem_offset);
+        if (ptr == MAP_FAILED) {
+            fprintf(stderr, "v4l2stateless: mmap capture[%d] failed: %s\n",
+                    index, strerror(errno));
+            return -1;
+        }
+        fprintf(stderr, "v4l2stateless: capture mmap idx=%d size=%u\n",
+                index, length);
+    }
+    ctx->capture_buf_ptr[index] = ptr;
+    ctx->capture_buf_size = length;
+    ctx->capture_buf_anon = anon;
+    return 0;
+}
 
 /*
  * Mmap all output buffers after REQBUFS
@@ -414,11 +757,11 @@ int v4l2sl_mmap_output_buffers(int fd, int count, void **ptrs, uint32_t *size_ou
 
 /*
  * Queue a compressed bitstream buffer to the output queue.
- * Data is memcpy'd into the pre-mapped output buffer.
+ * The bitstream was already memcpy'd into the pre-mapped output buffer by
+ * the caller — only its length travels with the QBUF.
  */
 int v4l2sl_queue_output(int fd, int buf_index,
-                        const uint8_t *data, uint32_t size,
-                        int request_fd, uint64_t timestamp)
+                        uint32_t size, int request_fd, uint64_t timestamp)
 {
     struct v4l2_buffer buf = { 0 };
     struct v4l2_plane planes[1] = { 0 };
@@ -555,43 +898,35 @@ int v4l2sl_surface_grow_memfd(struct v4l2sl_surface *s, uint32_t size)
 int v4l2sl_surface_pull_capture(struct v4l2sl_context *ctx,
                                 struct v4l2sl_surface *surf, int buf_index)
 {
-    int vfd;
     uint32_t sz, stride, alh, fcc;
     void *src, *dst;
 
     if (!ctx || !surf || ctx->v4l2_fd < 0 || buf_index < 0)
         return -1;
+    if (v4l2sl_mmap_one_capture(ctx, buf_index) < 0)
+        return -1;
+    if (!ctx->capture_buf_ptr[buf_index] ||
+        ctx->capture_buf_ptr[buf_index] == MAP_FAILED)
+        return -1;
 
     stride = ctx->cap_stride ? ctx->cap_stride : (uint32_t)ctx->width;
     alh = ctx->cap_height ? ctx->cap_height : (uint32_t)ctx->height;
     fcc = ctx->cap_pixelformat ? ctx->cap_pixelformat : V4L2_PIX_FMT_NV12;
-    sz = ctx->cap_sizeimage ? ctx->cap_sizeimage :
-         v4l2sl_capture_plane_size(fcc, stride, alh);
+    sz = ctx->capture_buf_size;
+    if (ctx->cap_sizeimage && ctx->cap_sizeimage < sz)
+        sz = ctx->cap_sizeimage;
     if (!sz)
         return -1;
 
-    vfd = v4l2sl_export_dmabuf(ctx->v4l2_fd, buf_index);
-    if (vfd < 0)
+    if (v4l2sl_surface_grow_memfd(surf, sz) < 0)
         return -1;
-    if (v4l2sl_surface_grow_memfd(surf, sz) < 0) {
-        close(vfd);
-        return -1;
-    }
 
-    src = mmap(NULL, sz, PROT_READ, MAP_SHARED, vfd, 0);
+    src = ctx->capture_buf_ptr[buf_index];
     dst = mmap(NULL, sz, PROT_READ | PROT_WRITE, MAP_SHARED, surf->dma_buf_fd, 0);
-    if (src == MAP_FAILED || dst == MAP_FAILED) {
-        if (src != MAP_FAILED)
-            munmap(src, sz);
-        if (dst != MAP_FAILED)
-            munmap(dst, sz);
-        close(vfd);
+    if (dst == MAP_FAILED)
         return -1;
-    }
     memcpy(dst, src, sz);
-    munmap(src, sz);
     munmap(dst, sz);
-    close(vfd);
 
     surf->buf_index = buf_index;
     surf->stride = stride;

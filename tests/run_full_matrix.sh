@@ -135,9 +135,12 @@ vainfo --display drm --device /dev/dri/renderD128 >"$OUT/vainfo.log" 2>&1 || tru
 if ! grep -q "v4l2stateless/vaapi-v4l2-bridge" "$OUT/vainfo.log"; then
   echo "vainfo did not load driver"; fail=$((fail+1))
 else
+  # AV1 is intentionally not advertised over VA-API (short sessions
+  # reopening the VPU981 node can hang the SoC); desktop AV1 goes
+  # Chromium/GStreamer native V4L2. Do not expect it here.
   for p in VAProfileH264ConstrainedBaseline VAProfileH264Main VAProfileH264High \
            VAProfileH264High10 VAProfileH264High422 \
-           VAProfileHEVCMain VAProfileHEVCMain10 VAProfileAV1Profile0 \
+           VAProfileHEVCMain VAProfileHEVCMain10 \
            VAProfileVP8Version0_3 VAProfileMPEG2Simple VAProfileMPEG2Main \
            VAProfileJPEGBaseline VAProfileNone; do
     if grep -q "$p" "$OUT/vainfo.log"; then
@@ -176,15 +179,15 @@ enc "$CLIP/hevc_4k.mp4" -f lavfi -i testsrc=size=3840x2160:rate=30:duration=1 \
 enc "$CLIP/hevc10.mp4" -f lavfi -i testsrc=size=1280x720:rate=30:duration=1 \
   -pix_fmt yuv420p10le -c:v libx265 -preset ultrafast -x265-params "log-level=error" -frames:v 8
 
-# AV1
-enc "$CLIP/av1_aom.mp4" -f lavfi -i testsrc=size=1280x720:rate=30:duration=2 \
-  -pix_fmt yuv420p -c:v libaom-av1 -cpu-used 8 -crf 32 -b:v 0 -g 30 -usage realtime
-enc "$CLIP/av1_svt.mp4" -f lavfi -i testsrc=size=1280x720:rate=30:duration=2 \
-  -pix_fmt yuv420p -c:v libsvtav1 -preset 10 -g 32 -b:v 1M
-enc "$CLIP/av1_4k.mp4" -f lavfi -i testsrc=size=3840x2160:rate=30:duration=1 \
-  -pix_fmt yuv420p -c:v libaom-av1 -cpu-used 8 -crf 36 -b:v 0 -g 8 -usage realtime -frames:v 8
-enc "$CLIP/av1_default.mp4" -f lavfi -i testsrc=size=640x360:rate=30:duration=1 \
-  -pix_fmt yuv420p -c:v libaom-av1 -cpu-used 8 -crf 36 -b:v 0 -g 30
+# AV1 clips unused while AV1 is un-advertised (see decode matrix below).
+# enc "$CLIP/av1_aom.mp4" -f lavfi -i testsrc=size=1280x720:rate=30:duration=2 \
+#   -pix_fmt yuv420p -c:v libaom-av1 -cpu-used 8 -crf 32 -b:v 0 -g 30 -usage realtime
+# enc "$CLIP/av1_svt.mp4" -f lavfi -i testsrc=size=1280x720:rate=30:duration=2 \
+#   -pix_fmt yuv420p -c:v libsvtav1 -preset 10 -g 32 -b:v 1M
+# enc "$CLIP/av1_4k.mp4" -f lavfi -i testsrc=size=3840x2160:rate=30:duration=1 \
+#   -pix_fmt yuv420p -c:v libaom-av1 -cpu-used 8 -crf 36 -b:v 0 -g 8 -usage realtime -frames:v 8
+# enc "$CLIP/av1_default.mp4" -f lavfi -i testsrc=size=640x360:rate=30:duration=1 \
+#   -pix_fmt yuv420p -c:v libaom-av1 -cpu-used 8 -crf 36 -b:v 0 -g 30
 
 # VP8
 enc "$CLIP/vp8_480.webm" -f lavfi -i testsrc=size=640x480:rate=25:duration=2 \
@@ -228,11 +231,14 @@ elif diff -q "$OUT/hevc10-hw.md5" "$OUT/hevc10-sw.md5" >/dev/null; then
   echo "MD5_MATCH hevc10"; pass=$((pass+1))
 else echo "MD5_DIFF hevc10"; fail=$((fail+1)); fi
 
-pair_sw "$CLIP/av1_aom.mp4" 8 av1-aom-8
-pair_sw "$CLIP/av1_aom.mp4" 49 av1-aom-49
-pair_sw "$CLIP/av1_svt.mp4" 32 av1-svt-32
-pair_sw "$CLIP/av1_4k.mp4" 8 av1-4k
-pair_sw "$CLIP/av1_default.mp4" 16 av1-default-16
+# AV1 VA-API decode pairs disabled with the AV1 un-advertising: ffmpeg's
+# vaapi hwaccel can no longer pick VAProfileAV1Profile0, so these would
+# only measure the software fallback. Re-enable when AV1 returns.
+# pair_sw "$CLIP/av1_aom.mp4" 8 av1-aom-8
+# pair_sw "$CLIP/av1_aom.mp4" 49 av1-aom-49
+# pair_sw "$CLIP/av1_svt.mp4" 32 av1-svt-32
+# pair_sw "$CLIP/av1_4k.mp4" 8 av1-4k
+# pair_sw "$CLIP/av1_default.mp4" 16 av1-default-16
 
 pair_sw "$CLIP/vp8_480.webm" 40 vp8-480
 pair_sw "$CLIP/vp8_720.webm" 50 vp8-720

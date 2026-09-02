@@ -83,10 +83,12 @@ static uint32_t h264_pps_flags(const VAPictureParameterBufferH264 *pic)
 static uint64_t h264_find_ref_timestamp(struct v4l2sl_driver_data *dd,
                                          VASurfaceID picture_id)
 {
+    struct v4l2sl_surface *surf;
+
     if (picture_id == VA_INVALID_SURFACE || picture_id == 0xFFFFFFFF)
         return 0;
 
-    struct v4l2sl_surface *surf = dd->surfaces[picture_id];
+    surf = v4l2sl_surface_by_id(dd, picture_id);
     if (surf)
         return surf->timestamp;
 
@@ -541,13 +543,6 @@ VAStatus v4l2sl_h264_translate(struct v4l2sl_context *ctx,
     }
     int out_buf_idx = ctx->free_out_bufs[--ctx->n_free_out];
 
-    if (ctx->n_free_cap == 0) {
-        fprintf(stderr, "v4l2stateless: no free capture buffer\n");
-        ctx->n_free_out++;
-        return VA_STATUS_ERROR_OPERATION_FAILED;
-    }
-    int cap_buf_idx = ctx->free_cap_bufs[--ctx->n_free_cap];
-
     uint64_t timestamp = ctx->current_surface ? ctx->current_surface->timestamp : 0;
 
     /*
@@ -571,8 +566,7 @@ VAStatus v4l2sl_h264_translate(struct v4l2sl_context *ctx,
     if (total > ctx->output_buf_size) {
         fprintf(stderr, "v4l2stateless: slice data too large (%zu > %u)\n",
                 total, ctx->output_buf_size);
-        ctx->n_free_out++;
-        ctx->n_free_cap++;
+        v4l2sl_out_pool_push(ctx, out_buf_idx);
         return VA_STATUS_ERROR_OPERATION_FAILED;
     }
 
@@ -588,76 +582,24 @@ VAStatus v4l2sl_h264_translate(struct v4l2sl_context *ctx,
         }
     }
 
-    /* Queue output buffer with request_fd */
-    if (v4l2sl_queue_output(v4l2_fd, out_buf_idx,
-                            ctx->output_buf_ptr[out_buf_idx] ? ctx->output_buf_ptr[out_buf_idx] : slice_datas[0],
-                            total, request_fd, timestamp) < 0) {
-        fprintf(stderr, "v4l2stateless: failed to queue output buffer\n");
-        ctx->n_free_out++;
-        ctx->n_free_cap++;
-        return VA_STATUS_ERROR_OPERATION_FAILED;
-    }
-
-    /* Queue a capture buffer (bare — capture is not a request object) */
-    if (v4l2sl_queue_capture(v4l2_fd, cap_buf_idx, request_fd) < 0) {
-        fprintf(stderr, "v4l2stateless: failed to queue capture buffer\n");
-        ctx->n_free_cap++;
-        /* The output buffer is already queued and will never be consumed by
-         * a request — recover it so the pool does not leak. */
-        struct pollfd pr = { .fd = v4l2_fd, .events = POLLOUT };
-        if (poll(&pr, 1, 200) > 0) {
-            int ro = v4l2sl_dequeue_buffer(v4l2_fd, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE);
-            if (ro >= 0)
-                ctx->free_out_bufs[ctx->n_free_out++] = ro;
-        }
-        return VA_STATUS_ERROR_OPERATION_FAILED;
-    }
-
     /*
-     * Submit the request — this triggers the hardware decode using the
-     * controls and bitstream bound to this request.
+     * Submit synchronously. On failure decode_submit resets both queues so
+     * nothing is left queued in the kernel — do NOT push out_buf_idx back.
      */
-    if (v4l2sl_submit_request(request_fd) < 0) {
-        fprintf(stderr, "v4l2stateless: failed to submit H.264 request\n");
+    int done_cap = v4l2sl_decode_submit(ctx, out_buf_idx, (uint32_t)total, timestamp);
+    if (done_cap < 0)
         return VA_STATUS_ERROR_OPERATION_FAILED;
-    }
-
-    /* Wait for the decoded frame to be ready */
-    struct pollfd pfd = { .fd = v4l2_fd, .events = POLLIN };
-    if (poll(&pfd, 1, 3000) <= 0) {
-        fprintf(stderr, "v4l2stateless: decode timed out waiting for capture buffer\n");
-        return VA_STATUS_ERROR_OPERATION_FAILED;
-    }
-
-    int done_cap = v4l2sl_dequeue_buffer(v4l2_fd, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE);
-    if (done_cap < 0) {
-        fprintf(stderr, "v4l2stateless: decode failed, no capture buffer completed\n");
-        return VA_STATUS_ERROR_OPERATION_FAILED;
-    }
-
-    /* The bitstream buffer is done once the request consumed it; recycle it. */
-    int done_out = v4l2sl_dequeue_buffer(v4l2_fd, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE);
-    if (done_out < 0) {
-        struct pollfd pout = { .fd = v4l2_fd, .events = POLLOUT };
-        if (poll(&pout, 1, 200) > 0)
-            done_out = v4l2sl_dequeue_buffer(v4l2_fd, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE);
-    }
-    if (done_out >= 0)
-        ctx->free_out_bufs[ctx->n_free_out++] = done_out;
 
     /* Attach the decoded frame to the target surface */
     struct v4l2sl_surface *surf = ctx->current_surface;
     if (surf) {
-        if (v4l2sl_surface_pull_capture(ctx, surf, done_cap) < 0)
+        if (v4l2sl_surface_pull_capture(ctx, surf, done_cap) < 0) {
             fprintf(stderr, "v4l2stateless: H.264 pull capture failed\n");
+            v4l2sl_cap_pool_push(ctx, done_cap);
+        }
     } else {
-        /* No target surface — recycle the capture buffer */
-        ctx->free_cap_bufs[ctx->n_free_cap++] = done_cap;
+        v4l2sl_cap_pool_push(ctx, done_cap);
     }
-
-    close(request_fd);
-    if (ctx->request_fd == request_fd)
-        ctx->request_fd = -1;
 
     return VA_STATUS_SUCCESS;
 }

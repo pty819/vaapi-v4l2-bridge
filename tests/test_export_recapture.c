@@ -295,7 +295,7 @@ static void test_recapture_small_to_large(void)
     }
     expect_true(s1->dma_buf_fd >= 0, "s1-memfd-kept");
     expect_true(s2->dma_buf_fd >= 0, "s2-memfd-kept");
-    (void)nexp;
+    expect_true(nexp == 0, "ensure-capture-no-expbuf");
 
     if (s1->dma_buf_fd >= 0)
         close(s1->dma_buf_fd);

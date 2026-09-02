@@ -169,6 +169,7 @@ VAStatus v4l2sl_vpp_run(struct v4l2sl_context *ctx,
     uint32_t src_stride, src_alh;
     uint8_t *dstp;
     int bpp_src = 1, bpp_dst = 1;
+    VAStatus st;
 
     for (i = 0; i < num_buffers; i++) {
         if (buffers[i] && buffers[i]->type == VAProcPipelineParameterBufferType)
@@ -255,9 +256,8 @@ VAStatus v4l2sl_vpp_run(struct v4l2sl_context *ctx,
     ofmt.fmt.pix_mp.field = V4L2_FIELD_NONE;
     if (xioctl(fd, VIDIOC_S_FMT, &ofmt) < 0) {
         fprintf(stderr, "v4l2stateless: VPP S_FMT out: %s\n", strerror(errno));
-        if (src_map)
-            munmap(src_map, src_map_sz);
-        return VA_STATUS_ERROR_OPERATION_FAILED;
+        st = VA_STATUS_ERROR_OPERATION_FAILED;
+        goto out;
     }
     memset(&cfmt, 0, sizeof(cfmt));
     cfmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
@@ -268,9 +268,8 @@ VAStatus v4l2sl_vpp_run(struct v4l2sl_context *ctx,
     cfmt.fmt.pix_mp.field = V4L2_FIELD_NONE;
     if (xioctl(fd, VIDIOC_S_FMT, &cfmt) < 0) {
         fprintf(stderr, "v4l2stateless: VPP S_FMT cap: %s\n", strerror(errno));
-        if (src_map)
-            munmap(src_map, src_map_sz);
-        return VA_STATUS_ERROR_OPERATION_FAILED;
+        st = VA_STATUS_ERROR_OPERATION_FAILED;
+        goto out;
     }
 
     ctrl.id = V4L2_CID_ROTATE;
@@ -288,18 +287,16 @@ VAStatus v4l2sl_vpp_run(struct v4l2sl_context *ctx,
     oreq.type = V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE;
     oreq.memory = V4L2_MEMORY_MMAP;
     if (xioctl(fd, VIDIOC_REQBUFS, &oreq) < 0) {
-        if (src_map)
-            munmap(src_map, src_map_sz);
-        return VA_STATUS_ERROR_OPERATION_FAILED;
+        st = VA_STATUS_ERROR_OPERATION_FAILED;
+        goto out;
     }
     memset(&creq, 0, sizeof(creq));
     creq.count = 1;
     creq.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
     creq.memory = V4L2_MEMORY_MMAP;
     if (xioctl(fd, VIDIOC_REQBUFS, &creq) < 0) {
-        if (src_map)
-            munmap(src_map, src_map_sz);
-        return VA_STATUS_ERROR_OPERATION_FAILED;
+        st = VA_STATUS_ERROR_OPERATION_FAILED;
+        goto out;
     }
 
     memset(&obuf, 0, sizeof(obuf));
@@ -357,9 +354,8 @@ VAStatus v4l2sl_vpp_run(struct v4l2sl_context *ctx,
     pfd.events = POLLIN | POLLOUT;
     if (poll(&pfd, 1, 2000) <= 0) {
         fprintf(stderr, "v4l2stateless: VPP timeout\n");
-        if (src_map)
-            munmap(src_map, src_map_sz);
-        return VA_STATUS_ERROR_OPERATION_FAILED;
+        st = VA_STATUS_ERROR_OPERATION_FAILED;
+        goto out;
     }
     memset(&cbuf, 0, sizeof(cbuf));
     memset(cpl, 0, sizeof(cpl));
@@ -369,9 +365,8 @@ VAStatus v4l2sl_vpp_run(struct v4l2sl_context *ctx,
     cbuf.m.planes = cpl;
     if (xioctl(fd, VIDIOC_DQBUF, &cbuf) < 0) {
         fprintf(stderr, "v4l2stateless: VPP DQBUF: %s\n", strerror(errno));
-        if (src_map)
-            munmap(src_map, src_map_sz);
-        return VA_STATUS_ERROR_OPERATION_FAILED;
+        st = VA_STATUS_ERROR_OPERATION_FAILED;
+        goto out;
     }
     {
         int copy_h = dh;
@@ -382,8 +377,13 @@ VAStatus v4l2sl_vpp_run(struct v4l2sl_context *ctx,
                         dw, copy_h, bpp_dst);
     }
 
+    st = VA_STATUS_SUCCESS;
+
+out:
     if (src_map)
         munmap(src_map, src_map_sz);
+    /* Always tear down: leaving RGA streaming wedges every later call on
+     * this fd (S_FMT/REQBUFS fail with EBUSY). */
     {
         enum v4l2_buf_type t = V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE;
         xioctl(fd, VIDIOC_STREAMOFF, &t);
@@ -394,7 +394,8 @@ VAStatus v4l2sl_vpp_run(struct v4l2sl_context *ctx,
         creq.count = 0;
         xioctl(fd, VIDIOC_REQBUFS, &creq);
     }
-    fprintf(stderr, "v4l2stateless: VPP %dx%d -> %dx%d rot=%d\n",
-            src->width, src->height, dw, dh, rotate);
-    return VA_STATUS_SUCCESS;
+    if (st == VA_STATUS_SUCCESS)
+        fprintf(stderr, "v4l2stateless: VPP %dx%d -> %dx%d rot=%d\n",
+                src->width, src->height, dw, dh, rotate);
+    return st;
 }
