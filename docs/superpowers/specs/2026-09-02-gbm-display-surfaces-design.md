@@ -158,3 +158,13 @@ show a picture).
 - Chrome live on live.bilibili.com H.264: `VaapiVideoDecoder` **and** a
   visible (non-black) picture **and** rkvdec held by the GPU process.
 - No regression in the software paths (ffmpeg/GST clients unchanged).
+
+## Post-implementation addendum (2026-09-03)
+
+Design correction found during live verification: Chrome 151's
+VaapiVideoDecoder zero-copy GL path exports **VPP OUTPUT surfaces**
+(decode surface --VAProc blit--> output surface --> export), not decode
+surfaces. The implemented gate therefore also matches `format == NV12`
+surfaces, and VPP/vaPutImage keep the bo in sync via a last-writer marker
+(see commits 29eea2b + 452de04). All other sections verified as designed;
+matrix PASS=27, Chrome live checks green.

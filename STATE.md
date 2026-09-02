@@ -1,6 +1,6 @@
 # STATE.md — Project State
 
-Last verified: **2026-09-02** (matrix PASS=25 FAIL=0 incl. High10 + High422). Host: Orange Pi 5 NAS `192.168.1.21`, Armbian 26.8.3 resolute, kernel **7.1.8-edge-rockchip64**.
+Last verified: **2026-09-03** (matrix PASS=27 FAIL=0 incl. High10 + High422 + GBM display surfaces). Host: Orange Pi 5 NAS `192.168.1.21`, Armbian 26.8.3 resolute, kernel **7.1.8-edge-rockchip64**.
 
 Living ops notes: [HANDOFF.md](HANDOFF.md). Desktop apps: [APPS.md](APPS.md). Codec table: [README.md](README.md).
 
@@ -12,7 +12,7 @@ C libva backend `v4l2stateless_drv_video.so` translates VA-API to mainline V4L2-
 
 Installed: `/usr/lib/aarch64-linux-gnu/dri/v4l2stateless_drv_video.so`. Graphical sessions export `LIBVA_DRIVER_NAME=v4l2stateless` via `~/.config/environment.d/90-libva.conf` and `~/.profile`.
 
-Host matrix `tests/run_full_matrix.sh` last recorded **PASS=25 FAIL=0** (h26410 + h264422 entries). Success is `hwdownload` framemd5 vs software (MPEG-2 vs GStreamer `v4l2slmpeg2dec`), plus a log line `v4l2stateless: .* config uses /dev/video`. Silent ffmpeg software fallback is not success.
+Host matrix `tests/run_full_matrix.sh` last recorded **PASS=27 FAIL=0** (h26410 + h264422 + gbm-probe + va-export entries). Success is `hwdownload` framemd5 vs software (MPEG-2 vs GStreamer `v4l2slmpeg2dec`), plus a log line `v4l2stateless: .* config uses /dev/video`. Silent ffmpeg software fallback is not success.
 
 | Path | Device | Status |
 |---|---|---|
@@ -35,6 +35,43 @@ Chrome `FillProfileInfo_Locked` attrib query is implemented (`vaQueryConfigAttri
 - **Forced browser HW on VP9 / 10-bit HDR** — has hung the VPU; keep `media.hardware-video-decoding.force-enabled=false`
 - **Browser mid-stream resolution changes** — capture renegotiate exists in the driver; Chrome/Firefox path is not matrix-tested
 - **Vendor BSP / MPP** — out of scope (mainline only)
+
+## 2026-09-03 GBM display surfaces — Chrome hardware decode WITH picture (f53f3f1..452de04)
+
+Chrome `VaapiVideoDecoder` (GL backend, zero-copy) now hardware-decodes AND
+shows the picture on live.bilibili.com 1080p (verified: `VaapiVideoDecoder`
+in media-internals, canvas drawImage avg ~74/255 non-black, zero
+eglCreateImage errors, GPU process holds rkvdec).
+
+How it works (`src/v4l2stateless_gbm.c`):
+
+- Every exportable surface gets a driver-owned **linear GBM bo** on
+  `/dev/dri/renderD128` (panthor shmem — ordinary system memory; the VPU/CMA
+  buffers are still never exported, the EXPBUF chip-bug ban is untouched).
+- `vaExportSurfaceHandle` returns the classic **single-object NV12 dmabuf**
+  descriptor (Y@0, UV@stride*h) that Chromium requires
+  (`num_objects != 1` is rejected upstream, TODO crbug.com/974438).
+- **Chrome exports VPP OUTPUT surfaces, not decode surfaces** (VaapiVideoDecoder
+  blits decode->output via VAProc, then exports). Surfaces carry a
+  last-writer marker (`gbm_src`); pull_capture / VPP / vaPutImage all keep
+  the bo in sync from cpu_ptr (image layout) or memfd (capture layout).
+- Platform constraints baked into the design: panthor refuses multiplanar
+  YUV gbm bos (R8 geometry + byte offsets instead); Mesa 26.0.8 per-plane
+  GR88 import samples black (never emit GR88-only images); render-node
+  override via `V4L2SL_RENDER_NODE`.
+- 7907909's clean-fail gate was dead code (`cpu_ptr` is calloc'd for every
+  surface at creation, so `!cpu_ptr` never held) — fixed by the new gate
+  (`buf_index >= 0` || VLD context || `format == NV12`); caught by
+  `tests/va_export_client.c` (exports each frame and verifies the dma-buf
+  read back through real EGL == vaGetImage bytes, Y and UV).
+- Debug tools that isolated the Chrome-side failure:
+  `tests/wl_import_probe.c` (import matrix on Wayland/GBM/surfaceless
+  displays), `tests/ioctl_interpose.c` (LD_PRELOAD PRIME-fd tracer).
+- Chrome wrapper re-enabled: `--disable-features=Vulkan` only
+  (AcceleratedVideoDecoder back on).
+
+Out of scope (falls back to software, unchanged): 10-bit (NV15) would need
+an R16-bo P010 layout; Y210 unreachable (GR88 broken).
 
 ## 2026-09-02 stability fixes (commit 27e8b7a)
 

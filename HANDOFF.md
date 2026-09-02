@@ -249,3 +249,19 @@ Debian/XtraDeb 的 arm64 Chromium 编的是 `use_v4l2_codec`，直连 `/dev/vide
 
 GStreamer AV1 对照：`gstv4l2codecav1dec.c`。内核：`drivers/media/platform/verisilicon/rockchip_vpu981_hw_av1_dec.c`。
 - **7ec4e39 的 ZeroCopyGL disable 曾把 Chrome 硬解修坏（09-02 深夜定位并已修复）**：真实根因不是流——包装脚本  把 VaapiVideoDecoder 逼进 ImageProcessor 输出路径，本平台没有 ImageProcessor（vmodule 实锤："Unable to find ImageProcessor to convert format" + CroStatus 6 → PIPELINE_ERROR_DECODE），Chrome 静默降级 FFmpeg 软解且整个会话不再重试。ZeroCopyGL 保持默认开：每帧 EGLImage 导入失败会刷 stderr（~26 行/s，已知噪音）但 Chrome 回退 CPU 拷贝、硬解继续。包装脚本已改回只禁 Vulkan 并写了长注释防再犯；bilibili 直播实测 VaapiVideoDecoder 稳定、GPU 进程 61 个解码 surface。更早的 mid-GDP 首帧理论作废
+
+## 2026-09-03 — GBM display surfaces (Chrome hw decode + visible picture)
+
+- Chrome zero-copy GL path = decode surface --VAProc blit--> OUTPUT surface
+  --> vaExportSurfaceHandle. Exported surfaces have `buf_index=-1`, no decode
+  context; gate on `format == NV12` as well. Symptom when wrong: GPU-process
+  `eglCreateImage failed 0x3003` every frame + black video (canvas avg 0).
+- Fastest black-screen triage: LD_PRELOAD `tests/ioctl_interpose.so` into
+  Chrome and read `/tmp/chrome_main.log` INTERPOSE lines — shows exactly
+  which fd PRIME-import receives (`memfd:v4l2sl-surf` = lie path,
+  `/dmabuf:` = real).
+- Mesa 26.0.8 panfrost: GR88 single-plane dmabuf import samples (0,0); NV12
+  single-object imports are bit-exact. panthor gbm: no multiplanar YUV bos.
+- `git push` from the NAS to GitHub is flaky over https (GnuTLS reset) and
+  port-22/443 SSH is intercepted by the router proxy (28.0.0.x closes);
+  retrying https a few times with 25 s gaps works.
