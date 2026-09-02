@@ -263,7 +263,6 @@ int v4l2sl_decode_submit(struct v4l2sl_context *ctx, int out_buf_idx,
  * recover from decode timeouts so a wedged job is never left in the kernel
  * (rkvdec returns every queued buffer in ERROR state on STREAMOFF). */
 void v4l2sl_decode_reset(struct v4l2sl_context *ctx);
-int v4l2sl_export_dmabuf(int fd, int buf_index);
 int v4l2sl_surface_alloc_export_fd(struct v4l2sl_surface *s);
 int v4l2sl_surface_grow_memfd(struct v4l2sl_surface *s, uint32_t size);
 int v4l2sl_surface_pull_capture(struct v4l2sl_context *ctx,

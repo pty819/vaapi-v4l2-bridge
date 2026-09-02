@@ -837,25 +837,6 @@ int v4l2sl_queue_capture(int fd, int buf_index, int request_fd)
     return 0;
 }
 
-/*
- * Export a capture buffer as DMA-BUF fd
- */
-int v4l2sl_export_dmabuf(int fd, int buf_index)
-{
-    struct v4l2_exportbuffer exp = { 0 };
-    exp.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
-    exp.index = buf_index;
-    exp.flags = O_CLOEXEC | O_RDWR;
-
-    if (xioctl(fd, VIDIOC_EXPBUF, &exp) < 0) {
-        fprintf(stderr, "v4l2stateless: EXPBUF capture[%d] failed: %s\n",
-                buf_index, strerror(errno));
-        return -1;
-    }
-
-    return exp.fd;
-}
-
 int v4l2sl_surface_alloc_export_fd(struct v4l2sl_surface *s)
 {
     uint32_t stride, h, sz;
@@ -1140,27 +1121,10 @@ int v4l2sl_set_global_controls(int v4l2_fd, struct v4l2_ext_controls *ctrls)
     return 0;
 }
 
-/*
- * Submit a V4L2 request.
- * Uses the V4L2 request API: on the request fd, we call VIDIOC_SUBSCRIBE_EVENT
- * for V4L2_EVENT_DECODE to trigger decode, then poll/wait for completion.
- *
- * Actually, the correct mechanism is: on the request fd itself, call
- *   ioctl(request_fd, MEDIA_REQUEST_IOC_QUEUE, NULL)
- * But that requires <linux/media.h> with the newer request ioctl definitions.
- * The kernel's V4L2 request API uses the request_fd ioctl interface.
- * We fall back to the event subscription approach if MEDIA_REQUEST_IOC_QUEUE
- * is not available.
- *
- * Returns 0 on success, -1 on error.
- */
+/* Queue the request; the decoder consumes the controls bound to it.
+ * Returns 0 on success, -1 on error. */
 int v4l2sl_submit_request(int request_fd)
 {
-    /* Try MEDIA_REQUEST_IOC_QUEUE first (kernel >= 5.11) */
-#ifndef MEDIA_REQUEST_IOC_QUEUE
-#define MEDIA_REQUEST_IOC_QUEUE _IO('R', 0x01)
-#endif
-
     if (xioctl(request_fd, MEDIA_REQUEST_IOC_QUEUE, NULL) < 0) {
         fprintf(stderr, "v4l2stateless: REQUEST_IOC_QUEUE failed: %s\n", strerror(errno));
         return -1;
