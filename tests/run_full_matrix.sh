@@ -130,6 +130,19 @@ else
   pass=$((pass+1))
 fi
 
+echo "===== gbm-probe: platform gate for GBM display surfaces ====="
+cc -O2 -Wall -o "$OUT/gbm_probe" tests/gbm_probe.c \
+  -lgbm -lEGL -lGLESv2 || { echo CC_FAIL gbm_probe; fail=$((fail+1)); }
+if [ -x "$OUT/gbm_probe" ]; then
+  if "$OUT/gbm_probe" 1280 720 >"$OUT/gbm_probe.log" 2>&1 &&
+     "$OUT/gbm_probe" 1920 1080 >>"$OUT/gbm_probe.log" 2>&1; then
+    echo "PASS gbm-probe"; pass=$((pass+1))
+  else
+    echo "FAIL gbm-probe"; fail=$((fail+1))
+    tail -3 "$OUT/gbm_probe.log"
+  fi
+fi
+
 echo "===== vainfo ====="
 vainfo --display drm --device /dev/dri/renderD128 >"$OUT/vainfo.log" 2>&1 || true
 if ! grep -q "v4l2stateless/vaapi-v4l2-bridge" "$OUT/vainfo.log"; then
