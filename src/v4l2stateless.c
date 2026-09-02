@@ -525,6 +525,7 @@ v4l2sl_create_surfaces(VADriverContextP ctx,
         format = VA_FOURCC_BGRX;
 
     pthread_mutex_lock(&g_v4l2sl_lock);
+    int created = 0;
     for (int i = 0; i < num_surfaces; i++) {
         struct v4l2sl_surface *surface = calloc(1, sizeof(*surface));
         VASurfaceID id;
@@ -569,15 +570,17 @@ v4l2sl_create_surfaces(VADriverContextP ctx,
 
         surfaces[i] = id;
         driver_data->surfaces[id] = surface;
+        created++;
     }
 
     pthread_mutex_unlock(&g_v4l2sl_lock);
     return VA_STATUS_SUCCESS;
 
 fail:
-    pthread_mutex_unlock(&g_v4l2sl_lock);
-    /* Clean up already created surfaces */
-    for (int j = 0; j < num_surfaces; j++) {
+    /* Cleanup stays under the lock and only touches surfaces this call
+     * actually created — surfaces[] entries past `created` are the
+     * caller's uninitialized memory, never scan them. */
+    for (int j = 0; j < created; j++) {
         struct v4l2sl_surface *s = v4l2sl_surface_by_id(driver_data, surfaces[j]);
 
         if (s) {
@@ -586,11 +589,11 @@ fail:
             free(s->cpu_ptr);
             free(s);
             driver_data->surfaces[surfaces[j]] = NULL;
-            driver_data->free_surface_ids[driver_data->n_free_surface_ids++] =
-                surfaces[j];
+            v4l2sl_surface_id_push(driver_data, surfaces[j]);
             surfaces[j] = VA_INVALID_ID;
         }
     }
+    pthread_mutex_unlock(&g_v4l2sl_lock);
     return VA_STATUS_ERROR_ALLOCATION_FAILED;
 }
 

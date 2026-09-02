@@ -227,6 +227,23 @@ static inline void v4l2sl_cap_pool_push(struct v4l2sl_context *ctx, int idx)
     ctx->free_cap_bufs[ctx->n_free_cap++] = idx;
 }
 
+/* Bounded, duplicate-free surface-ID recycle push. Same contract as the
+ * pool pushes: a leaked ID beats a write past the table. */
+static inline void v4l2sl_surface_id_push(struct v4l2sl_driver_data *dd,
+                                          VASurfaceID id)
+{
+    int i;
+
+    if (!dd || id == VA_INVALID_ID || (unsigned)id >= V4L2SL_MAX_SURFACES)
+        return;
+    if (dd->n_free_surface_ids >= V4L2SL_MAX_SURFACES)
+        return;
+    for (i = 0; i < dd->n_free_surface_ids; i++)
+        if (dd->free_surface_ids[i] == id)
+            return;
+    dd->free_surface_ids[dd->n_free_surface_ids++] = id;
+}
+
 /* Device helpers (v4l2stateless_device.c) */
 int v4l2sl_open_device(const char *path);
 int v4l2sl_open_media_for_device(const char *video_path);
