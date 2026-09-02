@@ -82,7 +82,7 @@ int v4l2sl_gbm_surface_upload(struct v4l2sl_surface *s, const void *src,
 
     if (!s || !s->gbm_bo || !src || !src_stride)
         return -1;
-    dst = gbm_bo_map(s->gbm_bo, 0, 0, w, h + h / 2,
+    dst = gbm_bo_map(s->gbm_bo, 0, 0, w, h + (h + 1) / 2,
                      GBM_BO_TRANSFER_WRITE, &mstride, &map_data);
     if (!dst) {
         fprintf(stderr, "v4l2stateless: gbm: bo map failed\n");
@@ -91,8 +91,51 @@ int v4l2sl_gbm_surface_upload(struct v4l2sl_surface *s, const void *src,
     copy_plane(dst, mstride, src, src_stride, w, h);
     copy_plane(dst + (size_t)mstride * h, mstride,
                (const uint8_t *)src + (size_t)src_stride * src_alh,
-               src_stride, w, h / 2);
+               src_stride, w + (w & 1), (h + 1) / 2);
     gbm_bo_unmap(s->gbm_bo, map_data);
+    return 0;
+}
+
+/* Lazy memfd: refill the memfd snapshot (capture layout: Y@0,
+ * UV@stride*aligned_h) from the bo (image layout: Y@0, UV@gbm_stride*h).
+ * Only the visible rows/bytes are copied — padding is never read. */
+int v4l2sl_surface_ensure_memfd(struct v4l2sl_surface *s)
+{
+    uint32_t sz, w, h, uvw;
+    void *bo_map = NULL, *m;
+    uint8_t *bo_data = NULL, *dst;
+    uint32_t bo_stride = 0;
+
+    if (!s || !s->memfd_stale || !s->gbm_bo)
+        return 0;
+    if (s->dma_buf_fd < 0 || !s->stride || !s->aligned_h)
+        return -1;
+    w = s->width;
+    h = s->height;
+    uvw = w + (w & 1);
+    sz = v4l2sl_capture_plane_size(V4L2_PIX_FMT_NV12, s->stride, s->aligned_h);
+    if (v4l2sl_surface_grow_memfd(s, sz) < 0)
+        return -1;
+    bo_data = gbm_bo_map(s->gbm_bo, 0, 0, w, h + (h + 1) / 2,
+                         GBM_BO_TRANSFER_READ, &bo_stride, &bo_map);
+    if (!bo_data)
+        return -1;
+    m = mmap(NULL, sz, PROT_READ | PROT_WRITE, MAP_SHARED, s->dma_buf_fd, 0);
+    if (m == MAP_FAILED) {
+        gbm_bo_unmap(s->gbm_bo, bo_map);
+        return -1;
+    }
+    dst = m;
+    for (uint32_t y = 0; y < h; y++)
+        memcpy(dst + (size_t)s->stride * y,
+               bo_data + (size_t)bo_stride * y, w);
+    dst = (uint8_t *)m + (size_t)s->stride * s->aligned_h;
+    for (uint32_t y = 0; y < (h + 1) / 2; y++)
+        memcpy(dst + (size_t)s->stride * y,
+               bo_data + (size_t)bo_stride * (h + y), uvw);
+    munmap(m, sz);
+    gbm_bo_unmap(s->gbm_bo, bo_map);
+    s->memfd_stale = 0;
     return 0;
 }
 
@@ -135,6 +178,8 @@ int v4l2sl_gbm_surface_sync(struct v4l2sl_surface *s)
 {
     if (!s || !s->gbm_bo)
         return -1;
+    if (s->gbm_src == 3)
+        return 0; /* bo already holds the latest frame (lazy memfd) */
     if (s->gbm_src == 1 && s->cpu_ptr && s->cpu_stride)
         return v4l2sl_gbm_surface_upload(s, s->cpu_ptr, s->cpu_stride,
                                          s->height);

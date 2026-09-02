@@ -1441,6 +1441,7 @@ v4l2sl_derive_image(VADriverContextP ctx,
         data_size = surf->cpu_size;
         mmapped = 2; /* borrowed cpu backing — do not free on DestroyImage */
     } else {
+        v4l2sl_surface_ensure_memfd(surf);
         data_size = v4l2sl_capture_plane_size(cap_fcc, stride, aligned_h);
         map = mmap(NULL, data_size, PROT_READ, MAP_SHARED, surf->dma_buf_fd, 0);
         if (map == MAP_FAILED) {
@@ -1660,6 +1661,11 @@ v4l2sl_get_image(VADriverContextP ctx, VASurfaceID surface,
             dst_fourcc = VA_FOURCC_NV12;
     }
     dst_stride = v4l2sl_default_image_stride(dst_fourcc, copy_w);
+
+    /* Lazy memfd: bo-backed surfaces skip the per-frame memfd copy;
+     * refill it from the bo now that someone is reading back. */
+    if (surf->buf_index >= 0)
+        v4l2sl_surface_ensure_memfd(surf);
 
     if (surf->dma_buf_fd >= 0 && surf->buf_index >= 0) {
         map_size = v4l2sl_capture_plane_size(cap_fcc, src_stride, src_alh);

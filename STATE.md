@@ -70,6 +70,12 @@ How it works (`src/v4l2stateless_gbm.c`):
 - Chrome wrapper re-enabled: `--disable-features=Vulkan` only
   (AcceleratedVideoDecoder back on).
 
+- **Lazy memfd (2026-09-03)**: bo-backed surfaces skip the per-frame
+  CMA!92memfd copy (the bo is the snapshot); vaGetImage / vaDeriveImage /
+  VPP source refill the memfd from the bo on demand
+  (`v4l2sl_surface_ensure_memfd`). Chrome's per-frame copy count: 2 !92 1
+  (the EXPBUF-ban floor). Guarded by the client's LAZY_EXACT second pass.
+
 Out of scope (falls back to software, unchanged): 10-bit (NV15) would need
 an R16-bo P010 layout; Y210 unreachable (GR88 broken).
 

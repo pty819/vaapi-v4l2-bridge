@@ -213,6 +213,68 @@ static int read_r8_view(int fd, uint32_t offset, uint32_t pitch,
     return glGetError() == GL_NO_ERROR ? 0 : -1;
 }
 
+/* decode one all-IDR slice into surface s (same semantics as the loop
+ * body below; shared by pass 1 and the lazy-memfd pass 2) */
+static void decode_one(VADisplay dpy, VAContextID ctx, VASurfaceID s,
+                       VAPictureParameterBufferH264 *pp,
+                       VAIQMatrixBufferH264 *iq,
+                       unsigned char *slice, int slice_size)
+{
+    VASliceParameterBufferH264 sp;
+    VABufferID b_pp, b_iq, b_sp, b_sd;
+
+    memset(&sp, 0, sizeof(sp));
+    sp.slice_data_size = slice_size;
+    sp.slice_data_flag = VA_SLICE_DATA_FLAG_ALL;
+    sp.first_mb_in_slice = 0;
+    sp.slice_type = 7;
+    pp->CurrPic.picture_id = s;
+
+    CHECK(vaCreateBuffer(dpy, ctx, VAPictureParameterBufferType,
+                         sizeof(*pp), 1, pp, &b_pp));
+    CHECK(vaCreateBuffer(dpy, ctx, VAIQMatrixBufferType,
+                         sizeof(*iq), 1, iq, &b_iq));
+    CHECK(vaCreateBuffer(dpy, ctx, VASliceParameterBufferType,
+                         sizeof(sp), 1, &sp, &b_sp));
+    CHECK(vaCreateBuffer(dpy, ctx, VASliceDataBufferType,
+                         slice_size, 1, slice, &b_sd));
+    CHECK(vaBeginPicture(dpy, ctx, s));
+    VABufferID r1[2] = { b_pp, b_iq };
+    CHECK(vaRenderPicture(dpy, ctx, r1, 2));
+    VABufferID r2[2] = { b_sp, b_sd };
+    CHECK(vaRenderPicture(dpy, ctx, r2, 2));
+    CHECK(vaEndPicture(dpy, ctx));
+    CHECK(vaSyncSurface(dpy, s));
+    vaDestroyBuffer(dpy, b_pp);
+    vaDestroyBuffer(dpy, b_iq);
+    vaDestroyBuffer(dpy, b_sp);
+    vaDestroyBuffer(dpy, b_sd);
+}
+
+/* vaGetImage into ref: Y rows at ref, UV rows at ref + W*H (tight) */
+static void grab_ref(VADisplay dpy, VASurfaceID s, VAImageFormat *fmt,
+                     uint8_t *ref)
+{
+    VAImage img;
+    void *p = NULL;
+    uint32_t rpitch, uvp;
+    const uint8_t *uvsrc;
+
+    CHECK(vaCreateImage(dpy, fmt, W, H, &img));
+    CHECK(vaGetImage(dpy, s, 0, 0, W, H, img.image_id));
+    CHECK(vaMapBuffer(dpy, img.buf, &p));
+    rpitch = img.pitches[0];
+    for (int y = 0; y < H; y++)
+        memcpy(ref + (size_t)y * W, (uint8_t *)p + (size_t)y * rpitch, W);
+    uvp = img.pitches[1] ? img.pitches[1] : img.pitches[0];
+    uvsrc = (uint8_t *)p + img.offsets[1];
+    for (int y = 0; y < H / 2; y++)
+        memcpy(ref + (size_t)W * H + (size_t)y * W,
+               uvsrc + (size_t)y * uvp, W);
+    CHECK(vaUnmapBuffer(dpy, img.buf));
+    CHECK(vaDestroyImage(dpy, img.image_id));
+}
+
 static int mism(const char *what, int frame, int x, int y,
                 uint8_t exp, uint8_t got)
 {
@@ -327,68 +389,24 @@ int main(int argc, char **argv)
     uint8_t *ybuf = malloc((size_t)W * H);
     uint8_t *uvbuf = malloc((size_t)W * H / 2);
     uint8_t *ref = malloc((size_t)W * H * 2);
-    if (!ybuf || !uvbuf || !ref) { fprintf(stderr, "oom\n"); return 2; }
+    uint8_t *store_y[8], *store_uv[8];
+    for (int i = 0; i < 8; i++) {
+        store_y[i] = malloc((size_t)W * H);
+        store_uv[i] = malloc((size_t)W * H / 2);
+    }
+    if (!ybuf || !uvbuf || !ref || !store_y[0] || !store_uv[0]) {
+        fprintf(stderr, "oom\n"); return 2;
+    }
 
     int bad = 0;
     for (int n = 0; n < n_slices && n < 8; n++) {
-        pp.CurrPic.picture_id = surf[n];
+        decode_one(dpy, ctx, surf[n], &pp, &iq, slices[n], slice_sizes[n]);
 
-        VASliceParameterBufferH264 sp;
-        memset(&sp, 0, sizeof(sp));
-        sp.slice_data_size = slice_sizes[n];
-        sp.slice_data_offset = 0;
-        sp.slice_data_flag = VA_SLICE_DATA_FLAG_ALL;
-        sp.slice_data_bit_offset = 0;
-        sp.first_mb_in_slice = 0;
-        sp.slice_type = 7;
-        sp.num_ref_idx_l0_active_minus1 = 0;
-        sp.num_ref_idx_l1_active_minus1 = 0;
-        sp.cabac_init_idc = 0;
-        sp.slice_qp_delta = 0;
-        sp.disable_deblocking_filter_idc = 0;
-        sp.slice_alpha_c0_offset_div2 = 0;
-        sp.slice_beta_offset_div2 = 0;
-
-        VABufferID b_pp, b_iq, b_sp, b_sd;
-        CHECK(vaCreateBuffer(dpy, ctx, VAPictureParameterBufferType,
-                             sizeof(pp), 1, &pp, &b_pp));
-        CHECK(vaCreateBuffer(dpy, ctx, VAIQMatrixBufferType,
-                             sizeof(iq), 1, &iq, &b_iq));
-        CHECK(vaCreateBuffer(dpy, ctx, VASliceParameterBufferType,
-                             sizeof(sp), 1, &sp, &b_sp));
-        CHECK(vaCreateBuffer(dpy, ctx, VASliceDataBufferType,
-                             slice_sizes[n], 1, slices[n], &b_sd));
-
-        CHECK(vaBeginPicture(dpy, ctx, surf[n]));
-        VABufferID render1[2] = { b_pp, b_iq };
-        CHECK(vaRenderPicture(dpy, ctx, render1, 2));
-        VABufferID render2[2] = { b_sp, b_sd };
-        CHECK(vaRenderPicture(dpy, ctx, render2, 2));
-        CHECK(vaEndPicture(dpy, ctx));
-        CHECK(vaSyncSurface(dpy, surf[n]));
-
-        vaDestroyBuffer(dpy, b_pp);
-        vaDestroyBuffer(dpy, b_iq);
-        vaDestroyBuffer(dpy, b_sp);
-        vaDestroyBuffer(dpy, b_sd);
-
-        /* ---- reference bytes via vaGetImage ---- */
-        VAImage img;
-        CHECK(vaCreateImage(dpy, &fmt, W, H, &img));
-        CHECK(vaGetImage(dpy, surf[n], 0, 0, W, H, img.image_id));
-        void *p = NULL;
-        CHECK(vaMapBuffer(dpy, img.buf, &p));
-        uint32_t rpitch = img.pitches[0];
-        for (int y = 0; y < H; y++)
-            memcpy(ref + (size_t)y * W,
-                   (uint8_t *)p + (size_t)y * rpitch, W);
-        uint32_t uvp = img.pitches[1] ? img.pitches[1] : img.pitches[0];
-        const uint8_t *uvsrc = (uint8_t *)p + img.offsets[1];
-        for (int y = 0; y < H / 2; y++)
-            memcpy(ref + (size_t)W * H + (size_t)y * W,
-                   uvsrc + (size_t)y * uvp, W);
-        CHECK(vaUnmapBuffer(dpy, img.buf));
-        CHECK(vaDestroyImage(dpy, img.image_id));
+        /* reference bytes via vaGetImage (surfaces have no bo yet on this
+         * pass: classic memfd path) */
+        grab_ref(dpy, surf[n], &fmt, ref);
+        memcpy(store_y[n], ref, (size_t)W * H);
+        memcpy(store_uv[n], ref + (size_t)W * H, (size_t)W * H / 2);
 
         /* ---- export and verify the descriptor shape ---- */
         VADRMPRIMESurfaceDescriptor desc;
@@ -456,6 +474,43 @@ int main(int argc, char **argv)
         printf("EXPORT_EXACT %d\n", n);
     }
 
+    /*
+     * Pass 2 — the lazy-memfd guard. Every surface now carries a GBM bo
+     * (created by the pass-1 exports), so pull_capture takes the lazy
+     * path: bo-only snapshot, memfd marked stale. vaGetImage must refill
+     * the memfd from the bo transparently. Re-decode the same all-IDR
+     * slices and require byte-identical readback vs pass 1.
+     */
+    for (int n = 0; n < n_slices && n < 8 && !bad; n++) {
+        decode_one(dpy, ctx, surf[n], &pp, &iq, slices[n], slice_sizes[n]);
+        grab_ref(dpy, surf[n], &fmt, ref);
+
+        for (int y = 0; y < H && !bad; y++)
+            for (int x = 0; x < W; x++)
+                if (ref[(size_t)y * W + x] != store_y[n][(size_t)y * W + x]) {
+                    bad = mism("LAZY-Y", n, x, y,
+                               store_y[n][(size_t)y * W + x],
+                               ref[(size_t)y * W + x]);
+                    break;
+                }
+        for (int y = 0; y < H / 2 && !bad; y++)
+            for (int x = 0; x < W; x++)
+                if (ref[(size_t)W * H + (size_t)y * W + x] !=
+                    store_uv[n][(size_t)y * W + x]) {
+                    bad = mism("LAZY-UV", n, x, y,
+                               store_uv[n][(size_t)y * W + x],
+                               ref[(size_t)W * H + (size_t)y * W + x]);
+                    break;
+                }
+        if (bad)
+            break;
+        printf("LAZY_EXACT %d\n", n);
+    }
+
+    for (int i = 0; i < 8; i++) {
+        free(store_y[i]);
+        free(store_uv[i]);
+    }
     free(ybuf);
     free(uvbuf);
     free(ref);

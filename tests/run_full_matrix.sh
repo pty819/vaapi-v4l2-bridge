@@ -284,7 +284,8 @@ if [ -x "$ROOT/builddir/va_export_client" ]; then
     /dev/dri/renderD128 "$CLIP/h264_idr_nv12.h264" \
     >"$OUT/va_export.log" 2>&1
   ve=$?
-  if [ "$ve" -eq 0 ] && grep -q "EXPORT_EXACT 7" "$OUT/va_export.log"; then
+  if [ "$ve" -eq 0 ] && grep -q "EXPORT_EXACT 7" "$OUT/va_export.log" \
+     && grep -q "LAZY_EXACT 7" "$OUT/va_export.log"; then
     echo "PASS va-export"; pass=$((pass+1))
   else
     echo "FAIL va-export (exit $ve)"; fail=$((fail+1))

@@ -60,7 +60,10 @@ struct v4l2sl_surface {
     uint32_t cpu_stride;
     struct gbm_bo *gbm_bo;   /* driver-owned display copy (linear, R8) */
     uint32_t gbm_stride;
-    uint8_t gbm_src;         /* last writer of pixel data: 1=cpu_ptr, 2=memfd */
+    uint8_t gbm_src;         /* last writer of pixel data: 1=cpu_ptr,
+                              * 2=memfd, 3=gbm bo (memfd skipped/stale) */
+    uint8_t memfd_stale;     /* 1 = memfd does not hold the latest frame
+                              * (the gbm bo does); refilled on CPU readback */
 };
 
 /* Parameter buffer */
@@ -275,6 +278,10 @@ VAStatus v4l2sl_surface_fill_prime(const struct v4l2sl_surface *surf,
  * bo is panthor system memory kept in sync by pull_capture. */
 int v4l2sl_gbm_surface_ensure(struct v4l2sl_surface *s);
 int v4l2sl_gbm_surface_sync(struct v4l2sl_surface *s);
+/* Lazy memfd: refill the memfd snapshot from the bo when a CPU-readback
+ * caller (vaGetImage / vaDeriveImage / VPP source) needs it after a
+ * bo-only pull_capture. */
+int v4l2sl_surface_ensure_memfd(struct v4l2sl_surface *s);
 int v4l2sl_gbm_surface_upload(struct v4l2sl_surface *s, const void *src,
                               uint32_t src_stride, uint32_t src_alh);
 void v4l2sl_gbm_surface_destroy(struct v4l2sl_surface *s);

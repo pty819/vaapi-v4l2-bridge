@@ -925,10 +925,33 @@ int v4l2sl_surface_pull_capture(struct v4l2sl_context *ctx,
     if (!sz)
         return -1;
 
+    src = ctx->capture_buf_ptr[buf_index];
+
+    /*
+     * Lazy memfd: when this surface has a GBM display bo, the bo is the
+     * per-frame snapshot and the memfd copy is skipped — CPU-readback
+     * callers (vaGetImage / vaDeriveImage / VPP source) refill it on
+     * demand via v4l2sl_surface_ensure_memfd(). Halves the per-frame
+     * memcpy traffic for zero-copy clients (Chrome never reads back).
+     * On upload failure fall back to the classic memfd snapshot so the
+     * frame is never lost (the capture buffer recycles right after this).
+     */
+    if (surf->gbm_bo) {
+        if (v4l2sl_gbm_surface_upload(surf, src, stride, alh) == 0) {
+            surf->buf_index = buf_index;
+            surf->stride = stride;
+            surf->aligned_h = alh;
+            surf->cap_fourcc = fcc;
+            surf->gbm_src = 3;
+            surf->memfd_stale = 1;
+            return 0;
+        }
+        fprintf(stderr,
+                "v4l2stateless: gbm upload failed, using memfd snapshot\n");
+    }
+
     if (v4l2sl_surface_grow_memfd(surf, sz) < 0)
         return -1;
-
-    src = ctx->capture_buf_ptr[buf_index];
     dst = mmap(NULL, sz, PROT_READ | PROT_WRITE, MAP_SHARED, surf->dma_buf_fd, 0);
     if (dst == MAP_FAILED)
         return -1;
@@ -939,11 +962,8 @@ int v4l2sl_surface_pull_capture(struct v4l2sl_context *ctx,
     surf->stride = stride;
     surf->aligned_h = alh;
     surf->cap_fourcc = fcc;
-    /* Keep the GBM display copy in sync when a client has exported this
-     * surface (VPU buffers stay here; the bo is the only export vehicle). */
     surf->gbm_src = 2;
-    if (surf->gbm_bo && v4l2sl_gbm_surface_upload(surf, src, stride, alh) < 0)
-        fprintf(stderr, "v4l2stateless: gbm upload failed (memfd copy intact)\n");
+    surf->memfd_stale = 0;
     return 0;
 }
 
