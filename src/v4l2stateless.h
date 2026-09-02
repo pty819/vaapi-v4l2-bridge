@@ -120,7 +120,6 @@ struct v4l2sl_context {
     /* Output (bitstream) buffer management */
     int output_bufs_allocd;
     uint32_t output_buf_size;
-    uint32_t output_buf_length[V4L2SL_NUM_OUTPUT_BUFS];
     void  *output_buf_ptr[V4L2SL_NUM_OUTPUT_BUFS];
     int free_out_bufs[V4L2SL_NUM_OUTPUT_BUFS];
     int n_free_out;
@@ -156,9 +155,6 @@ struct v4l2sl_context {
 
 /* Driver global state */
 struct v4l2sl_driver_data {
-    int media_fd;                /* unused leftover; decode uses per-context media_fd */
-    pthread_mutex_t lock;        /* unused — see g_v4l2sl_lock in v4l2stateless.c */
-
     struct v4l2sl_config *configs;
     VAConfigID next_config_id;
 

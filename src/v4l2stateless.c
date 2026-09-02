@@ -145,9 +145,6 @@ v4l2sl_terminate(VADriverContextP ctx)
     }
     pthread_mutex_unlock(&g_v4l2sl_lock);
 
-    if (driver_data->media_fd >= 0)
-        close(driver_data->media_fd);
-
     free(driver_data);
     ctx->pDriverData = NULL;
 
@@ -1896,8 +1893,6 @@ v4l2sl_init(VADriverContextP ctx)
     if (!driver_data)
         return VA_STATUS_ERROR_ALLOCATION_FAILED;
 
-    driver_data->media_fd = -1;
-    pthread_mutex_init(&driver_data->lock, NULL);
     ctx->pDriverData = driver_data;
 
     v4l2sl_scan_all_cached(driver_data->dev_h264, driver_data->dev_hevc,

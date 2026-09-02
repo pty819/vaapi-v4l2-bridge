@@ -79,10 +79,7 @@ VAStatus v4l2sl_vpp_query_filters(VAProcFilterType *filters, unsigned int *n)
     /* RGA has rotate/flip as controls, not VAProcFilter* types. */
     if (!n)
         return VA_STATUS_ERROR_INVALID_PARAMETER;
-    if (!filters) {
-        *n = 0;
-        return VA_STATUS_SUCCESS;
-    }
+    (void)filters;
     *n = 0;
     return VA_STATUS_SUCCESS;
 }
