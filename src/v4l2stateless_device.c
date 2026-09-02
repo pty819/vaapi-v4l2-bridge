@@ -939,6 +939,10 @@ int v4l2sl_surface_pull_capture(struct v4l2sl_context *ctx,
     surf->stride = stride;
     surf->aligned_h = alh;
     surf->cap_fourcc = fcc;
+    /* Keep the GBM display copy in sync when a client has exported this
+     * surface (VPU buffers stay here; the bo is the only export vehicle). */
+    if (surf->gbm_bo && v4l2sl_gbm_surface_upload(surf, src, stride, alh) < 0)
+        fprintf(stderr, "v4l2stateless: gbm upload failed (memfd copy intact)\n");
     return 0;
 }
 

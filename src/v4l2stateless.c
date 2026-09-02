@@ -647,6 +647,7 @@ v4l2sl_destroy_surfaces(VADriverContextP ctx,
         if (surface) {
             if (surface->dma_buf_fd >= 0)
                 close(surface->dma_buf_fd);
+            v4l2sl_gbm_surface_destroy(surface);
             free(surface->cpu_ptr);
             free(surface);
             driver_data->surfaces[surfaces[i]] = NULL;
@@ -1814,17 +1815,25 @@ v4l2sl_export_surface_handle(VADriverContextP ctx, VASurfaceID surface_id,
         return VA_STATUS_ERROR_UNSUPPORTED_MEMORY_TYPE;
     }
     /*
-     * Decode surfaces live in memfd (VPU dma-buf export is banned: the
-     * chip/CMA+IOMMU path hangs when the GPU still holds the buffer).
-     * Handing a memfd out as DRM_PRIME makes clients try to EGL-import
-     * it every frame: the import fails (EGL_BAD_ALLOC spam) and, in
-     * Chrome's zero-copy-GL output path, the frame is presented black
-     * because nothing ever reads the surface back. Fail cleanly instead
-     * so clients fall back to vaGetImage/vaDeriveImage CPU readback.
+     * Decode surfaces: VPU capture buffers must never be exported (EXPBUF
+     * + GPU import is a chip bug), and handing the memfd out as DRM_PRIME
+     * is the black-frame lie. Export the driver-owned linear GBM copy
+     * instead - a real dma-buf in the single-object NV12 shape Chrome's
+     * zero-copy GL path imports. Decode surface = attached capture buffer
+     * or member of a VLD context (cpu_ptr is NOT a discriminator:
+     * create_surfaces callocs it for every surface). Falls back to
+     * UNIMPLEMENTED when GBM is unavailable or the format is not NV12.
      */
-    if (surf->buf_index >= 0 && !surf->cpu_ptr) {
+    c = context_for_surface(driver_data, surface_id);
+    if (surf->buf_index >= 0 ||
+        (c && c->entrypoint == VAEntrypointVLD)) {
+        if (v4l2sl_gbm_surface_ensure(surf) < 0) {
+            pthread_mutex_unlock(&g_v4l2sl_lock);
+            return VA_STATUS_ERROR_UNIMPLEMENTED;
+        }
+        st = v4l2sl_surface_fill_prime_gbm(surf, flags, descriptor);
         pthread_mutex_unlock(&g_v4l2sl_lock);
-        return VA_STATUS_ERROR_UNIMPLEMENTED;
+        return st;
     }
     if (surf->dma_buf_fd < 0)
         v4l2sl_surface_alloc_export_fd(surf);
@@ -1833,7 +1842,6 @@ v4l2sl_export_surface_handle(VADriverContextP ctx, VASurfaceID surface_id,
         return VA_STATUS_ERROR_INVALID_SURFACE;
     }
 
-    c = context_for_surface(driver_data, surface_id);
     st = v4l2sl_surface_fill_prime(surf, c, flags, descriptor);
     pthread_mutex_unlock(&g_v4l2sl_lock);
     return st;

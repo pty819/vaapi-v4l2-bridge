@@ -15,6 +15,8 @@
 #include <linux/v4l2-controls.h>
 #include <linux/videodev2.h>
 
+struct gbm_bo;   /* opaque — only v4l2stateless_gbm.c includes <gbm.h> */
+
 /* Codec identifiers */
 enum v4l2sl_codec {
     V4L2SL_CODEC_H264,
@@ -56,6 +58,8 @@ struct v4l2sl_surface {
     void *cpu_ptr;           /* software backing for upload / encode / VPP src */
     uint32_t cpu_size;
     uint32_t cpu_stride;
+    struct gbm_bo *gbm_bo;   /* driver-owned display copy (linear, R8) */
+    uint32_t gbm_stride;
 };
 
 /* Parameter buffer */
@@ -265,6 +269,15 @@ VAStatus v4l2sl_surface_fill_prime(const struct v4l2sl_surface *surf,
                                    const struct v4l2sl_context *c,
                                    uint32_t flags,
                                    void *descriptor);
+/* GBM-backed display surfaces (v4l2stateless_gbm.c): the export vehicle for
+ * decode surfaces. VPU capture buffers are never exported (chip bug); the
+ * bo is panthor system memory kept in sync by pull_capture. */
+int v4l2sl_gbm_surface_ensure(struct v4l2sl_surface *s);
+int v4l2sl_gbm_surface_upload(struct v4l2sl_surface *s, const void *src,
+                              uint32_t src_stride, uint32_t src_alh);
+void v4l2sl_gbm_surface_destroy(struct v4l2sl_surface *s);
+VAStatus v4l2sl_surface_fill_prime_gbm(const struct v4l2sl_surface *surf,
+                                       uint32_t flags, void *descriptor);
 typedef int (*v4l2sl_ioctl_fn)(int fd, unsigned long request, void *arg);
 void v4l2sl_set_ioctl_hook(v4l2sl_ioctl_fn fn);
 int v4l2sl_dequeue_buffer(int fd, enum v4l2_buf_type type);
