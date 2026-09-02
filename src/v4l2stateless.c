@@ -409,19 +409,30 @@ v4l2sl_query_config_attributes(VADriverContextP ctx,
 {
     struct v4l2sl_driver_data *driver_data = ctx->pDriverData;
     struct v4l2sl_config *config = driver_data->configs;
+    VAProfile prof;
+    VAEntrypoint entry;
+    unsigned int rt;
     VAConfigAttrib attribs[8];
     int count = 0;
 
+    pthread_mutex_lock(&g_v4l2sl_lock);
     while (config && config->config_id != config_id)
         config = config->next;
-
-    if (!config)
+    if (!config) {
+        pthread_mutex_unlock(&g_v4l2sl_lock);
         return VA_STATUS_ERROR_INVALID_CONFIG;
+    }
+    /* Snapshot the config fields under the lock (vaDestroyConfig frees
+     * nodes holding it), then build the reply unlocked. */
+    prof = config->profile;
+    entry = config->entrypoint;
+    rt = config->rt_format;
+    pthread_mutex_unlock(&g_v4l2sl_lock);
 
     if (profile)
-        *profile = config->profile;
+        *profile = prof;
     if (entrypoint)
-        *entrypoint = config->entrypoint;
+        *entrypoint = entry;
 
     /*
      * Chrome's FillProfileInfo_Locked allocates vaMaxNumConfigAttributes()
@@ -429,7 +440,7 @@ v4l2sl_query_config_attributes(VADriverContextP ctx,
      * parameter. Do not treat *num_attribs as a buffer capacity.
      */
     attribs[count].type = VAConfigAttribRTFormat;
-    attribs[count].value = config->rt_format;
+    attribs[count].value = rt;
     count++;
     attribs[count].type = VAConfigAttribDecSliceMode;
     attribs[count].value = VA_DEC_SLICE_MODE_NORMAL;
@@ -464,14 +475,20 @@ v4l2sl_query_surface_attributes(VADriverContextP ctx,
 {
     struct v4l2sl_driver_data *driver_data = ctx->pDriverData;
     struct v4l2sl_config *config = driver_data->configs;
+    unsigned int rt;
 
     if (!num_attribs)
         return VA_STATUS_ERROR_INVALID_PARAMETER;
 
+    pthread_mutex_lock(&g_v4l2sl_lock);
     while (config && config->config_id != config_id)
         config = config->next;
-    if (!config)
+    if (!config) {
+        pthread_mutex_unlock(&g_v4l2sl_lock);
         return VA_STATUS_ERROR_INVALID_CONFIG;
+    }
+    rt = config->rt_format;
+    pthread_mutex_unlock(&g_v4l2sl_lock);
 
     VASurfaceAttrib attribs[16];
     unsigned int count = 0;
@@ -479,11 +496,11 @@ v4l2sl_query_surface_attributes(VADriverContextP ctx,
     unsigned npix = 0, p;
 
     pix[npix++] = VA_FOURCC_NV12;
-    if (config->rt_format & VA_RT_FORMAT_YUV420_10)
+    if (rt & VA_RT_FORMAT_YUV420_10)
         pix[npix++] = VA_FOURCC_P010;
-    if (config->rt_format & (VA_RT_FORMAT_YUV422 | VA_RT_FORMAT_YUV422_10))
+    if (rt & (VA_RT_FORMAT_YUV422 | VA_RT_FORMAT_YUV422_10))
         pix[npix++] = VA_FOURCC_YUY2;
-    if (config->rt_format & VA_RT_FORMAT_RGB32)
+    if (rt & VA_RT_FORMAT_RGB32)
         pix[npix++] = VA_FOURCC_BGRX;
 
     for (p = 0; p < npix; p++) {
