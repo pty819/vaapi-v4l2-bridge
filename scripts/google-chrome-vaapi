@@ -1,6 +1,21 @@
 #!/bin/bash
 # Force official Linux Chrome through the VA-API -> V4L2-stateless bridge.
 # RK3588 panthor is a platform DRM device; Chrome only auto-picks PCI nodes.
+#
+# GL stack (verified 2026-09-02 on the Orange Pi 5, KDE Wayland session):
+# the ONLY combination that initializes a GL context cleanly is
+#   --ozone-platform=wayland --use-gl=angle --use-angle=gles
+#   --disable-features=Vulkan
+# Anything else renders blank pages:
+#   - --ozone-platform=x11 or --ozone-platform-hint=auto: ANGLE fails with
+#     "Could not create a backing OpenGL context" (error 12289), pages never
+#     paint (YouTube stays "Loading...", local video shows a black frame).
+#   - Vulkan on: Chrome logs "'--ozone-platform=wayland' is not compatible
+#     with Vulkan" and falls into the broken path above.
+# With the flags above: zero ANGLE errors, and chrome://media-internals
+# reports kVideoDecoderName=VaapiVideoDecoder / kIsPlatformVideoDecode=true
+# for 1080p H.264 (the v4l2stateless driver logs "capture mmap idx=" per
+# decoded VPU buffer).
 set -u
 export LIBVA_DRIVER_NAME="${LIBVA_DRIVER_NAME:-v4l2stateless}"
 
@@ -16,16 +31,20 @@ has_render_override=0
 has_hw_device=0
 has_ignore_blocklist=0
 has_disable_gpu_sandbox=0
-has_ozone_hint=0
+has_ozone=0
+has_gl=0
 has_enable_features=0
+has_disable_features=0
 for a in "$@"; do
   case "$a" in
     --render-node-override|--render-node-override=*) has_render_override=1 ;;
     --hardware-video-device-path|--hardware-video-device-path=*) has_hw_device=1 ;;
     --ignore-gpu-blocklist) has_ignore_blocklist=1 ;;
     --disable-gpu-sandbox) has_disable_gpu_sandbox=1 ;;
-    --ozone-platform-hint|--ozone-platform-hint=*) has_ozone_hint=1 ;;
+    --ozone-platform=*|--ozone-platform-hint|--ozone-platform-hint=*) has_ozone=1 ;;
+    --use-gl=*|--use-angle=*) has_gl=1 ;;
     --enable-features|--enable-features=*) has_enable_features=1 ;;
+    --disable-features|--disable-features=*) has_disable_features=1 ;;
   esac
 done
 
@@ -33,9 +52,12 @@ done
 [[ "$has_hw_device" = 0 ]] && args+=(--hardware-video-device-path="$RENDER_NODE")
 [[ "$has_ignore_blocklist" = 0 ]] && args+=(--ignore-gpu-blocklist)
 [[ "$has_disable_gpu_sandbox" = 0 ]] && args+=(--disable-gpu-sandbox)
-[[ "$has_ozone_hint" = 0 ]] && args+=(--ozone-platform-hint=auto)
+# Pure Wayland + ANGLE/GLES with Vulkan off (see header comment).
+[[ "$has_ozone" = 0 ]] && args+=(--ozone-platform=wayland)
+[[ "$has_gl" = 0 ]] && args+=(--use-gl=angle --use-angle=gles)
 if [[ "$has_enable_features" = 0 ]]; then
   args+=(--enable-features=AcceleratedVideoDecoder,AcceleratedVideoDecodeLinuxGL,VaapiIgnoreDriverChecks)
 fi
+[[ "$has_disable_features" = 0 ]] && args+=(--disable-features=Vulkan)
 
 exec "$CHROME_REAL" "${args[@]}" "$@"

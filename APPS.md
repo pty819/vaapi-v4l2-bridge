@@ -56,7 +56,7 @@ Chrome onto Chromium's V4L2 path with a flag.
 
 ## Chrome (official `.deb`, VA-API)
 
-Google's Linux arm64 Chrome is built with `use_vaapi=true`. Two extra
+Google's Linux arm64 Chrome is built with `use_vaapi=true`. Three extra
 problems on RK3588:
 
 1. DRM probe **skips non-PCI** devices. panthor is a platform device, so Chrome
@@ -64,6 +64,15 @@ problems on RK3588:
    `--render-node-override=/dev/dri/renderD128`.
 2. The GPU process must `open(/dev/videoN)`. The sandbox blocks that, so
    `--disable-gpu-sandbox` is required for decode (not for browsing).
+3. The GL stack. Only **pure Wayland + ANGLE/GLES with Vulkan disabled**
+   initializes a GL context on panthor. X11, `--ozone-platform-hint=auto`,
+   or leaving Vulkan on all fail with
+   `ANGLE Display::initialize error 12289: Could not create a backing OpenGL
+   context` — pages never paint (YouTube stuck on "Loading…", local video
+   shows a black frame). The wrapper therefore forces
+   `--ozone-platform=wayland --use-gl=angle --use-angle=gles
+   --disable-features=Vulkan`. Verified 2026-09-02: zero ANGLE errors and
+   1080p H.264 decoding through the bridge (see Check below).
 
 The driver side of Chrome's `FillProfileInfo_Locked` (RTFormat / `num_attribs`)
 is already handled in `src/v4l2stateless.c`.
@@ -106,6 +115,20 @@ by full path if you want hardware decode.
 
 Open `chrome://gpu` → **Video Acceleration Information**. H.264 / HEVC / AV1
 should list Hardware. Start with 1080p; 4K HDR / VP9 will not use this bridge.
+
+Hardware decode is a resolution-dependent choice: a 320x240 QCIF clip decodes
+with `FFmpegVideoDecoder` (software) even when everything works. Use a 1080p
+clip and confirm in `chrome://media-internals`:
+
+```text
+kVideoDecoderName          VaapiVideoDecoder
+kIsPlatformVideoDecode     true
+```
+
+The driver side prints `v4l2stateless: capture mmap idx=N` per decoded VPU
+buffer and `H.264 config uses /dev/videoN` per session — grep Chrome's stderr
+for a quick yes/no. All three were verified 2026-09-02 with a 1080p/60s
+testsrc clip.
 
 ---
 
