@@ -187,6 +187,8 @@ enc "$CLIP/h264_4k.mp4" -f lavfi -i testsrc=size=3840x2160:rate=30:duration=1 \
 	  -pix_fmt yuv422p10le -c:v libx264 -preset ultrafast -g 1 -keyint_min 1 -sc_threshold 0 -frames:v 8 -f h264
 	enc "$CLIP/h264_422_idr8.h264" -f lavfi -i testsrc=size=1280x720:rate=30:duration=1 \
 	  -pix_fmt yuv422p -c:v libx264 -preset ultrafast -g 1 -keyint_min 1 -sc_threshold 0 -frames:v 8 -f h264
+	enc "$CLIP/h264_idr_nv12.h264" -f lavfi -i testsrc=size=1280x720:rate=30:duration=1 \
+	  -pix_fmt yuv420p -c:v libx264 -preset ultrafast -g 1 -keyint_min 1 -sc_threshold 0 -frames:v 8 -f h264
 
 # HEVC
 enc "$CLIP/hevc_main.mp4" -f lavfi -i testsrc=size=1920x1080:rate=30:duration=4 \
@@ -275,7 +277,24 @@ pair_sw "$CLIP/h264_4k.mp4" 8 h264-4k
 	    echo "MD5_MATCH h264422-$d-va"; pass=$((pass+1))
 	  else echo "MD5_DIFF h264422-$d-va"; fail=$((fail+1)); fi
 	done
-	# kernel-level: GST v4l2sl vs GST software (8-bit direct, 10-bit via
+	# --- va-export: exported dma-buf content == vaGetImage content ----------
+meson compile -C "$ROOT/builddir" va_export_client >/dev/null 2>&1 || true
+if [ -x "$ROOT/builddir/va_export_client" ]; then
+  LIBVA_DRIVER_NAME=v4l2stateless "$ROOT/builddir/va_export_client" \
+    /dev/dri/renderD128 "$CLIP/h264_idr_nv12.h264" \
+    >"$OUT/va_export.log" 2>&1
+  ve=$?
+  if [ "$ve" -eq 0 ] && grep -q "EXPORT_EXACT 7" "$OUT/va_export.log"; then
+    echo "PASS va-export"; pass=$((pass+1))
+  else
+    echo "FAIL va-export (exit $ve)"; fail=$((fail+1))
+    tail -3 "$OUT/va_export.log"
+  fi
+else
+  echo "SKIP va-export (not built)"; fail=$((fail+1))
+fi
+
+# kernel-level: GST v4l2sl vs GST software (8-bit direct, 10-bit via
 	# tests/nv20_unpack.py because videoconvert rounds 10-bit unpacking)
 	gst-launch-1.0 -q filesrc location="$CLIP/h264_422_idr8.h264" ! parsebin ! v4l2slh264dec \
 	  ! videoconvert ! video/x-raw,format=Y42B ! filesink location="$OUT/h264422-8gst.raw" 2>/dev/null
