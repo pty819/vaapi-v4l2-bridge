@@ -62,7 +62,7 @@ static const struct {
 } profile_rt_formats[] = {
     { VAProfileH264ConstrainedBaseline, VA_RT_FORMAT_YUV420 },
     { VAProfileH264Main,       VA_RT_FORMAT_YUV420 },
-    { VAProfileH264High,       VA_RT_FORMAT_YUV420 | VA_RT_FORMAT_YUV420_10 | VA_RT_FORMAT_YUV422 | VA_RT_FORMAT_YUV422_10 },
+    { VAProfileH264High,       VA_RT_FORMAT_YUV420 },
     { VAProfileH264High10,     VA_RT_FORMAT_YUV420_10 },
     { VAProfileH264High422,    VA_RT_FORMAT_YUV422 | VA_RT_FORMAT_YUV422_10 },
     { VAProfileHEVCMain,       VA_RT_FORMAT_YUV420 },
@@ -315,15 +315,18 @@ v4l2sl_create_config(VADriverContextP ctx,
     config->entrypoint = entrypoint;
     config->codec = codec;
     config->device_path = device_path;
-    fprintf(stderr, "v4l2stateless: %s config uses %s\n",
-            v4l2sl_codec_name(codec), device_path);
 
-    /* Parse RT format from attribs */
+    /* Parse RT format from attribs. Leave 8-bit NV12 until the first
+     * picture: rkvdec only programs 10-bit/422 after a matching SPS
+     * (HEVC Main10 does NV12 here, then NV15 post-SPS). */
     config->rt_format = VA_RT_FORMAT_YUV420;
     for (int i = 0; i < num_attribs; i++) {
         if (attrib_list[i].type == VAConfigAttribRTFormat)
             config->rt_format = attrib_list[i].value;
     }
+
+    fprintf(stderr, "v4l2stateless: %s config uses %s (VA profile %d rt=0x%x)\n",
+            v4l2sl_codec_name(codec), device_path, (int)profile, config->rt_format);
 
     /* Simple ID allocation */
     pthread_mutex_lock(&g_v4l2sl_lock);
@@ -764,8 +767,14 @@ v4l2sl_create_context(VADriverContextP ctx,
 
     /* Capture: S_FMT + REQBUFS (degrades the buffer count under CMA
      * pressure). Failing the context outright beats a zombie fd that
-     * errors on every frame — ffmpeg/Chrome fall back to software. */
-    {
+     * errors on every frame — ffmpeg/Chrome fall back to software.
+     *
+     * H.264 defers capture until the first picture: rkvdec's SPS s_ctrl
+     * updates image_fmt (8-bit vs NV15) and returns EBUSY if capture
+     * buffers already exist. GStreamer REQBUFS(0)s first, then SPS,
+     * then NV15. HEVC keeps the create-time queue because its SPS is
+     * global-only and already sequenced that way. */
+    if (context->codec != V4L2SL_CODEC_H264) {
         uint32_t cap = v4l2sl_capture_fourcc_from_rt(context->rt_format);
         int ok = v4l2sl_ensure_capture(context, picture_width, picture_height,
                                        cap) == 0;
@@ -784,13 +793,15 @@ v4l2sl_create_context(VADriverContextP ctx,
 
     /*
      * Start streaming on both queues — QBUF is EPERM before this.
-     * HEVC defers STREAMON: the rkvdec kernel requires the SPS control
-     * (global) before it accepts STREAMON on the OUTPUT queue, and the
-     * SPS only becomes available at the first picture.
+     * HEVC/AV1/MPEG-2 defer STREAMON until the first picture: rkvdec
+     * wants the SPS (global) first. H.264 High10 must do the same —
+     * STREAMON on NV12 then renegotiating to NV15 leaves rkvdec
+     * producing empty 10-bit frames.
      */
     if (context->codec != V4L2SL_CODEC_HEVC &&
         context->codec != V4L2SL_CODEC_AV1 &&
         context->codec != V4L2SL_CODEC_MPEG2 &&
+        context->codec != V4L2SL_CODEC_H264 &&
         context->output_bufs_allocd > 0 &&
         context->capture_bufs_allocd > 0) {
         if (v4l2sl_streamon(context->v4l2_fd, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE) < 0 ||

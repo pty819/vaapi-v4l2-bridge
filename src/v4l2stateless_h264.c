@@ -148,11 +148,13 @@ void h264_fill_sps(struct v4l2_ctrl_h264_sps *sps,
     } else if (profile == VAProfileH264Main) {
         sps->profile_idc = 77;
         sps->constraint_set_flags = 0;
-    } else if (profile == VAProfileH264High10) {
-        sps->profile_idc = 110;
-        sps->constraint_set_flags = 0;
-    } else if (profile == VAProfileH264High422) {
+    } else if (profile == VAProfileH264High422 ||
+               pic->seq_fields.bits.chroma_format_idc == 2) {
         sps->profile_idc = 122;
+        sps->constraint_set_flags = 0;
+    } else if (profile == VAProfileH264High10 ||
+               pic->bit_depth_luma_minus8 >= 2) {
+        sps->profile_idc = 110;
         sps->constraint_set_flags = 0;
     } else {
         sps->profile_idc = 100; /* High */
@@ -182,8 +184,17 @@ void h264_fill_pps(struct v4l2_ctrl_h264_pps *pps,
     pps->num_ref_idx_l1_default_active_minus1 =
         slice ? slice->num_ref_idx_l1_active_minus1 : 0;
     pps->weighted_bipred_idc = pic->pic_fields.bits.weighted_bipred_idc;
-    pps->pic_init_qp_minus26 = pic->pic_init_qp_minus26;
-    pps->pic_init_qs_minus26 = pic->pic_init_qs_minus26;
+    /*
+     * ffmpeg bakes the bit-depth QP offset (QpBdOffsetY = 6 * (depth-8))
+     * into pic_init_qp/qs: it fills VA from pps->init_qp - 26 where
+     * init_qp = se(v) + 26 + QpBdOffsetY. The V4L2 PPS control wants the
+     * raw bitstream value — the VDPU381 applies the depth offset itself
+     * (GStreamer sends the raw value and decodes bit-exact). Strip the
+     * offset for 10-bit or dequantization runs 12 QP steps hot.
+     */
+    int qp_bd_offset = 6 * pic->bit_depth_luma_minus8;
+    pps->pic_init_qp_minus26 = pic->pic_init_qp_minus26 - qp_bd_offset;
+    pps->pic_init_qs_minus26 = pic->pic_init_qs_minus26 - qp_bd_offset;
     pps->chroma_qp_index_offset = pic->chroma_qp_index_offset;
     pps->second_chroma_qp_index_offset = pic->second_chroma_qp_index_offset;
     pps->flags = h264_pps_flags(pic);
@@ -392,26 +403,6 @@ VAStatus v4l2sl_h264_translate(struct v4l2sl_context *ctx,
         return VA_STATUS_ERROR_INVALID_PARAMETER;
     }
 
-    {
-        int w = (pic_param->picture_width_in_mbs_minus1 + 1) * 16;
-        int h = (pic_param->picture_height_in_mbs_minus1 + 1) * 16;
-        uint32_t cap = v4l2sl_capture_fourcc_from_sps(
-            pic_param->bit_depth_luma_minus8,
-            pic_param->seq_fields.bits.chroma_format_idc);
-        if (v4l2sl_ensure_capture(ctx, w, h, cap) < 0) {
-            fprintf(stderr, "v4l2stateless: H.264 capture reconfig failed\n");
-            return VA_STATUS_ERROR_OPERATION_FAILED;
-        }
-        if (!ctx->streamed) {
-            if (v4l2sl_streamon(ctx->v4l2_fd, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE) < 0 ||
-                v4l2sl_streamon(ctx->v4l2_fd, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE) < 0) {
-                fprintf(stderr, "v4l2stateless: H.264 STREAMON failed\n");
-                return VA_STATUS_ERROR_OPERATION_FAILED;
-            }
-            ctx->streamed = 1;
-        }
-    }
-
     /*
      * Step 1: Translate VA-API parameters to V4L2 controls
      */
@@ -460,6 +451,44 @@ VAStatus v4l2sl_h264_translate(struct v4l2sl_context *ctx,
     if (request_fd < 0) {
         fprintf(stderr, "v4l2stateless: H.264 no request fd available\n");
         return VA_STATUS_ERROR_OPERATION_FAILED;
+    }
+
+    /* rkvdec only accepts NV15/NV16/NV20 after a matching SPS. HEVC
+     * programs SPS as a global control before STREAMON; High10 must
+     * do the same. Request-scoped SPS still goes on the picture. */
+    {
+        int w = (pic_param->picture_width_in_mbs_minus1 + 1) * 16;
+        int h = (pic_param->picture_height_in_mbs_minus1 + 1) * 16;
+        uint32_t cap = v4l2sl_capture_fourcc_from_sps(
+            pic_param->bit_depth_luma_minus8,
+            pic_param->seq_fields.bits.chroma_format_idc);
+        struct v4l2_ext_control g_sps_ctrl = { 0 };
+        struct v4l2_ext_controls g_sps_ctrls = { 0 };
+
+        g_sps_ctrl.id = V4L2_CID_STATELESS_H264_SPS;
+        g_sps_ctrl.p_h264_sps = &sps;
+        g_sps_ctrl.size = sizeof(sps);
+        g_sps_ctrls.controls = &g_sps_ctrl;
+        g_sps_ctrls.count = 1;
+        if (v4l2sl_set_global_controls(v4l2_fd, &g_sps_ctrls) < 0) {
+            fprintf(stderr,
+                    "v4l2stateless: H.264 global SPS not accepted\n");
+            if (ctx->capture_bufs_allocd <= 0)
+                return VA_STATUS_ERROR_OPERATION_FAILED;
+        }
+
+        if (v4l2sl_ensure_capture(ctx, w, h, cap) < 0) {
+            fprintf(stderr, "v4l2stateless: H.264 capture reconfig failed\n");
+            return VA_STATUS_ERROR_OPERATION_FAILED;
+        }
+        if (!ctx->streamed) {
+            if (v4l2sl_streamon(v4l2_fd, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE) < 0 ||
+                v4l2sl_streamon(v4l2_fd, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE) < 0) {
+                fprintf(stderr, "v4l2stateless: H.264 STREAMON failed\n");
+                return VA_STATUS_ERROR_OPERATION_FAILED;
+            }
+            ctx->streamed = 1;
+        }
     }
 
     /* Set H.264 SPS */
@@ -548,7 +577,8 @@ VAStatus v4l2sl_h264_translate(struct v4l2sl_context *ctx,
     /*
      * Copy slice data into the pre-mapped output buffer. The VDPU381
      * frame-based UAPI expects Annex B start codes in the bitstream; each
-     * slice NAL missing one gets 00 00 00 01 prepended. All slices of the
+     * slice NAL missing one gets 00 00 01 prepended, the same 3-byte form
+     * GStreamer's v4l2 stateless decoders emit. All slices of the
      * picture are concatenated — frame-based decode consumes the whole
      * frame in one request.
      */
@@ -559,7 +589,7 @@ VAStatus v4l2sl_h264_translate(struct v4l2sl_context *ctx,
         if (!(slice_sizes[i] >= 3 && slice_datas[i][0] == 0 && slice_datas[i][1] == 0 &&
               (slice_datas[i][2] == 1 ||
                (slice_sizes[i] >= 4 && slice_datas[i][2] == 0 && slice_datas[i][3] == 1))))
-            prefixes[i] = 4;
+            prefixes[i] = 3;
         total += prefixes[i] + slice_sizes[i];
     }
 
@@ -575,7 +605,7 @@ VAStatus v4l2sl_h264_translate(struct v4l2sl_context *ctx,
         size_t off = 0;
         for (int i = 0; i < n_slice_data; i++) {
             if (prefixes[i]) {
-                dst[off] = 0; dst[off + 1] = 0; dst[off + 2] = 0; dst[off + 3] = 1;
+                dst[off] = 0; dst[off + 1] = 0; dst[off + 2] = 1;
             }
             memcpy(dst + off + prefixes[i], slice_datas[i], slice_sizes[i]);
             off += prefixes[i] + slice_sizes[i];

@@ -2,7 +2,7 @@
 
 写于 **2026-08-27**，刷新 **2026-08-29**。机器：Orange Pi 5 NAS `192.168.1.21`，Armbian 26.8.3 resolute，kernel **7.1.8-edge-rockchip64**。
 
-全量矩阵 `tests/run_full_matrix.sh`：**PASS=22 FAIL=0**。Git 仓库在 NAS：`https://github.com/pty819/vaapi-v4l2-bridge.git`。
+全量矩阵 `tests/run_full_matrix.sh`：**PASS=21 FAIL=0**（新增 h26410 条目）。Git 仓库在 NAS：`https://github.com/pty819/vaapi-v4l2-bridge.git`。
 
 安装 `.so`：`/usr/lib/aarch64-linux-gnu/dri/v4l2stateless_drv_video.so`。
 
@@ -15,7 +15,7 @@ C 驱动 `v4l2stateless_drv_video.so` 把 ffmpeg VA-API 硬解接到主线 V4L2-
 | 编码 | 设备 | 状态 |
 |---|---|---|
 | H.264 CB / Main / High | rkvdec `/dev/video1` | **完成**：含 B / 全 P / 4-slice / 4K / QCIF |
-| H.264 High10 | 同上，capture NV15 | **完成 advertise**；capture 会 renegotiate |
+| H.264 High10 | 同上，capture NV15 | **完成**：hw==sw framemd5；根因=ffmpeg VA 的 pic_init_qp_minus26 含 10bit QpBdOffsetY(+12)，内核要裸值，剥掉即好 |
 | HEVC 8-bit Main | 同上 | **完成**：Main + WPP + 4K |
 | HEVC Main10 | 同上，NV15 → P010 | **完成**：`hwdownload,format=p010le` 对软解 |
 | AV1 8-bit Profile0 | hantro `/dev/video4` + `/dev/media3` | **完成**：libaom、libaom realtime、SVT-AV1 RA、4K |

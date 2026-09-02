@@ -166,8 +166,10 @@ enc "$CLIP/h264_main.mp4" -f lavfi -i testsrc=size=1280x720:rate=30:duration=2 \
   -pix_fmt yuv420p -c:v libx264 -preset ultrafast -profile:v main -g 30 -bf 2
 enc "$CLIP/h264_4k.mp4" -f lavfi -i testsrc=size=3840x2160:rate=30:duration=1 \
   -pix_fmt yuv420p -c:v libx264 -preset ultrafast -profile:v high -g 30 -bf 0 -frames:v 8
-enc "$CLIP/h264_qcif.mp4" -f lavfi -i testsrc=size=320x240:rate=25:duration=2 \
-  -pix_fmt yuv420p -c:v libx264 -preset ultrafast -profile:v high -g 25 -bf 0
+	enc "$CLIP/h264_qcif.mp4" -f lavfi -i testsrc=size=320x240:rate=25:duration=2 \
+	  -pix_fmt yuv420p -c:v libx264 -preset ultrafast -profile:v high -g 25 -bf 0
+	enc "$CLIP/h264_10.mp4" -f lavfi -i testsrc=size=1280x720:rate=30:duration=1 \
+	  -pix_fmt yuv420p10le -c:v libx264 -preset ultrafast -profile:v high10 -frames:v 8
 
 # HEVC
 enc "$CLIP/hevc_main.mp4" -f lavfi -i testsrc=size=1920x1080:rate=30:duration=4 \
@@ -210,7 +212,24 @@ pair_sw "$CLIP/h264_slices.mp4" 120 h264-slices
 pair_sw "$CLIP/h264_baseline.mp4" 50 h264-baseline
 pair_sw "$CLIP/h264_main.mp4" 50 h264-main
 pair_sw "$CLIP/h264_4k.mp4" 8 h264-4k
-pair_sw "$CLIP/h264_qcif.mp4" 40 h264-qcif
+	pair_sw "$CLIP/h264_qcif.mp4" 40 h264-qcif
+
+	echo "== SW h26410 $CLIP/h264_10.mp4 n=8 =="
+	$FF -hide_banner -hwaccel vaapi -hwaccel_output_format vaapi \
+	  -vaapi_device /dev/dri/renderD128 -i "$CLIP/h264_10.mp4" \
+	  -vf "hwdownload,format=p010le" -pix_fmt p010le -frames:v 8 \
+	  -f framemd5 -y "$OUT/h26410-hw.md5" >"$OUT/h26410-hw.stderr" 2>&1
+	h10=$?
+	$FF -hide_banner -i "$CLIP/h264_10.mp4" -pix_fmt p010le -frames:v 8 \
+	  -f framemd5 -y "$OUT/h26410-sw.md5" >/dev/null 2>&1
+	if [ "$h10" -ne 0 ]; then echo "HW_EXIT $h10 h26410"; fail=$((fail+1))
+	elif ! forbidden "$OUT/h26410-hw.stderr"; then fail=$((fail+1))
+	elif ! used_hw "$OUT/h26410-hw.stderr"; then fail=$((fail+1))
+	elif ! grep -q "fourcc=NV15" "$OUT/h26410-hw.stderr"; then
+	  echo "NO_NV15 h26410"; fail=$((fail+1))
+	elif diff -q "$OUT/h26410-hw.md5" "$OUT/h26410-sw.md5" >/dev/null; then
+	  echo "MD5_MATCH h26410"; pass=$((pass+1))
+	else echo "MD5_DIFF h26410"; fail=$((fail+1)); fi
 
 pair_sw "$CLIP/hevc_main.mp4" 120 hevc-main
 pair_sw "$CLIP/hevc_wpp.mp4" 120 hevc-wpp

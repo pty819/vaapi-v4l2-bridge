@@ -127,11 +127,17 @@ int v4l2sl_setup_output_queue(int fd, uint32_t codec_format, int width, int heig
     fmt.fmt.pix_mp.pixelformat = codec_format;
     fmt.fmt.pix_mp.field = V4L2_FIELD_NONE;
     fmt.fmt.pix_mp.num_planes = 1;
-    /* hantro coded formats want sizeimage ~= luma size, not a 4MB guess. */
+    /* hantro coded formats want sizeimage ~= luma size, not a 4MB guess.
+     * GStreamer sizes H.264 OUTPUT as (width*height*pixel_bitdepth)/8;
+     * 4:2:0 8-bit=12, 10-bit=15. A luma-sized buffer is too small for
+     * 10-bit High10 and rkvdec then writes an empty NV15 capture. */
     if (codec_format == V4L2_PIX_FMT_AV1_FRAME ||
         codec_format == V4L2_PIX_FMT_VP8_FRAME ||
         codec_format == V4L2_PIX_FMT_MPEG2_SLICE)
         fmt.fmt.pix_mp.plane_fmt[0].sizeimage = (uint32_t)width * (uint32_t)height;
+    else if (codec_format == V4L2_PIX_FMT_H264_SLICE)
+        fmt.fmt.pix_mp.plane_fmt[0].sizeimage =
+            (uint32_t)width * (uint32_t)height * 15 / 8;
 
     if (xioctl(fd, VIDIOC_S_FMT, &fmt) < 0) {
         fprintf(stderr, "v4l2stateless: S_FMT output failed: %s\n", strerror(errno));
@@ -1057,6 +1063,9 @@ int v4l2sl_dequeue_buffer(int fd, enum v4l2_buf_type type)
             fprintf(stderr, "v4l2stateless: DQBUF failed: %s\n", strerror(errno));
         return -1;
     }
+    if (buf.flags & V4L2_BUF_FLAG_ERROR)
+        fprintf(stderr, "v4l2stateless: DQBUF type=%u idx=%u ERROR flags=0x%x bytesused=%u\n",
+                (unsigned)type, buf.index, buf.flags, planes[0].bytesused);
 
     return buf.index;
 }

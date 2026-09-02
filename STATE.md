@@ -1,6 +1,6 @@
 # STATE.md — Project State
 
-Last verified: **2026-09-02** (matrix PASS=20 FAIL=0). Host: Orange Pi 5 NAS `192.168.1.21`, Armbian 26.8.3 resolute, kernel **7.1.8-edge-rockchip64**.
+Last verified: **2026-09-02** (matrix PASS=21 FAIL=0 incl. H.264 High10). Host: Orange Pi 5 NAS `192.168.1.21`, Armbian 26.8.3 resolute, kernel **7.1.8-edge-rockchip64**.
 
 Living ops notes: [HANDOFF.md](HANDOFF.md). Desktop apps: [APPS.md](APPS.md). Codec table: [README.md](README.md).
 
@@ -12,12 +12,12 @@ C libva backend `v4l2stateless_drv_video.so` translates VA-API to mainline V4L2-
 
 Installed: `/usr/lib/aarch64-linux-gnu/dri/v4l2stateless_drv_video.so`. Graphical sessions export `LIBVA_DRIVER_NAME=v4l2stateless` via `~/.config/environment.d/90-libva.conf` and `~/.profile`.
 
-Host matrix `tests/run_full_matrix.sh` last recorded **PASS=22 FAIL=0**. Success is `hwdownload` framemd5 vs software (MPEG-2 vs GStreamer `v4l2slmpeg2dec`), plus a log line `v4l2stateless: .* config uses /dev/video`. Silent ffmpeg software fallback is not success.
+Host matrix `tests/run_full_matrix.sh` last recorded **PASS=21 FAIL=0** (h26410 entry added). Success is `hwdownload` framemd5 vs software (MPEG-2 vs GStreamer `v4l2slmpeg2dec`), plus a log line `v4l2stateless: .* config uses /dev/video`. Silent ffmpeg software fallback is not success.
 
 | Path | Device | Status |
 |---|---|---|
 | H.264 CB / Main / High | rkvdec `/dev/video1` | bit-exact vs ffmpeg SW (B / all-P / slices / 4K / QCIF) |
-| H.264 High10 | same, capture NV15 | advertised; capture renegotiates |
+| H.264 High10 | same, capture NV15 | bit-exact vs ffmpeg SW — strip ffmpeg QpBdOffsetY from pic_init_qp/qs (VA carries depth offset, V4L2 wants raw) |
 | H.264 High422 | same, capture NV16 | advertised; ffmpeg vaapi often still picks SW |
 | HEVC Main 8-bit (WPP, 4K) | rkvdec `/dev/video1` | bit-exact vs ffmpeg SW |
 | HEVC Main10 | same, NV15 → P010 | bit-exact vs ffmpeg SW (`hwdownload,format=p010le`) |
