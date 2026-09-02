@@ -1,6 +1,6 @@
 # STATE.md — Project State
 
-Last verified: **2026-08-29**. Host: Orange Pi 5 NAS `192.168.1.21`, Armbian 26.8.3 resolute, kernel **7.1.8-edge-rockchip64**.
+Last verified: **2026-09-02** (matrix PASS=20 FAIL=0). Host: Orange Pi 5 NAS `192.168.1.21`, Armbian 26.8.3 resolute, kernel **7.1.8-edge-rockchip64**.
 
 Living ops notes: [HANDOFF.md](HANDOFF.md). Desktop apps: [APPS.md](APPS.md). Codec table: [README.md](README.md).
 
@@ -36,11 +36,13 @@ Chrome `FillProfileInfo_Locked` attrib query is implemented (`vaQueryConfigAttri
 - **Browser mid-stream resolution changes** — capture renegotiate exists in the driver; Chrome/Firefox path is not matrix-tested
 - **Vendor BSP / MPP** — out of scope (mainline only)
 
-## 2026-09-02 stability fixes (hardware matrix NOT re-run)
+## 2026-09-02 stability fixes (commit 27e8b7a)
 
 Static review + kernel-UAPI verification round (dev-stateless-decoder spec,
-rkvdec driver source, libva threading contract). Unit tests PASS 4/4; host
-codec matrix still pending. Changes:
+rkvdec driver source, libva threading contract). Host matrix re-run after
+the fixes: **PASS=20 FAIL=0, zero resets/timeouts/degradations in the log**
+(all hw framemd5 still bit-exact vs software; MPEG-2 vs GStreamer). Matrix
+now expects no AV1 while it stays un-advertised. Changes:
 
 - Decode submit unified in `v4l2sl_decode_submit`: timeout / DQBUF /
   request-queue failure now STREAMOFFs both queues and rebuilds the free
