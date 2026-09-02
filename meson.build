@@ -28,7 +28,7 @@ add_project_arguments(
 
 inc = include_directories('src')
 
-sources = files(
+core_sources = files(
   'src/v4l2stateless.c',
   'src/v4l2stateless_device.c',
   'src/v4l2stateless_probe.c',
@@ -46,10 +46,18 @@ sources = files(
   'src/v4l2stateless_vpp.c',
 )
 
-shared_library('v4l2stateless_drv_video',
-  sources,
+# One source of truth: every driver source lives in this static library; the
+# .so and all test executables link it. link_whole on the shared library is
+# REQUIRED — plain link_with would drop unreferenced objects (the codec
+# translators) from the .so.
+libv4l2sl_core = static_library('v4l2sl_core', core_sources,
   include_directories: inc,
   dependencies: [libva_dep, libva_drm_dep, libdrm_dep, gbm_dep],
+)
+
+shared_library('v4l2stateless_drv_video',
+  [],
+  link_whole: libv4l2sl_core,
   install: true,
   install_dir: libva_driverdir,
   name_prefix: '',  # No 'lib' prefix
@@ -64,14 +72,8 @@ test_video_probe = executable('test_video_probe',
 test('video_probe', test_video_probe)
 
 test_vp8_mpeg2_fill = executable('test_vp8_mpeg2_fill',
-  files('tests/test_vp8_mpeg2_fill.c',
-        'src/v4l2stateless_vp8.c',
-        'src/v4l2stateless_mpeg2.c',
-        'src/v4l2stateless_h264.c',
-        'src/v4l2stateless_device.c',
-        'src/v4l2stateless_format.c',
-        'src/v4l2stateless_gbm.c',
-        'src/v4l2stateless_probe.c'),
+  files('tests/test_vp8_mpeg2_fill.c'),
+  link_with: libv4l2sl_core,
   include_directories: inc,
   dependencies: [libva_dep, libdrm_dep, gbm_dep],
 )
@@ -79,16 +81,8 @@ test_vp8_mpeg2_fill = executable('test_vp8_mpeg2_fill',
 test('vp8_mpeg2_fill', test_vp8_mpeg2_fill)
 
 test_export_recapture = executable('test_export_recapture',
-  files('tests/test_export_recapture.c',
-        'src/v4l2stateless_device.c',
-        'src/v4l2stateless_format.c',
-  'src/v4l2stateless_gbm.c',
-        'src/v4l2stateless_probe.c',
-        'src/v4l2stateless_av1.c',
-        'src/v4l2stateless_h264.c',
-        'src/v4l2stateless_hevc.c',
-        'src/v4l2stateless_vp8.c',
-        'src/v4l2stateless_mpeg2.c'),
+  files('tests/test_export_recapture.c'),
+  link_with: libv4l2sl_core,
   include_directories: inc,
   dependencies: [libva_dep, libdrm_dep, gbm_dep],
 )
@@ -96,12 +90,8 @@ test_export_recapture = executable('test_export_recapture',
 test('export_recapture', test_export_recapture)
 
 test_format = executable('test_format',
-  files('tests/test_format.c',
-        'src/v4l2stateless_format.c',
-        'src/v4l2stateless_gbm.c',
-        'src/v4l2stateless_device.c',
-        'src/v4l2stateless_probe.c',
-        'src/v4l2stateless_vpp.c'),
+  files('tests/test_format.c'),
+  link_with: libv4l2sl_core,
   include_directories: inc,
   dependencies: [libva_dep, libdrm_dep, gbm_dep],
 )
