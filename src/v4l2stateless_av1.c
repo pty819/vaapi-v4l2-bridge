@@ -301,28 +301,6 @@ static uint8_t av1_first_dup_from(const VASurfaceID sids[8], int start)
     return 0;
 }
 
-/* Hidden ARF still to decode in this mini-GOP (even order_hint > cur). */
-static int av1_svt_pending_arf(const uint32_t hints[8], uint32_t cur, uint32_t gop)
-{
-    int i, arf;
-
-    if (gop < 8)
-        gop = 8;
-    for (arf = 2; arf < (int)gop; arf += 2) {
-        int live = 0;
-
-        if (arf <= (int)cur)
-            continue;
-        for (i = 0; i < 8; i++) {
-            if ((int)hints[i] == arf)
-                live = 1;
-        }
-        if (!live)
-            return 1;
-    }
-    return 0;
-}
-
 /* SVT RA temporal layer from order_hint modulo mini-GOP. */
 static int av1_svt_tl(uint32_t oh, uint32_t gop)
 {
@@ -407,29 +385,6 @@ static uint8_t av1_infer_refresh_libaom(const VASurfaceID sids[8],
     return r ? r : 0x01;
 }
 
-static uint8_t av1_svt_layer_slot(struct v4l2sl_context *ctx, uint32_t cur)
-{
-    int tl = av1_svt_tl(cur, ctx->av1_gop);
-    uint8_t slot;
-
-    switch (tl) {
-    case 0:
-        slot = ctx->av1_l0_toggle;
-        ctx->av1_l0_toggle = (uint8_t)((ctx->av1_l0_toggle + 1) % 3);
-        return (uint8_t)(1u << slot);
-    case 1:
-        slot = (uint8_t)(3 + ctx->av1_l1_toggle);
-        ctx->av1_l1_toggle ^= 1;
-        return (uint8_t)(1u << slot);
-    case 2:
-        return 0x20; /* slot 5 */
-    case 3:
-        return 0x40; /* slot 6 */
-    default:
-        return 0x80; /* slot 7 */
-    }
-}
-
 static uint8_t av1_infer_refresh_svt(const VASurfaceID sids[8],
                                     const uint32_t hints[8],
                                     const uint8_t level1[8],
@@ -438,92 +393,70 @@ static uint8_t av1_infer_refresh_svt(const VASurfaceID sids[8],
                                     struct v4l2sl_context *ctx)
 {
     uint8_t r;
-    int bit;
 
     /* SVT RA: shown pictures are non-reference leaves or overlays.
      * Only hidden ARFs write the DPB (GStreamer refresh=0 on every show). */
     if (show)
         return 0;
 
-    if (!show) {
-        if (ctx && !ctx->av1_have_first_arf) {
-            ctx->av1_have_first_arf = 1;
-            ctx->av1_gop = (uint8_t)(cur ? cur : 8);
-            ctx->av1_l0_oh = cur;
-            ctx->av1_prev_l0_oh = 0;
-            ctx->av1_l0_toggle = 1;
-            ctx->av1_l1_toggle = 0;
-            r = av1_most_dup_first(sids, hints);
-            return r ? r : 0x01;
-        }
-        /* EOS / cut-short pyramids: each new max even ARF is L0 (16,24,28,30). */
-        if (ctx && cur > ctx->av1_l0_oh) {
-            uint8_t slot = ctx->av1_l0_toggle;
-            ctx->av1_prev_l0_oh = ctx->av1_l0_oh;
-            ctx->av1_l0_oh = cur;
-            ctx->av1_l0_toggle = (uint8_t)((slot + 1) % 3);
-            return (uint8_t)(1u << slot);
-        }
-        /* Layer map uses the current mini-GOP length (last L0 minus previous). */
-        if (ctx && ctx->av1_gop >= 16) {
-            uint32_t g = ctx->av1_gop;
-            if (ctx->av1_prev_l0_oh && ctx->av1_l0_oh > ctx->av1_prev_l0_oh)
-                g = ctx->av1_l0_oh - ctx->av1_prev_l0_oh;
-            else if (cur > ctx->av1_gop)
-                g /= 2;
-            if (g < 4)
-                g = 4;
-            {
-                int tl = av1_svt_tl(cur, g);
-                uint8_t slot;
-                switch (tl) {
-                case 0:
-                    slot = ctx->av1_l0_toggle;
-                    ctx->av1_l0_toggle = (uint8_t)((ctx->av1_l0_toggle + 1) % 3);
-                    return (uint8_t)(1u << slot);
-                case 1:
-                    slot = (uint8_t)(3 + ctx->av1_l1_toggle);
-                    ctx->av1_l1_toggle ^= 1;
-                    return (uint8_t)(1u << slot);
-                case 2:
-                    return 0x20;
-                case 3:
-                    return 0x40;
-                default:
-                    return 0x80;
-                }
-            }
-        }
-
-        /* Cut-short / 8-frame mini-GOP: occupancy. */
-        if (av1_unique_sid_count(sids) == 2 && av1_slot_is_dup(sids, 3))
-            return 0x08;
+    if (ctx && !ctx->av1_have_first_arf) {
+        ctx->av1_have_first_arf = 1;
+        ctx->av1_gop = (uint8_t)(cur ? cur : 8);
+        ctx->av1_l0_oh = cur;
+        ctx->av1_prev_l0_oh = 0;
+        ctx->av1_l0_toggle = 1;
+        ctx->av1_l1_toggle = 0;
         r = av1_most_dup_first(sids, hints);
-        if (r)
-            return r;
-        r = av1_get_refresh_idx(sids, hints, level1, cur, bits_minus_1,
-                                !show && !skip);
         return r ? r : 0x01;
     }
+    /* EOS / cut-short pyramids: each new max even ARF is L0 (16,24,28,30). */
+    if (ctx && cur > ctx->av1_l0_oh) {
+        uint8_t slot = ctx->av1_l0_toggle;
+        ctx->av1_prev_l0_oh = ctx->av1_l0_oh;
+        ctx->av1_l0_oh = cur;
+        ctx->av1_l0_toggle = (uint8_t)((slot + 1) % 3);
+        return (uint8_t)(1u << slot);
+    }
+    /* Layer map uses the current mini-GOP length (last L0 minus previous). */
+    if (ctx && ctx->av1_gop >= 16) {
+        uint32_t g = ctx->av1_gop;
+        if (ctx->av1_prev_l0_oh && ctx->av1_l0_oh > ctx->av1_prev_l0_oh)
+            g = ctx->av1_l0_oh - ctx->av1_prev_l0_oh;
+        else if (cur > ctx->av1_gop)
+            g /= 2;
+        if (g < 4)
+            g = 4;
+        {
+            int tl = av1_svt_tl(cur, g);
+            uint8_t slot;
+            switch (tl) {
+            case 0:
+                slot = ctx->av1_l0_toggle;
+                ctx->av1_l0_toggle = (uint8_t)((ctx->av1_l0_toggle + 1) % 3);
+                return (uint8_t)(1u << slot);
+            case 1:
+                slot = (uint8_t)(3 + ctx->av1_l1_toggle);
+                ctx->av1_l1_toggle ^= 1;
+                return (uint8_t)(1u << slot);
+            case 2:
+                return 0x20;
+            case 3:
+                return 0x40;
+            default:
+                return 0x80;
+            }
+        }
+    }
 
+    /* Cut-short / 8-frame mini-GOP: occupancy. */
+    if (av1_unique_sid_count(sids) == 2 && av1_slot_is_dup(sids, 3))
+        return 0x08;
+    r = av1_most_dup_first(sids, hints);
+    if (r)
+        return r;
     r = av1_get_refresh_idx(sids, hints, level1, cur, bits_minus_1,
                             !show && !skip);
-    if (!r)
-        r = av1_first_dup_from(sids, 0);
-    if (!r)
-        r = 0x01;
-    /* Shown ref overwriting KEY: prefer L1 slots 4 then 3 if they still
-     * hold a KEY copy (matches SVT lay1 3–4). */
-    bit = 0;
-    while (bit < 8 && !((r >> bit) & 1))
-        bit++;
-    if (bit < 8 && hints[bit] == 0) {
-        if (av1_slot_is_dup(sids, 4) && hints[4] == 0)
-            return 0x10;
-        if (av1_slot_is_dup(sids, 3) && hints[3] == 0)
-            return 0x08;
-    }
-    return r;
+    return r ? r : 0x01;
 }
 
 /*
