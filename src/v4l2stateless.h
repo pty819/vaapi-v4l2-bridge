@@ -49,6 +49,7 @@ struct v4l2sl_surface {
     VASurfaceStatus status;
     int buf_index;           /* V4L2 capture buffer index, -1 if not allocated */
     int dma_buf_fd;          /* DMA-BUF fd for export */
+    uint32_t memfd_size;     /* current ftruncate size of dma_buf_fd (grow-only) */
     uint64_t timestamp;      /* V4L2 timestamp for reference tracking */
     uint32_t order_hint;     /* AV1 OrderHint of the frame last decoded here */
     uint8_t av1_level1;      /* AV1 KEY / level-1 ARF (hidden skip=0,0) */

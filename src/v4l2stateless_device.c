@@ -861,6 +861,7 @@ int v4l2sl_surface_alloc_export_fd(struct v4l2sl_surface *s)
         return -1;
     }
     s->dma_buf_fd = fd;
+    s->memfd_size = sz;
     if (!s->stride)
         s->stride = stride;
     if (!s->aligned_h)
@@ -870,16 +871,20 @@ int v4l2sl_surface_alloc_export_fd(struct v4l2sl_surface *s)
     return 0;
 }
 
+/* Grow-only: a smaller `size` (resolution step-down) must never ftruncate —
+ * clients may still hold mappings or dup'd fds of the larger memfd, and
+ * shrinking drops pages under them (SIGBUS). */
 int v4l2sl_surface_grow_memfd(struct v4l2sl_surface *s, uint32_t size)
 {
     if (!s)
         return -1;
     if (s->dma_buf_fd < 0 && v4l2sl_surface_alloc_export_fd(s) < 0)
         return -1;
-    if (size == 0 || s->dma_buf_fd < 0)
+    if (size == 0 || s->dma_buf_fd < 0 || size <= s->memfd_size)
         return 0;
     if (ftruncate(s->dma_buf_fd, (off_t)size) < 0)
         return -1;
+    s->memfd_size = size;
     return 0;
 }
 
