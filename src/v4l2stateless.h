@@ -306,10 +306,6 @@ void h264_fill_decode_params(struct v4l2_ctrl_h264_decode_params *dec,
                              const VASliceParameterBufferH264 *slice);
 void h264_fill_scaling_matrix(struct v4l2_ctrl_h264_scaling_matrix *sm,
                               const VAIQMatrixBufferH264 *iq);
-void h264_fill_slice_params(struct v4l2_ctrl_h264_slice_params *sp,
-                            const VASliceParameterBufferH264 *slice,
-                            const VAPictureParameterBufferH264 *pic,
-                            struct v4l2sl_driver_data *dd);
 VAStatus v4l2sl_h264_translate(struct v4l2sl_context *ctx,
                                struct v4l2sl_buffer **buffers,
                                int num_buffers);

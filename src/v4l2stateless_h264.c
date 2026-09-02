@@ -297,54 +297,6 @@ void h264_fill_scaling_matrix(struct v4l2_ctrl_h264_scaling_matrix *sm,
 }
 
 /*
- * Translate VA-API slice parameters to V4L2 H.264 slice params
- */
-void h264_fill_slice_params(struct v4l2_ctrl_h264_slice_params *sp,
-                            const VASliceParameterBufferH264 *slice,
-                            const VAPictureParameterBufferH264 *pic,
-                            struct v4l2sl_driver_data *dd)
-{
-    memset(sp, 0, sizeof(*sp));
-
-    sp->header_bit_size = slice->slice_data_bit_offset;
-    sp->first_mb_in_slice = slice->first_mb_in_slice;
-    sp->slice_type = slice->slice_type;
-    sp->colour_plane_id = 0;
-    sp->redundant_pic_cnt = 0;
-    sp->cabac_init_idc = slice->cabac_init_idc;
-    sp->slice_qp_delta = slice->slice_qp_delta;
-    sp->disable_deblocking_filter_idc = slice->disable_deblocking_filter_idc;
-    sp->slice_alpha_c0_offset_div2 = slice->slice_alpha_c0_offset_div2;
-    sp->slice_beta_offset_div2 = slice->slice_beta_offset_div2;
-    sp->num_ref_idx_l0_active_minus1 = slice->num_ref_idx_l0_active_minus1;
-    sp->num_ref_idx_l1_active_minus1 = slice->num_ref_idx_l1_active_minus1;
-
-    /* Fill reference list 0 (P/B slice forward references) */
-    for (int i = 0; i <= slice->num_ref_idx_l0_active_minus1 && i < V4L2_H264_REF_LIST_LEN; i++) {
-        const VAPictureH264 *ref = &slice->RefPicList0[i];
-        if (ref->flags & VA_PICTURE_H264_INVALID)
-            continue;
-        sp->ref_pic_list0[i].fields = V4L2_H264_FRAME_REF;
-        /* Find this reference's timestamp in the DPB */
-        sp->ref_pic_list0[i].index = i;  /* Simplified index mapping */
-    }
-
-    /* Fill reference list 1 (B slice backward references) */
-    for (int i = 0; i <= slice->num_ref_idx_l1_active_minus1 && i < V4L2_H264_REF_LIST_LEN; i++) {
-        const VAPictureH264 *ref = &slice->RefPicList1[i];
-        if (ref->flags & VA_PICTURE_H264_INVALID)
-            continue;
-        sp->ref_pic_list1[i].fields = V4L2_H264_FRAME_REF;
-        sp->ref_pic_list1[i].index = i;
-    }
-
-    /* Flags */
-    sp->flags = 0;
-    if (slice->direct_spatial_mv_pred_flag)
-        sp->flags |= V4L2_H264_SLICE_FLAG_DIRECT_SPATIAL_MV_PRED;
-}
-
-/*
  * Main H.264 decode pipeline
  *
  * Called from v4l2sl_end_picture when all VA-API buffers have been collected.
@@ -416,12 +368,6 @@ VAStatus v4l2sl_h264_translate(struct v4l2sl_context *ctx,
      * kernel parses the slice header itself from the Annex B bitstream.
      */
 
-    /* Get the driver_data for DPB timestamp lookup */
-    /* We need access to driver_data for timestamp resolution. Walk up from context. */
-    /* For now, pass NULL for dd — DPB timestamps will be 0, which means
-     * the first few frames (with no references) will work fine.
-     * Multi-reference decoding needs the actual timestamps. */
-
     h264_fill_sps(&sps, pic_param, ctx->profile);
     h264_fill_pps(&pps, pic_param, slice_param);
     h264_fill_decode_params(&dec, pic_param, ctx->driver_data, slice_param);
@@ -430,9 +376,6 @@ VAStatus v4l2sl_h264_translate(struct v4l2sl_context *ctx,
         h264_fill_scaling_matrix(&sm, iq_matrix);
     else
         memset(&sm, 0, sizeof(sm));
-
-    if (0 && slice_param)
-        h264_fill_slice_params(NULL, NULL, NULL, NULL);
 
     /*
      * Step 2: Set V4L2 ext controls bound to the request
