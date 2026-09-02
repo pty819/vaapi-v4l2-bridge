@@ -33,16 +33,6 @@ uint32_t v4l2sl_capture_fourcc_from_sps(int bit_depth_minus8, int chroma_format_
     return ten ? V4L2_PIX_FMT_NV15 : V4L2_PIX_FMT_NV12;
 }
 
-int v4l2sl_capture_is_10bit(uint32_t fourcc)
-{
-    return fourcc == V4L2_PIX_FMT_NV15 || fourcc == V4L2_PIX_FMT_NV20;
-}
-
-int v4l2sl_capture_is_422(uint32_t fourcc)
-{
-    return fourcc == V4L2_PIX_FMT_NV16 || fourcc == V4L2_PIX_FMT_NV20;
-}
-
 uint32_t v4l2sl_va_fourcc_for_capture(uint32_t v4l2_fourcc)
 {
     switch (v4l2_fourcc) {

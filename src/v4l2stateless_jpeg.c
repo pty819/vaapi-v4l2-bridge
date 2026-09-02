@@ -30,14 +30,6 @@ static int xioctl(int fd, unsigned long r, void *p)
     return n;
 }
 
-static struct v4l2sl_surface *
-surface_by_id(struct v4l2sl_driver_data *dd, VASurfaceID id)
-{
-    if (!dd || id == VA_INVALID_ID || (unsigned)id >= 4096)
-        return NULL;
-    return dd->surfaces[id];
-}
-
 static struct v4l2sl_buffer *
 buffer_by_id(struct v4l2sl_context *ctx, VABufferID id)
 {
@@ -401,6 +393,5 @@ out:
     if (st == VA_STATUS_SUCCESS)
         fprintf(stderr, "v4l2stateless: JPEG encoded %dx%d quality=%d bytes=%d planes=%u\n",
                 w, h, quality, jpeg_size, ofmt.fmt.pix_mp.num_planes);
-    (void)surface_by_id;
     return st;
 }

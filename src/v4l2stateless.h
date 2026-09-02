@@ -356,8 +356,6 @@ VAStatus v4l2sl_vpp_query_pipeline_caps(VAProcPipelineCaps *caps);
 /* Pixel format helpers (v4l2stateless_format.c) */
 uint32_t v4l2sl_capture_fourcc_from_rt(unsigned int rt_format);
 uint32_t v4l2sl_capture_fourcc_from_sps(int bit_depth_minus8, int chroma_format_idc);
-int v4l2sl_capture_is_10bit(uint32_t fourcc);
-int v4l2sl_capture_is_422(uint32_t fourcc);
 uint32_t v4l2sl_va_fourcc_for_capture(uint32_t v4l2_fourcc);
 uint32_t v4l2sl_drm_fourcc_for_capture(uint32_t v4l2_fourcc);
 uint32_t v4l2sl_capture_plane_size(uint32_t fourcc, uint32_t stride, uint32_t aligned_h);
