@@ -76,4 +76,20 @@ if [[ "$has_disable_features" = 0 ]]; then
   args+=(--disable-features=Vulkan)
 fi
 
+# CPU pinning (2026-09-03): keep Chrome on the 4 big A76 cores.
+# RK3588 layout: 0-3 = A55 cluster, 4-5 / 6-7 = two A76 clusters. This
+# kernel has no EAS, so the plain scheduler spreads Chrome's frame-deadline
+# threads (GPU process, video-tab renderer) evenly onto the A55s too, which
+# costs frame pacing (a deadline thread landing on an A55 runs ~2x slower).
+# kwin/plasma are deliberately NOT pinned: steady state parks them on the
+# now-idle little cores, and compositing bursts can still borrow big cores.
+#  - CHROME_PIN_CPUS="4-7" (default); set "0-7" or "" to disable.
+#  - If the caller already restricted affinity (e.g. `taskset -c 0-3
+#    google-chrome-stable`), respect it and do not override.
+PIN_CPUS="${CHROME_PIN_CPUS:-4-7}"
+CUR_AFFINITY=$(awk '/^Cpus_allowed_list/ {print $2}' /proc/self/status)
+if [[ -n "$PIN_CPUS" && "$PIN_CPUS" != "0-7" && "$CUR_AFFINITY" = "0-7" ]]; then
+  exec taskset -c "$PIN_CPUS" "$CHROME_REAL" "${args[@]}" "$@"
+fi
+
 exec "$CHROME_REAL" "${args[@]}" "$@"

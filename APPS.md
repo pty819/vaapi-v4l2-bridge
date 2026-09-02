@@ -162,6 +162,14 @@ Operating notes:
 - Black-video triage: `LD_PRELOAD` `tests/ioctl_interpose.so` into Chrome
   and read stderr — `PRIME_FD_TO_HANDLE target=/dmabuf:` is the good path;
   `target=/memfd:v4l2sl-surf` means the memfd export lie came back.
+- **Chrome is pinned to the big cores (4-7)** by the wrapper
+  (`taskset -c 4-7`): this kernel has no EAS, so the plain scheduler was
+  spreading Chrome's frame-deadline threads (GPU process, video renderer)
+  evenly onto the A55s, costing frame pacing. Override with
+  `CHROME_PIN_CPUS=0-7` (or empty) to disable; launching under your own
+  `taskset` is respected. kwin/plasma are deliberately left unpinned —
+  steady state parks them on the now-idle little cores, and compositing
+  bursts can still borrow big cores.
 
 ---
 
