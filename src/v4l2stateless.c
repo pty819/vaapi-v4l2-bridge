@@ -719,8 +719,32 @@ v4l2sl_destroy_surfaces(VADriverContextP ctx,
     for (int i = 0; i < num_surfaces; i++) {
         struct v4l2sl_surface *surface = v4l2sl_surface_by_id(driver_data,
                                                               surfaces[i]);
-        if (surface)
-            destroy_surface_locked(driver_data, surface, surfaces[i]);
+        if (!surface)
+            continue;
+        /* Detach from every context referencing the surface before freeing:
+         * hand a still-held capture slot back to its pool (destroying
+         * surfaced frames mid-session must not drain the 24-slot pool),
+         * drop render-target registrations so a recycled ID is never
+         * misidentified, and clear any in-flight current_surface. */
+        for (struct v4l2sl_context *c = driver_data->contexts; c; c = c->next) {
+            int listed = 0;
+
+            for (int k = 0; k < c->num_render_targets; k++) {
+                if (c->render_targets[k] == surfaces[i]) {
+                    c->render_targets[k] = VA_INVALID_ID;
+                    listed = 1;
+                }
+            }
+            if (listed && surface->buf_index >= 0 &&
+                surface->buf_index < c->capture_bufs_allocd)
+                v4l2sl_cap_pool_push(c, surface->buf_index);
+            if (c->current_surface == surface) {
+                c->current_surface = NULL;
+                c->current_surface_id = VA_INVALID_ID;
+            }
+        }
+        surface->buf_index = -1;
+        destroy_surface_locked(driver_data, surface, surfaces[i]);
     }
     pthread_mutex_unlock(&g_v4l2sl_lock);
 
