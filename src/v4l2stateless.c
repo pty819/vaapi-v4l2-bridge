@@ -156,6 +156,7 @@ v4l2sl_terminate(VADriverContextP ctx)
             buf = next;
         }
         v4l2sl_release_context_device(context);
+        free(context->device_path);
         free(context->render_targets);
         free(context);
     }
@@ -768,13 +769,19 @@ v4l2sl_create_context(VADriverContextP ctx,
     while (config && config->config_id != config_id)
         config = config->next;
 
-    if (config) {
-        context->codec = config->codec;
-        context->profile = config->profile;
-        context->entrypoint = config->entrypoint;
-        context->rt_format = config->rt_format;
-        context->device_path = config->device_path;
+    if (!config) {
+        pthread_mutex_unlock(&g_v4l2sl_lock);
+        free(context->render_targets);
+        free(context);
+        return VA_STATUS_ERROR_INVALID_CONFIG;
     }
+    context->codec = config->codec;
+    context->profile = config->profile;
+    context->entrypoint = config->entrypoint;
+    context->rt_format = config->rt_format;
+    /* Own copy: vaDestroyConfig frees the config node while live contexts
+     * keep using the path (device reopen on recapture). */
+    context->device_path = strdup(config->device_path);
     context->v4l2_fd = -1;
     context->media_fd = -1;
     context->request_fd = -1;
@@ -894,6 +901,7 @@ v4l2sl_create_context(VADriverContextP ctx,
 
 fail:
     v4l2sl_release_context_device(context);
+    free(context->device_path);
     free(context->render_targets);
     free(context);
     pthread_mutex_unlock(&g_v4l2sl_lock);
@@ -913,6 +921,7 @@ v4l2sl_destroy_context(VADriverContextP ctx, VAContextID context_id)
             *pp = context->next;
 
             v4l2sl_release_context_device(context);
+            free(context->device_path);
             free(context->render_targets);
             free(context);
             pthread_mutex_unlock(&g_v4l2sl_lock);

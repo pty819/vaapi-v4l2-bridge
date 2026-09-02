@@ -95,7 +95,7 @@ struct v4l2sl_context {
     VAProfile profile;
     VAEntrypoint entrypoint;
     unsigned int rt_format;
-    const char *device_path;
+    char *device_path;       /* owned strdup of the config's device path */
     struct v4l2sl_driver_data *driver_data;  /* back-pointer for surface lookup */
     int width;
     int height;
