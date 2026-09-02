@@ -176,13 +176,6 @@ static void copy_path(char *dst, unsigned dst_len, const char *src)
     dst[dst_len - 1] = 0;
 }
 
-int v4l2sl_scan_decoder_paths(char *h264_out, char *hevc_out, char *av1_out,
-                              unsigned out_len)
-{
-    return v4l2sl_scan_decoder_paths_ex(h264_out, hevc_out, av1_out,
-                                        NULL, NULL, out_len);
-}
-
 int v4l2sl_scan_decoder_paths_ex(char *h264_out, char *hevc_out, char *av1_out,
                                  char *vp8_out, char *mpeg2_out,
                                  unsigned out_len)
@@ -299,58 +292,6 @@ static int fourcc_in(const uint32_t *list, unsigned n, uint32_t fcc)
     for (i = 0; i < n; i++)
         if (list[i] == fcc)
             return 1;
-    return 0;
-}
-
-int v4l2sl_scan_aux_paths(char *jpeg_enc_out, char *vpp_out, unsigned out_len)
-{
-    int i;
-
-    if (jpeg_enc_out && out_len)
-        jpeg_enc_out[0] = 0;
-    if (vpp_out && out_len)
-        vpp_out[0] = 0;
-
-    for (i = 0; i < 64; i++) {
-        char path[64];
-        uint32_t out_fcc[V4L2SL_PROBE_MAX_FOURCCS];
-        uint32_t cap_fcc[V4L2SL_PROBE_MAX_FOURCCS];
-        struct v4l2_capability cap;
-        struct v4l2_queryctrl qc;
-        int fd, nout, ncap;
-        int has_jpeg, has_coded, has_rotate;
-
-        snprintf(path, sizeof(path), "/dev/video%d", i);
-        fd = open(path, O_RDWR | O_NONBLOCK);
-        if (fd < 0)
-            continue;
-        memset(&cap, 0, sizeof(cap));
-        if (ioctl(fd, VIDIOC_QUERYCAP, &cap) < 0 ||
-            !(cap.capabilities & V4L2_CAP_VIDEO_M2M_MPLANE)) {
-            close(fd);
-            continue;
-        }
-        nout = v4l2sl_enum_output_fourccs(fd, out_fcc, V4L2SL_PROBE_MAX_FOURCCS);
-        ncap = v4l2sl_enum_capture_fourccs(fd, cap_fcc, V4L2SL_PROBE_MAX_FOURCCS);
-        memset(&qc, 0, sizeof(qc));
-        qc.id = V4L2_CID_ROTATE;
-        has_rotate = ioctl(fd, VIDIOC_QUERYCTRL, &qc) == 0;
-        close(fd);
-        if (nout <= 0 || ncap <= 0)
-            continue;
-
-        has_jpeg = fourcc_in(cap_fcc, (unsigned)ncap, V4L2_PIX_FMT_JPEG);
-        has_coded = fourcc_in(out_fcc, (unsigned)nout, V4L2_PIX_FMT_H264_SLICE) ||
-                    fourcc_in(out_fcc, (unsigned)nout, V4L2_PIX_FMT_HEVC_SLICE) ||
-                    fourcc_in(out_fcc, (unsigned)nout, V4L2_PIX_FMT_AV1_FRAME) ||
-                    fourcc_in(out_fcc, (unsigned)nout, V4L2_PIX_FMT_VP8_FRAME) ||
-                    fourcc_in(out_fcc, (unsigned)nout, V4L2_PIX_FMT_MPEG2_SLICE);
-
-        if (has_jpeg && jpeg_enc_out && out_len && !jpeg_enc_out[0])
-            copy_path(jpeg_enc_out, out_len, path);
-        if (has_rotate && !has_coded && !has_jpeg && vpp_out && out_len && !vpp_out[0])
-            copy_path(vpp_out, out_len, path);
-    }
     return 0;
 }
 
