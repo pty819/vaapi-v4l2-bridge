@@ -39,7 +39,6 @@ has_ignore_blocklist=0
 has_disable_gpu_sandbox=0
 has_ozone=0
 has_gl=0
-has_enable_features=0
 has_disable_features=0
 for a in "$@"; do
   case "$a" in
@@ -49,7 +48,6 @@ for a in "$@"; do
     --disable-gpu-sandbox) has_disable_gpu_sandbox=1 ;;
     --ozone-platform=*|--ozone-platform-hint|--ozone-platform-hint=*) has_ozone=1 ;;
     --use-gl=*|--use-angle=*) has_gl=1 ;;
-    --enable-features|--enable-features=*) has_enable_features=1 ;;
     --disable-features|--disable-features=*) has_disable_features=1 ;;
   esac
 done
@@ -61,13 +59,17 @@ done
 # Pure Wayland + ANGLE/GLES with Vulkan off (see header comment).
 [[ "$has_ozone" = 0 ]] && args+=(--ozone-platform=wayland)
 [[ "$has_gl" = 0 ]] && args+=(--use-gl=angle --use-angle=gles)
-if [[ "$has_enable_features" = 0 ]]; then
-  args+=(--enable-features=AcceleratedVideoDecoder,AcceleratedVideoDecodeLinuxGL,VaapiIgnoreDriverChecks)
-fi
 if [[ "$has_disable_features" = 0 ]]; then
-  # Vulkan: Ozone-Wayland has no present path. ZeroCopyGL: memfd is not a
-  # dma-buf, so EGLImage import always fails and spam-logs (see header).
-  args+=(--disable-features=Vulkan,AcceleratedVideoDecodeLinuxZeroCopyGL)
+  # Vulkan: Ozone-Wayland has no present path.
+  # Do NOT disable AcceleratedVideoDecodeLinuxZeroCopyGL: the per-frame
+  # EGLImage import on our memfd surfaces fails and logs (known noise,
+  # ~26 lines/s), but Chrome then falls back to the CPU-copy path and
+  # hardware decode keeps working. Disabling the feature instead pushes
+  # VaapiVideoDecoder into the ImageProcessor output path, which does not
+  # exist on this platform ("Unable to find ImageProcessor to convert
+  # format", CroStatus 6) and Chrome silently drops to FFmpeg software
+  # decode for the whole session (verified live.bilibili.com 2026-09-02).
+  args+=(--disable-features=Vulkan)
 fi
 
 exec "$CHROME_REAL" "${args[@]}" "$@"
