@@ -61,15 +61,26 @@ done
 [[ "$has_gl" = 0 ]] && args+=(--use-gl=angle --use-angle=gles)
 if [[ "$has_disable_features" = 0 ]]; then
   # Vulkan: Ozone-Wayland has no present path.
-  # Do NOT disable AcceleratedVideoDecodeLinuxZeroCopyGL: the per-frame
-  # EGLImage import on our memfd surfaces fails and logs (known noise,
-  # ~26 lines/s), but Chrome then falls back to the CPU-copy path and
-  # hardware decode keeps working. Disabling the feature instead pushes
-  # VaapiVideoDecoder into the ImageProcessor output path, which does not
-  # exist on this platform ("Unable to find ImageProcessor to convert
-  # format", CroStatus 6) and Chrome silently drops to FFmpeg software
-  # decode for the whole session (verified live.bilibili.com 2026-09-02).
-  args+=(--disable-features=Vulkan)
+  #
+  # 2026-09-02 late: hardware video decode is DISABLED for now. The full
+  # matrix of outcomes with our memfd-backed VA surfaces (VPU dma-buf
+  # export is banned - chip bug):
+  #   GL backend (default):    VaapiVideoDecoder decodes on the VPU but
+  #                            Chrome never reads frames back (0 derive/
+  #                            get_image calls); the per-frame
+  #                            eglCreateImage on memfd fails and the video
+  #                            shows BLACK. There is no CPU fallback in
+  #                            this path.
+  #   DmaBuf backend (disable AcceleratedVideoDecodeLinuxGL): needs an
+  #                            importable output or an image processor;
+  #                            neither exists here -> init fails -> Chrome
+  #                            silently falls back to FFmpeg software.
+  #   AcceleratedVideoDecoder off: FFmpeg software; the picture works.
+  # Until the driver grows GBM-backed display surfaces (allocate a gbm_bo
+  # for Chrome-visible surfaces and copy into it; VPU buffers stay in
+  # memfd so the CMA/IOMMU hazard is untouched), software decode is the
+  # only configuration that actually shows a picture.
+  args+=(--disable-features=Vulkan,AcceleratedVideoDecoder)
 fi
 
 exec "$CHROME_REAL" "${args[@]}" "$@"

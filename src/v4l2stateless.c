@@ -1813,6 +1813,19 @@ v4l2sl_export_surface_handle(VADriverContextP ctx, VASurfaceID surface_id,
         pthread_mutex_unlock(&g_v4l2sl_lock);
         return VA_STATUS_ERROR_UNSUPPORTED_MEMORY_TYPE;
     }
+    /*
+     * Decode surfaces live in memfd (VPU dma-buf export is banned: the
+     * chip/CMA+IOMMU path hangs when the GPU still holds the buffer).
+     * Handing a memfd out as DRM_PRIME makes clients try to EGL-import
+     * it every frame: the import fails (EGL_BAD_ALLOC spam) and, in
+     * Chrome's zero-copy-GL output path, the frame is presented black
+     * because nothing ever reads the surface back. Fail cleanly instead
+     * so clients fall back to vaGetImage/vaDeriveImage CPU readback.
+     */
+    if (surf->buf_index >= 0 && !surf->cpu_ptr) {
+        pthread_mutex_unlock(&g_v4l2sl_lock);
+        return VA_STATUS_ERROR_UNIMPLEMENTED;
+    }
     if (surf->dma_buf_fd < 0)
         v4l2sl_surface_alloc_export_fd(surf);
     if (surf->dma_buf_fd < 0) {
