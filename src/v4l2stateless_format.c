@@ -218,11 +218,48 @@ void v4l2sl_nv20_to_yuy2(uint8_t *dst, uint32_t dst_stride,
     }
 }
 
+void v4l2sl_nv20_to_y210(uint8_t *dst, uint32_t dst_stride,
+                         const uint8_t *src, uint32_t src_stride,
+                         uint32_t src_aligned_h, int width, int height)
+{
+    /* NV20 (packed 10-bit, Y plane + full-height UV plane) -> Y210
+     * (Y0 U Y1 V in little-endian 16-bit containers, value << 6). */
+    int y, x;
+    int rows = height;
+    const uint8_t *src_uv = src + (size_t)src_stride * src_aligned_h;
+    uint16_t y10[4096], uv10[4096];
+
+    if (rows > (int)src_aligned_h)
+        rows = (int)src_aligned_h;
+    if (width > 4096)
+        width = 4096;
+
+    for (y = 0; y < rows; y++) {
+        uint16_t *d = (uint16_t *)(dst + (size_t)y * dst_stride);
+        unpack_le40_to_p010(src + (size_t)y * src_stride, y10, width);
+        unpack_le40_to_p010(src_uv + (size_t)y * src_stride, uv10, width);
+        for (x = 0; x + 1 < width; x += 2) {
+            d[0] = y10[x];
+            d[1] = uv10[x];
+            d[2] = y10[x + 1];
+            d[3] = uv10[x + 1];
+            d += 4;
+        }
+        if (x < width) {
+            d[0] = y10[x];
+            d[1] = uv10[x];
+            d[2] = y10[x];
+            d[3] = uv10[x];
+        }
+    }
+}
+
 uint32_t v4l2sl_va_image_size(uint32_t va_fourcc, uint32_t stride, uint32_t height)
 {
     switch (va_fourcc) {
     case VA_FOURCC_P010:
         return stride * height * 3 / 2;
+    case VA_FOURCC_Y210:
     case VA_FOURCC_YUY2:
         return stride * height;
     case VA_FOURCC_ARGB:
@@ -239,6 +276,8 @@ uint32_t v4l2sl_default_image_stride(uint32_t va_fourcc, int width)
     switch (va_fourcc) {
     case VA_FOURCC_P010:
         return (uint32_t)width * 2;
+    case VA_FOURCC_Y210:
+        return (uint32_t)width * 4;
     case VA_FOURCC_YUY2:
         return (uint32_t)width * 2;
     case VA_FOURCC_ARGB:

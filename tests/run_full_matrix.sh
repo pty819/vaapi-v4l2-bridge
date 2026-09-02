@@ -170,6 +170,10 @@ enc "$CLIP/h264_4k.mp4" -f lavfi -i testsrc=size=3840x2160:rate=30:duration=1 \
 	  -pix_fmt yuv420p -c:v libx264 -preset ultrafast -profile:v high -g 25 -bf 0
 	enc "$CLIP/h264_10.mp4" -f lavfi -i testsrc=size=1280x720:rate=30:duration=1 \
 	  -pix_fmt yuv420p10le -c:v libx264 -preset ultrafast -profile:v high10 -frames:v 8
+	enc "$CLIP/h264_422_idr10.h264" -f lavfi -i testsrc=size=1280x720:rate=30:duration=1 \
+	  -pix_fmt yuv422p10le -c:v libx264 -preset ultrafast -g 1 -keyint_min 1 -sc_threshold 0 -frames:v 8 -f h264
+	enc "$CLIP/h264_422_idr8.h264" -f lavfi -i testsrc=size=1280x720:rate=30:duration=1 \
+	  -pix_fmt yuv422p -c:v libx264 -preset ultrafast -g 1 -keyint_min 1 -sc_threshold 0 -frames:v 8 -f h264
 
 # HEVC
 enc "$CLIP/hevc_main.mp4" -f lavfi -i testsrc=size=1920x1080:rate=30:duration=4 \
@@ -230,6 +234,61 @@ pair_sw "$CLIP/h264_4k.mp4" 8 h264-4k
 	elif diff -q "$OUT/h26410-hw.md5" "$OUT/h26410-sw.md5" >/dev/null; then
 	  echo "MD5_MATCH h26410"; pass=$((pass+1))
 	else echo "MD5_DIFF h26410"; fail=$((fail+1)); fi
+
+	# H.264 High 4:2:2 — stock ffmpeg cannot reach the bridge for 4:2:2
+	# (h264 get_pixel_format only offers VAAPI for 4:2:0, and the vaapi
+	# profile map has no H264_HIGH_422 entry), so drive the VA-API path
+	# with tests/va_h264422_client.c and the kernel path with GST.
+	cc -O2 -Wall -o "$OUT/va422" tests/va_h264422_client.c \
+	  $(pkg-config --cflags --libs libva libva-drm) || { echo CC_FAIL h264422; fail=$((fail+1)); }
+	for depth in 10:Y210:y210le:NV20 8:YUY2:yuyv422:NV16; do
+	  d="${depth%%:*}"; rest="${depth#*:}"
+	  img="${rest%%:*}"; rest="${rest#*:}"
+	  pfmt="${rest%%:*}"; cap="${rest##*:}"
+	  clip="$CLIP/h264_422_idr${d}.h264"
+	  LIBVA_DRIVER_NAME=v4l2stateless "$OUT/va422" /dev/dri/renderD128 "$clip" "$d" \
+	    >"$OUT/h264422${d}-va.raw" 2>"$OUT/h264422${d}-va.stderr"
+	  v4=$?
+	  if [ "$v4" -ne 0 ]; then echo "VA422_EXIT $v4 h264422-$d"; fail=$((fail+1)); continue; fi
+	  grep -q "fourcc=$cap" "$OUT/h264422${d}-va.stderr" \
+	    || { echo "NO_$cap h264422-$d"; fail=$((fail+1)); continue; }
+	  $FF -hide_banner -loglevel error -f rawvideo -framerate 30 -s 1280x720 \
+	    -pix_fmt "$pfmt" -i "$OUT/h264422${d}-va.raw" -frames:v 8 \
+	    -f framemd5 -y "$OUT/h264422${d}-va.md5"
+	  $FF -hide_banner -loglevel error -i "$clip" -pix_fmt "$pfmt" -frames:v 8 \
+	    -f framemd5 -y "$OUT/h264422${d}-sw.md5"
+	  if diff <(grep -v '^#' "$OUT/h264422${d}-va.md5") \
+	           <(grep -v '^#' "$OUT/h264422${d}-sw.md5") >/dev/null; then
+	    echo "MD5_MATCH h264422-$d-va"; pass=$((pass+1))
+	  else echo "MD5_DIFF h264422-$d-va"; fail=$((fail+1)); fi
+	done
+	# kernel-level: GST v4l2sl vs GST software (8-bit direct, 10-bit via
+	# tests/nv20_unpack.py because videoconvert rounds 10-bit unpacking)
+	gst-launch-1.0 -q filesrc location="$CLIP/h264_422_idr8.h264" ! parsebin ! v4l2slh264dec \
+	  ! videoconvert ! video/x-raw,format=Y42B ! filesink location="$OUT/h264422-8gst.raw" 2>/dev/null
+	gst-launch-1.0 -q filesrc location="$CLIP/h264_422_idr8.h264" ! parsebin ! avdec_h264 \
+	  ! videoconvert ! video/x-raw,format=Y42B ! filesink location="$OUT/h264422-8sw.raw" 2>/dev/null
+	$FF -hide_banner -loglevel error -f rawvideo -s 1280x720 -pix_fmt yuv422p -i "$OUT/h264422-8gst.raw" \
+	  -frames:v 8 -f framemd5 -y "$OUT/h264422-8gst.md5"
+	$FF -hide_banner -loglevel error -f rawvideo -s 1280x720 -pix_fmt yuv422p -i "$OUT/h264422-8sw.raw" \
+	  -frames:v 8 -f framemd5 -y "$OUT/h264422-8sw.md5"
+	if diff <(grep -v '^#' "$OUT/h264422-8gst.md5") \
+	         <(grep -v '^#' "$OUT/h264422-8sw.md5") >/dev/null; then
+	  echo "GST_MATCH h264422-8"; pass=$((pass+1))
+	else echo "GST_DIFF h264422-8"; fail=$((fail+1)); fi
+	gst-launch-1.0 -q filesrc location="$CLIP/h264_422_idr10.h264" ! parsebin ! v4l2slh264dec \
+	  ! video/x-raw,format=NV16_10LE40 ! filesink location="$OUT/h264422-10gst.raw" 2>/dev/null
+	gst-launch-1.0 -q filesrc location="$CLIP/h264_422_idr10.h264" ! parsebin ! avdec_h264 \
+	  ! video/x-raw,format=I422_10LE ! filesink location="$OUT/h264422-10sw.raw" 2>/dev/null
+	python3 tests/nv20_unpack.py "$OUT/h264422-10gst.raw" "$OUT/h264422-10up.raw" 8 1280 720 2764800
+	$FF -hide_banner -loglevel error -f rawvideo -s 1280x720 -pix_fmt yuv422p10le -i "$OUT/h264422-10up.raw" \
+	  -frames:v 8 -f framemd5 -y "$OUT/h264422-10gst.md5"
+	$FF -hide_banner -loglevel error -f rawvideo -s 1280x720 -pix_fmt yuv422p10le -i "$OUT/h264422-10sw.raw" \
+	  -frames:v 8 -f framemd5 -y "$OUT/h264422-10sw.md5"
+	if diff <(grep -v '^#' "$OUT/h264422-10gst.md5") \
+	         <(grep -v '^#' "$OUT/h264422-10sw.md5") >/dev/null; then
+	  echo "GST_MATCH h264422-10"; pass=$((pass+1))
+	else echo "GST_DIFF h264422-10"; fail=$((fail+1)); fi
 
 pair_sw "$CLIP/hevc_main.mp4" 120 hevc-main
 pair_sw "$CLIP/hevc_wpp.mp4" 120 hevc-wpp

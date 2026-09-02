@@ -2,7 +2,7 @@
 
 写于 **2026-08-27**，刷新 **2026-08-29**。机器：Orange Pi 5 NAS `192.168.1.21`，Armbian 26.8.3 resolute，kernel **7.1.8-edge-rockchip64**。
 
-全量矩阵 `tests/run_full_matrix.sh`：**PASS=21 FAIL=0**（新增 h26410 条目）。Git 仓库在 NAS：`https://github.com/pty819/vaapi-v4l2-bridge.git`。
+全量矩阵 `tests/run_full_matrix.sh`：**PASS=25 FAIL=0**（新增 h26410 + h264422×4 条目）。Git 仓库在 NAS：`https://github.com/pty819/vaapi-v4l2-bridge.git`。
 
 安装 `.so`：`/usr/lib/aarch64-linux-gnu/dri/v4l2stateless_drv_video.so`。
 
@@ -196,7 +196,7 @@ Debian/XtraDeb 的 arm64 Chromium 编的是 `use_v4l2_codec`，直连 `/dev/vide
 - **VP9**：本机 hantro 无 VP9 fourcc，没做
 - **浏览器强制硬解 VP9 / 10-bit HDR**：不要开 `media.hardware-video-decoding.force-enabled`，这颗 VPU 会被打挂
 - **浏览器中途改分辨率**：驱动会对 capture 做 STREAMOFF / S_FMT / REQBUFS renegotiate；Chrome/Firefox 这条没有矩阵覆盖
-- **H.264 High422**：advertised；ffmpeg 的 vaapi hwaccel 经常仍走软解
+- **H.264 High422 已验收（09-02 晚）**：8/10bit hw==sw bit-exact。ffmpeg 到不了桥是上游双门控（h264 get_pixel_format 只给 4:2:0 加 VAAPI 候选 + vaapi profile map 无 H264_HIGH_422），不是桥的问题；VA 路径用 tests/va_h264422_client.c 全链路驱动，内核路径 GST v4l2slh264dec 对 avdec_h264（10-bit 经 tests/nv20_unpack.py 解包含 colmv 尾）。NV20 capture stride=1600、帧尾 460800B 是 colmv；GST videoconvert 的 10bit 解包有 ±1 舍入，勿用它做位级判据
 - 官方 Chrome **必须**走包装脚本（`scripts/google-chrome-vaapi` / `/usr/local/bin/google-chrome-stable`）。裸跑 `/usr/bin/google-chrome-stable` 会跳过非 PCI 的 panthor
 
 ---

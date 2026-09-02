@@ -623,7 +623,8 @@ v4l2sl_create_surfaces2(VADriverContextP ctx,
     }
 
     if (fourcc != VA_FOURCC_NV12 && fourcc != VA_FOURCC_P010 &&
-        fourcc != VA_FOURCC_YUY2 && fourcc != VA_FOURCC_I420 &&
+        fourcc != VA_FOURCC_YUY2 && fourcc != VA_FOURCC_Y210 &&
+        fourcc != VA_FOURCC_I420 &&
         fourcc != VA_FOURCC_ARGB && fourcc != VA_FOURCC_BGRA &&
         fourcc != VA_FOURCC_BGRX)
         return VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT;
@@ -1357,6 +1358,7 @@ v4l2sl_query_image_formats(VADriverContextP ctx,
         { VA_FOURCC_NV12, 12, 12 },
         { VA_FOURCC_P010, 24, 24 },
         { VA_FOURCC_YUY2, 16, 16 },
+        { VA_FOURCC_Y210, 20, 32 },
         { VA_FOURCC_I420, 12, 12 },
         { VA_FOURCC_BGRX, 32, 32 },
         { VA_FOURCC_BGRA, 32, 32 },
@@ -1550,7 +1552,8 @@ v4l2sl_create_image(VADriverContextP ctx, VAImageFormat *format,
     if (!format)
         return VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT;
     if (format->fourcc != VA_FOURCC_NV12 && format->fourcc != VA_FOURCC_P010 &&
-        format->fourcc != VA_FOURCC_YUY2 && format->fourcc != VA_FOURCC_I420 &&
+        format->fourcc != VA_FOURCC_YUY2 && format->fourcc != VA_FOURCC_Y210 &&
+        format->fourcc != VA_FOURCC_I420 &&
         format->fourcc != VA_FOURCC_BGRX && format->fourcc != VA_FOURCC_BGRA &&
         format->fourcc != VA_FOURCC_ARGB)
         return VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT;
@@ -1574,6 +1577,7 @@ v4l2sl_create_image(VADriverContextP ctx, VAImageFormat *format,
     ib->buffer_id = id;
     ib->type = VAImageBufferType;
     ib->size = data_size;
+    ib->fourcc = format->fourcc;
     ib->next = driver_data->orphan_buffers;
     driver_data->orphan_buffers = ib;
     pthread_mutex_unlock(&g_v4l2sl_lock);
@@ -1584,7 +1588,8 @@ v4l2sl_create_image(VADriverContextP ctx, VAImageFormat *format,
     image->format = *format;
     image->width = width;
     image->height = height;
-    if (format->fourcc == VA_FOURCC_YUY2 || format->fourcc == VA_FOURCC_BGRX ||
+    if (format->fourcc == VA_FOURCC_YUY2 || format->fourcc == VA_FOURCC_Y210 ||
+        format->fourcc == VA_FOURCC_BGRX ||
         format->fourcc == VA_FOURCC_BGRA || format->fourcc == VA_FOURCC_ARGB) {
         image->num_planes = 1;
         image->pitches[0] = stride;
@@ -1641,18 +1646,19 @@ v4l2sl_get_image(VADriverContextP ctx, VASurfaceID surface,
     size_t map_size = 0;
     int copy_w = (int)width < surf->width ? (int)width : surf->width;
     int copy_h = (int)height < surf->height ? (int)height : surf->height;
-    uint32_t dst_fourcc = VA_FOURCC_NV12;
+    uint32_t dst_fourcc = ib->fourcc;
     uint32_t dst_stride;
 
-    if (cap_fcc == V4L2_PIX_FMT_NV15) {
-        dst_fourcc = VA_FOURCC_P010;
-        dst_stride = v4l2sl_default_image_stride(VA_FOURCC_P010, copy_w);
-    } else if (cap_fcc == V4L2_PIX_FMT_NV16 || cap_fcc == V4L2_PIX_FMT_NV20) {
-        dst_fourcc = VA_FOURCC_YUY2;
-        dst_stride = v4l2sl_default_image_stride(VA_FOURCC_YUY2, copy_w);
-    } else {
-        dst_stride = v4l2sl_default_image_stride(VA_FOURCC_NV12, copy_w);
+    if (!dst_fourcc) {
+        /* Legacy default when the image was made without a recorded fourcc */
+        if (cap_fcc == V4L2_PIX_FMT_NV15)
+            dst_fourcc = VA_FOURCC_P010;
+        else if (cap_fcc == V4L2_PIX_FMT_NV16 || cap_fcc == V4L2_PIX_FMT_NV20)
+            dst_fourcc = VA_FOURCC_YUY2;
+        else
+            dst_fourcc = VA_FOURCC_NV12;
     }
+    dst_stride = v4l2sl_default_image_stride(dst_fourcc, copy_w);
 
     if (surf->dma_buf_fd >= 0 && surf->buf_index >= 0) {
         map_size = v4l2sl_capture_plane_size(cap_fcc, src_stride, src_alh);
@@ -1676,14 +1682,24 @@ v4l2sl_get_image(VADriverContextP ctx, VASurfaceID surface,
         return VA_STATUS_ERROR_INVALID_SURFACE;
     }
 
-    if (dst_fourcc == VA_FOURCC_P010)
+    if (dst_fourcc == VA_FOURCC_P010 && cap_fcc == V4L2_PIX_FMT_NV15)
         v4l2sl_nv15_to_p010(dst, dst_stride, src, src_stride, src_alh, copy_w, copy_h);
+    else if (dst_fourcc == VA_FOURCC_Y210 && cap_fcc == V4L2_PIX_FMT_NV20)
+        v4l2sl_nv20_to_y210(dst, dst_stride, src, src_stride, src_alh, copy_w, copy_h);
     else if (dst_fourcc == VA_FOURCC_YUY2 && cap_fcc == V4L2_PIX_FMT_NV20)
         v4l2sl_nv20_to_yuy2(dst, dst_stride, src, src_stride, src_alh, copy_w, copy_h);
-    else if (dst_fourcc == VA_FOURCC_YUY2)
+    else if (dst_fourcc == VA_FOURCC_YUY2 && cap_fcc == V4L2_PIX_FMT_NV16)
         v4l2sl_nv16_to_yuy2(dst, dst_stride, src, src_stride, src_alh, copy_w, copy_h);
-    else
+    else if (dst_fourcc == VA_FOURCC_NV12 && cap_fcc == V4L2_PIX_FMT_NV12)
         v4l2sl_copy_nv12(dst, dst_stride, src, src_stride, src_alh, copy_w, copy_h);
+    else {
+        fprintf(stderr, "v4l2stateless: get_image: no path cap=%.4s -> %.4s\n",
+                (char *)&cap_fcc, (char *)&dst_fourcc);
+        pthread_mutex_unlock(&g_v4l2sl_lock);
+        if (mapped)
+            munmap(mapped, map_size);
+        return VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT;
+    }
 
     if (mapped)
         munmap(mapped, map_size);

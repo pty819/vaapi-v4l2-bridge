@@ -66,6 +66,7 @@ struct v4l2sl_buffer {
     unsigned int num_elements;
     void *data;
     int mmapped;             /* data from mmap (derive_image) vs malloc */
+    uint32_t fourcc;         /* VAImageBufferType: fourcc of the image */
     struct v4l2sl_buffer *next;
 };
 
@@ -355,6 +356,9 @@ void v4l2sl_nv16_to_yuy2(uint8_t *dst, uint32_t dst_stride,
                          const uint8_t *src, uint32_t src_stride,
                          uint32_t src_aligned_h, int width, int height);
 void v4l2sl_nv20_to_yuy2(uint8_t *dst, uint32_t dst_stride,
+                         const uint8_t *src, uint32_t src_stride,
+                         uint32_t src_aligned_h, int width, int height);
+void v4l2sl_nv20_to_y210(uint8_t *dst, uint32_t dst_stride,
                          const uint8_t *src, uint32_t src_stride,
                          uint32_t src_aligned_h, int width, int height);
 
