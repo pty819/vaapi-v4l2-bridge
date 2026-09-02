@@ -127,10 +127,14 @@ static const char *cached_device(struct v4l2sl_driver_data *dd, enum v4l2sl_code
  * VA-API driver VTable implementations
  */
 
+static void destroy_surface_locked(struct v4l2sl_driver_data *dd,
+                                   struct v4l2sl_surface *s, VASurfaceID id);
+
 static VAStatus
 v4l2sl_terminate(VADriverContextP ctx)
 {
     struct v4l2sl_driver_data *driver_data = ctx->pDriverData;
+    int i;
 
     if (!driver_data)
         return VA_STATUS_SUCCESS;
@@ -138,10 +142,47 @@ v4l2sl_terminate(VADriverContextP ctx)
     pthread_mutex_lock(&g_v4l2sl_lock);
     while (driver_data->contexts) {
         struct v4l2sl_context *context = driver_data->contexts;
+        struct v4l2sl_buffer *buf = context->buffers;
+
         driver_data->contexts = context->next;
+        while (buf) {
+            struct v4l2sl_buffer *next = buf->next;
+
+            if (buf->mmapped)
+                munmap(buf->data, buf->size);
+            else
+                free(buf->data);
+            free(buf);
+            buf = next;
+        }
         v4l2sl_release_context_device(context);
         free(context->render_targets);
         free(context);
+    }
+    /* Clients that terminate without destroying their surfaces (session
+     * teardown paths) still own them kernel-resource-wise: free the whole
+     * table so fds and mappings cannot leak per VA session cycle. */
+    for (i = 0; i < V4L2SL_MAX_SURFACES; i++) {
+        struct v4l2sl_surface *s = driver_data->surfaces[i];
+
+        if (s)
+            destroy_surface_locked(driver_data, s, (VASurfaceID)i);
+    }
+    while (driver_data->orphan_buffers) {
+        struct v4l2sl_buffer *buf = driver_data->orphan_buffers;
+
+        driver_data->orphan_buffers = buf->next;
+        if (buf->mmapped)
+            munmap(buf->data, buf->size);
+        else
+            free(buf->data);
+        free(buf);
+    }
+    while (driver_data->configs) {
+        struct v4l2sl_config *config = driver_data->configs;
+
+        driver_data->configs = config->next;
+        free(config);
     }
     pthread_mutex_unlock(&g_v4l2sl_lock);
 
@@ -633,6 +674,22 @@ v4l2sl_create_surfaces2(VADriverContextP ctx,
                                   num_surfaces, surfaces);
 }
 
+/* Free one surface and recycle its ID. Caller holds g_v4l2sl_lock and
+ * has already detached the surface from any context (C1 does that for
+ * the explicit destroy path; terminate frees contexts first). */
+static void
+destroy_surface_locked(struct v4l2sl_driver_data *dd,
+                       struct v4l2sl_surface *s, VASurfaceID id)
+{
+    if (s->dma_buf_fd >= 0)
+        close(s->dma_buf_fd);
+    v4l2sl_gbm_surface_destroy(s);
+    free(s->cpu_ptr);
+    free(s);
+    dd->surfaces[id] = NULL;
+    v4l2sl_surface_id_push(dd, id);
+}
+
 static VAStatus
 v4l2sl_destroy_surfaces(VADriverContextP ctx,
                         VASurfaceID *surfaces,
@@ -644,17 +701,8 @@ v4l2sl_destroy_surfaces(VADriverContextP ctx,
     for (int i = 0; i < num_surfaces; i++) {
         struct v4l2sl_surface *surface = v4l2sl_surface_by_id(driver_data,
                                                               surfaces[i]);
-        if (surface) {
-            if (surface->dma_buf_fd >= 0)
-                close(surface->dma_buf_fd);
-            v4l2sl_gbm_surface_destroy(surface);
-            free(surface->cpu_ptr);
-            free(surface);
-            driver_data->surfaces[surfaces[i]] = NULL;
-            if (driver_data->n_free_surface_ids < V4L2SL_MAX_SURFACES)
-                driver_data->free_surface_ids[driver_data->n_free_surface_ids++] =
-                    surfaces[i];
-        }
+        if (surface)
+            destroy_surface_locked(driver_data, surface, surfaces[i]);
     }
     pthread_mutex_unlock(&g_v4l2sl_lock);
 
