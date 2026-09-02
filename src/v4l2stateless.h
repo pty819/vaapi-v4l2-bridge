@@ -8,6 +8,7 @@
 
 #include <stdint.h>
 #include <pthread.h>
+#include <poll.h>
 #include <va/va.h>
 #include <va/va_backend.h>
 #include <va/va_dec_vp8.h>
@@ -307,6 +308,8 @@ int v4l2sl_mmap_output_buffers(int fd, int count, void **ptrs, uint32_t *size_ou
 int v4l2sl_set_request_controls(int request_fd, int v4l2_fd, struct v4l2_ext_controls *ctrls);
 int v4l2sl_set_global_controls(int v4l2_fd, struct v4l2_ext_controls *ctrls);
 int v4l2sl_submit_request(int request_fd);
+/* poll() wrapper that retries EINTR (device.c) */
+int v4l2sl_poll_intr(struct pollfd *fds, nfds_t n, int timeout);
 
 /* H.264 translation (v4l2stateless_h264.c) */
 void h264_fill_sps(struct v4l2_ctrl_h264_sps *sps, const VAPictureParameterBufferH264 *pic,

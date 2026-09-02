@@ -330,7 +330,7 @@ VAStatus v4l2sl_jpeg_encode(struct v4l2sl_context *ctx,
 
     pfd.fd = fd;
     pfd.events = POLLIN | POLLOUT;
-    if (poll(&pfd, 1, 2000) <= 0) {
+    if (v4l2sl_poll_intr(&pfd, 1, 2000) <= 0) {
         fprintf(stderr, "v4l2stateless: JPEG encode timeout\n");
         st = VA_STATUS_ERROR_OPERATION_FAILED;
         goto out;

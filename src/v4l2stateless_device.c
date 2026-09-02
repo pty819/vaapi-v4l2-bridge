@@ -46,6 +46,19 @@ static int xioctl(int fd, unsigned long request, void *arg)
     return r;
 }
 
+/* poll() with EINTR retry — a stray signal (profiler, SIGWINCH) must never
+ * be mistaken for a decode timeout; the decode path turns timeouts into
+ * full STREAMOFF/STREAMON queue resets. */
+int v4l2sl_poll_intr(struct pollfd *fds, nfds_t n, int timeout)
+{
+    int r;
+
+    do {
+        r = poll(fds, n, timeout);
+    } while (r < 0 && errno == EINTR);
+    return r;
+}
+
 /*
  * Open a V4L2 video device and verify it's a stateless decoder
  */
@@ -424,7 +437,7 @@ int v4l2sl_decode_submit(struct v4l2sl_context *ctx, int out_buf_idx,
         /* Recover the bitstream buffer so the pool does not leak. */
         pfd.fd = ctx->v4l2_fd;
         pfd.events = POLLOUT;
-        if (poll(&pfd, 1, 200) > 0) {
+        if (v4l2sl_poll_intr(&pfd, 1, 200) > 0) {
             done_out = v4l2sl_dequeue_buffer(ctx->v4l2_fd,
                                              V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE);
             if (done_out >= 0)
@@ -443,7 +456,7 @@ int v4l2sl_decode_submit(struct v4l2sl_context *ctx, int out_buf_idx,
 
     pfd.fd = ctx->v4l2_fd;
     pfd.events = POLLIN;
-    if (poll(&pfd, 1, 3000) <= 0) {
+    if (v4l2sl_poll_intr(&pfd, 1, 3000) <= 0) {
         fprintf(stderr, "v4l2stateless: decode timeout, resetting queues\n");
         v4l2sl_decode_reset(ctx);
         return -1;
@@ -459,7 +472,7 @@ int v4l2sl_decode_submit(struct v4l2sl_context *ctx, int out_buf_idx,
     done_out = v4l2sl_dequeue_buffer(ctx->v4l2_fd, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE);
     if (done_out < 0) {
         pfd.events = POLLOUT;
-        if (poll(&pfd, 1, 200) > 0)
+        if (v4l2sl_poll_intr(&pfd, 1, 200) > 0)
             done_out = v4l2sl_dequeue_buffer(ctx->v4l2_fd,
                                              V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE);
     }
