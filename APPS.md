@@ -125,10 +125,15 @@ kVideoDecoderName          VaapiVideoDecoder
 kIsPlatformVideoDecode     true
 ```
 
-The driver side prints `v4l2stateless: capture mmap idx=N` per decoded VPU
-buffer and `H.264 config uses /dev/videoN` per session — grep Chrome's stderr
-for a quick yes/no. All three were verified 2026-09-02 with a 1080p/60s
-testsrc clip.
+The driver side prints `H.264 config uses /dev/videoN` per session. Per-buffer
+`capture mmap idx=` lines are gated behind `V4L2SL_DEBUG=1`. Verified
+2026-09-02 with a 1080p/60s testsrc clip.
+
+The wrapper also disables `AcceleratedVideoDecodeLinuxZeroCopyGL`. Frames from
+this bridge live in a memfd, not a dma-buf, so Chrome's zero-copy EGLImage
+import always fails (`eglCreateImage` EGL_BAD_ALLOC) and used to `LOG(ERROR)`
+every frame. Hardware decode still uses `VaapiVideoDecoder`; only the doomed
+zero-copy import is skipped.
 
 ---
 

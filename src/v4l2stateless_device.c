@@ -706,8 +706,9 @@ static int v4l2sl_mmap_one_capture(struct v4l2sl_context *ctx, int index)
                     index, strerror(errno));
             return -1;
         }
-        fprintf(stderr, "v4l2stateless: capture mmap idx=%d size=%u\n",
-                index, length);
+        if (getenv("V4L2SL_DEBUG"))
+            fprintf(stderr, "v4l2stateless: capture mmap idx=%d size=%u\n",
+                    index, length);
     }
     ctx->capture_buf_ptr[index] = ptr;
     ctx->capture_buf_size = length;

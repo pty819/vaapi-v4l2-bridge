@@ -15,7 +15,13 @@
 # With the flags above: zero ANGLE errors, and chrome://media-internals
 # reports kVideoDecoderName=VaapiVideoDecoder / kIsPlatformVideoDecode=true
 # for 1080p H.264 (the v4l2stateless driver logs "capture mmap idx=" per
-# decoded VPU buffer).
+# decoded VPU buffer when V4L2SL_DEBUG is set).
+#
+# Zero-copy GL import is disabled on purpose. This bridge copies VPU frames
+# into a memfd (EXPBUF dma-buf hangs the RK3588 CMA pool), so Chrome's
+# AcceleratedVideoDecodeLinuxZeroCopyGL path always fails eglCreateImage
+# (EGL_BAD_ALLOC 0x3003) and LOG(ERROR)s every frame. Disabling that
+# feature keeps VaapiVideoDecoder but skips the doomed import+log loop.
 set -u
 export LIBVA_DRIVER_NAME="${LIBVA_DRIVER_NAME:-v4l2stateless}"
 
@@ -58,6 +64,10 @@ done
 if [[ "$has_enable_features" = 0 ]]; then
   args+=(--enable-features=AcceleratedVideoDecoder,AcceleratedVideoDecodeLinuxGL,VaapiIgnoreDriverChecks)
 fi
-[[ "$has_disable_features" = 0 ]] && args+=(--disable-features=Vulkan)
+if [[ "$has_disable_features" = 0 ]]; then
+  # Vulkan: Ozone-Wayland has no present path. ZeroCopyGL: memfd is not a
+  # dma-buf, so EGLImage import always fails and spam-logs (see header).
+  args+=(--disable-features=Vulkan,AcceleratedVideoDecodeLinuxZeroCopyGL)
+fi
 
 exec "$CHROME_REAL" "${args[@]}" "$@"
