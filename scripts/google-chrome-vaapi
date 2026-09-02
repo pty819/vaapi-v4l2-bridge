@@ -62,25 +62,12 @@ done
 if [[ "$has_disable_features" = 0 ]]; then
   # Vulkan: Ozone-Wayland has no present path.
   #
-  # 2026-09-02 late: hardware video decode is DISABLED for now. The full
-  # matrix of outcomes with our memfd-backed VA surfaces (VPU dma-buf
-  # export is banned - chip bug):
-  #   GL backend (default):    VaapiVideoDecoder decodes on the VPU but
-  #                            Chrome never reads frames back (0 derive/
-  #                            get_image calls); the per-frame
-  #                            eglCreateImage on memfd fails and the video
-  #                            shows BLACK. There is no CPU fallback in
-  #                            this path.
-  #   DmaBuf backend (disable AcceleratedVideoDecodeLinuxGL): needs an
-  #                            importable output or an image processor;
-  #                            neither exists here -> init fails -> Chrome
-  #                            silently falls back to FFmpeg software.
-  #   AcceleratedVideoDecoder off: FFmpeg software; the picture works.
-  # Until the driver grows GBM-backed display surfaces (allocate a gbm_bo
-  # for Chrome-visible surfaces and copy into it; VPU buffers stay in
-  # memfd so the CMA/IOMMU hazard is untouched), software decode is the
-  # only configuration that actually shows a picture.
-  args+=(--disable-features=Vulkan,AcceleratedVideoDecoder)
+  # Hardware video decode RE-ENABLED 2026-09-02: the bridge now exports each
+  # decode surface as a driver-owned linear GBM bo (single-object NV12
+  # dma-buf; the VPU/CMA buffers are never exported), so the zero-copy GL
+  # path's per-frame eglCreateImage succeeds and the picture shows.
+  # Verified: VaapiVideoDecoder + non-black canvas + GPU holds rkvdec.
+  args+=(--disable-features=Vulkan)
 fi
 
 exec "$CHROME_REAL" "${args[@]}" "$@"
