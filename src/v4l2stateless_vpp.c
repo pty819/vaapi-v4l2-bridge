@@ -41,14 +41,6 @@ static uint32_t va_to_v4l2_raw(uint32_t fourcc)
     }
 }
 
-static struct v4l2sl_surface *
-surf(struct v4l2sl_driver_data *dd, VASurfaceID id)
-{
-    if (!dd || id == VA_INVALID_ID || (unsigned)id >= 4096)
-        return NULL;
-    return dd->surfaces[id];
-}
-
 static const uint32_t vpp_pixel_formats[] = {
     VA_FOURCC_NV12,
     VA_FOURCC_YUY2,
@@ -168,7 +160,7 @@ VAStatus v4l2sl_vpp_run(struct v4l2sl_context *ctx,
     if (!pipe)
         return VA_STATUS_ERROR_INVALID_PARAMETER;
 
-    src = surf(ctx->driver_data, pipe->surface);
+    src = v4l2sl_surface_by_id(ctx->driver_data, pipe->surface);
     dst = ctx->current_surface;
     if (!src || !dst)
         return VA_STATUS_ERROR_INVALID_SURFACE;

@@ -85,9 +85,7 @@ static uint32_t av1_surface_order_hint(struct v4l2sl_driver_data *dd,
 {
     struct v4l2sl_surface *s;
 
-    if (!dd || sid == VA_INVALID_SURFACE || (unsigned)sid >= 4096)
-        return 0;
-    s = dd->surfaces[sid];
+    s = v4l2sl_surface_by_id(dd, sid);
     return s ? s->order_hint : 0;
 }
 
@@ -204,9 +202,7 @@ static uint8_t av1_surface_level1(struct v4l2sl_driver_data *dd, VASurfaceID sid
 {
     struct v4l2sl_surface *s;
 
-    if (!dd || sid == VA_INVALID_SURFACE || (unsigned)sid >= 4096)
-        return 0;
-    s = dd->surfaces[sid];
+    s = v4l2sl_surface_by_id(dd, sid);
     return s ? s->av1_level1 : 0;
 }
 
@@ -715,11 +711,10 @@ static void av1_fill_frame_params(struct v4l2_ctrl_av1_frame *frame,
     for (int i = 0; i < V4L2_AV1_TOTAL_REFS_PER_FRAME; i++) {
         VASurfaceID sid = pic->ref_frame_map[i];
         uint64_t ts = 0;
-        if (dd && sid != VA_INVALID_SURFACE && (unsigned)sid < 4096) {
-            struct v4l2sl_surface *s = dd->surfaces[sid];
-            if (s)
-                ts = s->timestamp;
-        }
+        struct v4l2sl_surface *s = v4l2sl_surface_by_id(dd, sid);
+
+        if (s)
+            ts = s->timestamp;
         frame->reference_frame_ts[i] = ts;
     }
     for (int i = 0; i < V4L2_AV1_REFS_PER_FRAME; i++)

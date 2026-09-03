@@ -344,9 +344,7 @@ static void release_ctx_capture_surfaces(struct v4l2sl_context *ctx)
         VASurfaceID id = ctx->render_targets[i];
         struct v4l2sl_surface *s;
 
-        if (id == VA_INVALID_ID || (unsigned)id >= 4096)
-            continue;
-        s = ctx->driver_data->surfaces[id];
+        s = v4l2sl_surface_by_id(ctx->driver_data, id);
         if (!s)
             continue;
         /* Keep the create-time memfd. Closing a V4L2 EXPBUF fd while the
@@ -1004,9 +1002,7 @@ int v4l2sl_bind_capture_export(struct v4l2sl_context *ctx)
         if (!ctx->render_targets)
             break;
         id = ctx->render_targets[i];
-        if (id == VA_INVALID_ID || (unsigned)id >= 4096)
-            continue;
-        s = ctx->driver_data->surfaces[id];
+        s = v4l2sl_surface_by_id(ctx->driver_data, id);
         if (!s)
             continue;
         if (v4l2sl_surface_grow_memfd(s, sz) < 0)
