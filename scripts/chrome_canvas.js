@@ -17,7 +17,9 @@ function get(path) {
 }
 
 async function main() {
-  const pages = (await get("/json")).filter(t => t.type === "page" && t.url.includes("live.bilibili"));
+  // Optional argv[2]: URL substring to pick the tab (default: the live room).
+  const want = process.argv[2] || "live.bilibili";
+  const pages = (await get("/json")).filter(t => t.type === "page" && t.url.includes(want));
   if (!pages.length) {
     console.log("NO_LIVE_TAB navigate a tab to a live.bilibili.com stream first");
     process.exit(1);
