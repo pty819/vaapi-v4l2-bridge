@@ -37,3 +37,20 @@ Phase 4 aims to remove 7-9 of those per frame.
 Re-run this exact procedure; expect ioctl/frame to drop by ≥5 with zero
 matrix regressions and unchanged Chrome smoke. mmap/munmap per frame should
 approach ~0.3 (persistent mappings).
+
+## After (P4 items 1-5, 2026-09-03, same 1080p path via local clip)
+
+Per-ioctl-cmd counts (22.4s window, 672 frames, REQ_QUEUE=656 cross-check):
+
+| ioctl | before (derived) | after | per frame after |
+|---|---|---|---|
+| S_EXT_CTRLS | 5/frame | 1312 | **2.0** (batch + scaling) |
+| QUERYBUF | 1/frame | 0 | **0** (memoized) |
+| MEDIA_REQUEST_ALLOC + close | 1+1/frame | 0 + REINIT 656 | **1** (reinit recycle) |
+| MEDIA_REQUEST_IOC_QUEUE | 1/frame | 656 | 1 (irreducible) |
+
+Decode-path driver ioctls: ~12/frame -> ~7/frame (−5..−6). Matrix 27/27
+and chrome smoke green after each item.
+
+Deferred (documented follow-ups): P4 items 6-8 (persistent memfd mapping,
+VPP/JPEG persistent queues, stride alignment) and P3 clusters 7-11.
