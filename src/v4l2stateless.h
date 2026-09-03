@@ -62,6 +62,11 @@ struct v4l2sl_surface {
     int buf_index;           /* V4L2 capture buffer index, -1 if not allocated */
     int memfd_fd;          /* memfd snapshot fd (CPU-readback vehicle) */
     uint32_t memfd_size;     /* current ftruncate size of memfd_fd (grow-only) */
+    void *memfd_map;         /* persistent RW mapping of memfd_fd (grow-only) */
+    uint32_t memfd_map_size; /* mapped length of memfd_map */
+    void *memfd_retired;     /* superseded mapping still held by derived images */
+    uint32_t memfd_retired_size;
+    uint32_t memfd_borrows;  /* live derived images pointing at memfd_map */
     uint64_t timestamp;      /* V4L2 timestamp for reference tracking */
     uint32_t order_hint;     /* AV1 OrderHint of the frame last decoded here */
     uint8_t av1_level1;      /* AV1 KEY / level-1 ARF (hidden skip=0,0) */
@@ -85,6 +90,8 @@ struct v4l2sl_buffer {
     unsigned int num_elements;
     void *data;
     int mmapped;             /* data from mmap (derive_image) vs malloc */
+    struct v4l2sl_surface *borrow_surf; /* mmapped==2: surface whose mapping
+                                         * is borrowed (NULL = cpu_ptr borrow) */
     uint32_t fourcc;         /* VAImageBufferType: fourcc of the image */
     uint32_t pitch;          /* VAImageBufferType: allocation stride */
     struct v4l2sl_buffer *next;
@@ -304,6 +311,10 @@ int v4l2sl_decode_submit(struct v4l2sl_context *ctx, int out_buf_idx,
 void v4l2sl_decode_reset(struct v4l2sl_context *ctx);
 int v4l2sl_surface_alloc_export_fd(struct v4l2sl_surface *s);
 int v4l2sl_surface_grow_memfd(struct v4l2sl_surface *s, uint32_t size);
+/* Persistent per-surface mapping of memfd_fd (RW shared, grow-only; the
+ * memfd itself only ever grows). Callers must NOT munmap the result —
+ * the surface owns it and releases it at destroy. NULL on failure. */
+void *v4l2sl_surface_map_memfd(struct v4l2sl_surface *s, uint32_t need);
 /* Lazy CPU backing: decode-only surfaces never pay the multi-MB calloc;
  * the first CPU writer (put_image, VPP dst, upload) allocates it. */
 int v4l2sl_surface_ensure_cpu(struct v4l2sl_surface *s);

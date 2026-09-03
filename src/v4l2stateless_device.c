@@ -943,6 +943,47 @@ int v4l2sl_surface_grow_memfd(struct v4l2sl_surface *s, uint32_t size)
     return 0;
 }
 
+/* Persistent per-surface mapping of memfd_fd (RW shared). Grow-only:
+ * when `need` exceeds the cached length the mapping is grown — via
+ * mremap, or when derived images still borrow the current mapping (a
+ * moving remap would pull the pages from under them) by parking the old
+ * one as "retired" until the last borrower releases it. Callers must
+ * NOT munmap the result — the surface owns it. NULL on failure. */
+void *v4l2sl_surface_map_memfd(struct v4l2sl_surface *s, uint32_t need)
+{
+    void *nm;
+
+    if (!s || s->memfd_fd < 0 || need == 0)
+        return NULL;
+    if (s->memfd_map && s->memfd_map_size >= need)
+        return s->memfd_map;
+    if (need > s->memfd_size && v4l2sl_surface_grow_memfd(s, need) < 0)
+        return NULL;
+    if (s->memfd_map) {
+        if (s->memfd_borrows) {
+            if (s->memfd_retired)
+                munmap(s->memfd_retired, s->memfd_retired_size);
+            s->memfd_retired = s->memfd_map;
+            s->memfd_retired_size = s->memfd_map_size;
+            nm = mmap(NULL, need, PROT_READ | PROT_WRITE, MAP_SHARED,
+                      s->memfd_fd, 0);
+        } else {
+            nm = mremap(s->memfd_map, s->memfd_map_size, need,
+                        MREMAP_MAYMOVE);
+        }
+        if (nm == MAP_FAILED)
+            return NULL;
+    } else {
+        nm = mmap(NULL, need, PROT_READ | PROT_WRITE, MAP_SHARED,
+                  s->memfd_fd, 0);
+        if (nm == MAP_FAILED)
+            return NULL;
+    }
+    s->memfd_map = nm;
+    s->memfd_map_size = need;
+    return s->memfd_map;
+}
+
 int v4l2sl_surface_pull_capture(struct v4l2sl_context *ctx,
                                 struct v4l2sl_surface *surf, int buf_index)
 {
@@ -992,11 +1033,10 @@ int v4l2sl_surface_pull_capture(struct v4l2sl_context *ctx,
 
     if (v4l2sl_surface_grow_memfd(surf, sz) < 0)
         return -1;
-    dst = mmap(NULL, sz, PROT_READ | PROT_WRITE, MAP_SHARED, surf->memfd_fd, 0);
-    if (dst == MAP_FAILED)
+    dst = v4l2sl_surface_map_memfd(surf, sz);
+    if (!dst)
         return -1;
     memcpy(dst, src, sz);
-    munmap(dst, sz);
 
     surf->buf_index = buf_index;
     surf->stride = stride;
