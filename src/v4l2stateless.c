@@ -1210,12 +1210,10 @@ v4l2sl_begin_picture(VADriverContextP ctx,
         /* Keep memfd so DRM-PRIME clients retain a stable fd. */
     }
 
-    /* Allocate a V4L2 request for this picture */
-    if (context->media_fd >= 0) {
-        if (context->request_fd >= 0)
-            close(context->request_fd);
+    /* V4L2 request: allocated once per context, recycled per picture via
+     * MEDIA_REQUEST_IOC_REINIT in decode_submit. */
+    if (context->media_fd >= 0 && context->request_fd < 0)
         context->request_fd = v4l2sl_request_alloc(context->media_fd);
-    }
 
     /* Assign a V4L2 timestamp for this picture (used for DPB reference
      * matching). Unit: nanoseconds in 1µs steps, matching what vb2 stores

@@ -495,8 +495,14 @@ int v4l2sl_decode_submit(struct v4l2sl_context *ctx, int out_buf_idx,
     if (done_out >= 0)
         v4l2sl_out_pool_push(ctx, done_out);
 
-    close(ctx->request_fd);
-    ctx->request_fd = -1;
+    /* Recycle the request instead of close+realloc every picture — two
+     * syscalls per frame saved. EINVAL (ancient kernel) falls back to the
+     * close path; begin_picture re-allocates. */
+    if (xioctl(ctx->request_fd, MEDIA_REQUEST_IOC_REINIT, NULL) < 0 &&
+        errno == EINVAL) {
+        close(ctx->request_fd);
+        ctx->request_fd = -1;
+    }
 
     return done_cap;
 }
