@@ -223,12 +223,12 @@ VAStatus v4l2sl_vpp_run(struct v4l2sl_context *ctx,
               (dst_fcc == VA_FOURCC_ARGB || dst_fcc == VA_FOURCC_BGRA ||
                dst_fcc == VA_FOURCC_BGRX) ? 4 : 1;
 
-    if (src->dma_buf_fd >= 0 && src->buf_index >= 0 && src->stride) {
+    if (src->memfd_fd >= 0 && src->buf_index >= 0 && src->stride) {
         v4l2sl_surface_ensure_memfd(src);
         src_map_sz = v4l2sl_capture_plane_size(
             src->cap_fourcc ? src->cap_fourcc : V4L2_PIX_FMT_NV12,
             src->stride, src->aligned_h ? src->aligned_h : src->height);
-        src_map = mmap(NULL, src_map_sz, PROT_READ, MAP_SHARED, src->dma_buf_fd, 0);
+        src_map = mmap(NULL, src_map_sz, PROT_READ, MAP_SHARED, src->memfd_fd, 0);
         if (src_map == MAP_FAILED)
             return VA_STATUS_ERROR_OPERATION_FAILED;
         srcp = src_map;

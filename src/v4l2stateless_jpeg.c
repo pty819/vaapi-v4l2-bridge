@@ -54,11 +54,11 @@ static const uint8_t *surface_nv12(struct v4l2sl_surface *s, size_t *map_size,
         *alh = s->height;
         return s->cpu_ptr;
     }
-    if (s->dma_buf_fd >= 0 && s->stride && s->aligned_h) {
+    if (s->memfd_fd >= 0 && s->stride && s->aligned_h) {
         size_t sz = v4l2sl_capture_plane_size(
             s->cap_fourcc ? s->cap_fourcc : V4L2_PIX_FMT_NV12,
             s->stride, s->aligned_h);
-        uint8_t *p = mmap(NULL, sz, PROT_READ, MAP_SHARED, s->dma_buf_fd, 0);
+        uint8_t *p = mmap(NULL, sz, PROT_READ, MAP_SHARED, s->memfd_fd, 0);
         if (p == MAP_FAILED)
             return NULL;
         *to_unmap = p;

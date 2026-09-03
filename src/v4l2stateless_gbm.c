@@ -108,7 +108,7 @@ int v4l2sl_surface_ensure_memfd(struct v4l2sl_surface *s)
 
     if (!s || !v4l2sl_memfd_stale(s) || !s->gbm_bo)
         return 0;
-    if (s->dma_buf_fd < 0 || !s->stride || !s->aligned_h)
+    if (s->memfd_fd < 0 || !s->stride || !s->aligned_h)
         return -1;
     w = s->width;
     h = s->height;
@@ -120,7 +120,7 @@ int v4l2sl_surface_ensure_memfd(struct v4l2sl_surface *s)
                          GBM_BO_TRANSFER_READ, &bo_stride, &bo_map);
     if (!bo_data)
         return -1;
-    m = mmap(NULL, sz, PROT_READ | PROT_WRITE, MAP_SHARED, s->dma_buf_fd, 0);
+    m = mmap(NULL, sz, PROT_READ | PROT_WRITE, MAP_SHARED, s->memfd_fd, 0);
     if (m == MAP_FAILED) {
         gbm_bo_unmap(s->gbm_bo, bo_map);
         return -1;
@@ -183,11 +183,11 @@ int v4l2sl_gbm_surface_sync(struct v4l2sl_surface *s)
     if (s->last_writer == V4L2SL_WRITER_CPU && s->cpu_ptr && s->cpu_stride)
         return v4l2sl_gbm_surface_upload(s, s->cpu_ptr, s->cpu_stride,
                                          s->height);
-    if (s->last_writer == V4L2SL_WRITER_MEMFD && s->dma_buf_fd >= 0 &&
+    if (s->last_writer == V4L2SL_WRITER_MEMFD && s->memfd_fd >= 0 &&
         s->stride && s->aligned_h) {
         uint32_t sz = v4l2sl_capture_plane_size(V4L2_PIX_FMT_NV12,
                                                 s->stride, s->aligned_h);
-        void *m = mmap(NULL, sz, PROT_READ, MAP_SHARED, s->dma_buf_fd, 0);
+        void *m = mmap(NULL, sz, PROT_READ, MAP_SHARED, s->memfd_fd, 0);
         int r;
 
         if (m == MAP_FAILED)

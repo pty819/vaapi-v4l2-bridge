@@ -873,7 +873,7 @@ int v4l2sl_surface_alloc_export_fd(struct v4l2sl_surface *s)
 
     if (!s || s->width == 0 || s->height == 0)
         return -1;
-    if (s->dma_buf_fd >= 0)
+    if (s->memfd_fd >= 0)
         return 0;
 
     stride = s->cpu_stride ? s->cpu_stride : s->width;
@@ -889,7 +889,7 @@ int v4l2sl_surface_alloc_export_fd(struct v4l2sl_surface *s)
         close(fd);
         return -1;
     }
-    s->dma_buf_fd = fd;
+    s->memfd_fd = fd;
     s->memfd_size = sz;
     if (!s->stride)
         s->stride = stride;
@@ -907,11 +907,11 @@ int v4l2sl_surface_grow_memfd(struct v4l2sl_surface *s, uint32_t size)
 {
     if (!s)
         return -1;
-    if (s->dma_buf_fd < 0 && v4l2sl_surface_alloc_export_fd(s) < 0)
+    if (s->memfd_fd < 0 && v4l2sl_surface_alloc_export_fd(s) < 0)
         return -1;
-    if (size == 0 || s->dma_buf_fd < 0 || size <= s->memfd_size)
+    if (size == 0 || s->memfd_fd < 0 || size <= s->memfd_size)
         return 0;
-    if (ftruncate(s->dma_buf_fd, (off_t)size) < 0)
+    if (ftruncate(s->memfd_fd, (off_t)size) < 0)
         return -1;
     s->memfd_size = size;
     return 0;
@@ -966,7 +966,7 @@ int v4l2sl_surface_pull_capture(struct v4l2sl_context *ctx,
 
     if (v4l2sl_surface_grow_memfd(surf, sz) < 0)
         return -1;
-    dst = mmap(NULL, sz, PROT_READ | PROT_WRITE, MAP_SHARED, surf->dma_buf_fd, 0);
+    dst = mmap(NULL, sz, PROT_READ | PROT_WRITE, MAP_SHARED, surf->memfd_fd, 0);
     if (dst == MAP_FAILED)
         return -1;
     memcpy(dst, src, sz);
@@ -1027,7 +1027,7 @@ VAStatus v4l2sl_surface_fill_prime(const struct v4l2sl_surface *surf,
 
     if (!surf || !descriptor)
         return VA_STATUS_ERROR_INVALID_PARAMETER;
-    if (surf->dma_buf_fd < 0)
+    if (surf->memfd_fd < 0)
         return VA_STATUS_ERROR_INVALID_SURFACE;
 
     stride = surf->stride ? surf->stride :
@@ -1039,7 +1039,7 @@ VAStatus v4l2sl_surface_fill_prime(const struct v4l2sl_surface *surf,
     drm_fcc = v4l2sl_drm_fourcc_for_capture(cap_fcc);
     plane_size = v4l2sl_capture_plane_size(cap_fcc, stride, alh);
 
-    fd = dup(surf->dma_buf_fd);
+    fd = dup(surf->memfd_fd);
     if (fd < 0)
         return VA_STATUS_ERROR_OPERATION_FAILED;
 

@@ -612,7 +612,7 @@ v4l2sl_create_surfaces(VADriverContextP ctx,
         surface->format = format;
         surface->status = VASurfaceReady;
         surface->buf_index = -1;
-        surface->dma_buf_fd = -1;
+        surface->memfd_fd = -1;
         surface->cpu_stride = v4l2sl_default_image_stride(format, width);
         surface->cpu_size = v4l2sl_va_image_size(format, surface->cpu_stride, height);
         if (surface->cpu_size) {
@@ -643,8 +643,8 @@ fail:
         struct v4l2sl_surface *s = v4l2sl_surface_by_id(driver_data, surfaces[j]);
 
         if (s) {
-            if (s->dma_buf_fd >= 0)
-                close(s->dma_buf_fd);
+            if (s->memfd_fd >= 0)
+                close(s->memfd_fd);
             free(s->cpu_ptr);
             free(s);
             driver_data->surfaces[surfaces[j]] = NULL;
@@ -699,8 +699,8 @@ static void
 destroy_surface_locked(struct v4l2sl_driver_data *dd,
                        struct v4l2sl_surface *s, VASurfaceID id)
 {
-    if (s->dma_buf_fd >= 0)
-        close(s->dma_buf_fd);
+    if (s->memfd_fd >= 0)
+        close(s->memfd_fd);
     v4l2sl_gbm_surface_destroy(s);
     free(s->cpu_ptr);
     free(s);
@@ -1498,7 +1498,7 @@ v4l2sl_derive_image(VADriverContextP ctx,
         return VA_STATUS_ERROR_INVALID_SURFACE;
     }
 
-    if ((surf->dma_buf_fd < 0 || surf->buf_index < 0) && !surf->cpu_ptr) {
+    if ((surf->memfd_fd < 0 || surf->buf_index < 0) && !surf->cpu_ptr) {
         fprintf(stderr, "v4l2stateless: derive_image: surface %d has no decoded frame\n",
                 surface);
         pthread_mutex_unlock(&g_v4l2sl_lock);
@@ -1541,7 +1541,7 @@ v4l2sl_derive_image(VADriverContextP ctx,
     } else {
         v4l2sl_surface_ensure_memfd(surf);
         data_size = v4l2sl_capture_plane_size(cap_fcc, stride, aligned_h);
-        map = mmap(NULL, data_size, PROT_READ, MAP_SHARED, surf->dma_buf_fd, 0);
+        map = mmap(NULL, data_size, PROT_READ, MAP_SHARED, surf->memfd_fd, 0);
         if (map == MAP_FAILED) {
             fprintf(stderr, "v4l2stateless: derive_image: mmap dmabuf failed: %s\n",
                     strerror(errno));
@@ -1771,9 +1771,9 @@ v4l2sl_get_image(VADriverContextP ctx, VASurfaceID surface,
     if (surf->buf_index >= 0)
         v4l2sl_surface_ensure_memfd(surf);
 
-    if (surf->dma_buf_fd >= 0 && surf->buf_index >= 0) {
+    if (surf->memfd_fd >= 0 && surf->buf_index >= 0) {
         map_size = v4l2sl_capture_plane_size(cap_fcc, src_stride, src_alh);
-        mapped = mmap(NULL, map_size, PROT_READ, MAP_SHARED, surf->dma_buf_fd, 0);
+        mapped = mmap(NULL, map_size, PROT_READ, MAP_SHARED, surf->memfd_fd, 0);
         if (mapped == MAP_FAILED) {
             fprintf(stderr, "v4l2stateless: get_image: mmap dmabuf failed: %s\n",
                     strerror(errno));
@@ -1958,9 +1958,9 @@ v4l2sl_export_surface_handle(VADriverContextP ctx, VASurfaceID surface_id,
         pthread_mutex_unlock(&g_v4l2sl_lock);
         return st;
     }
-    if (surf->dma_buf_fd < 0)
+    if (surf->memfd_fd < 0)
         v4l2sl_surface_alloc_export_fd(surf);
-    if (surf->dma_buf_fd < 0) {
+    if (surf->memfd_fd < 0) {
         pthread_mutex_unlock(&g_v4l2sl_lock);
         return VA_STATUS_ERROR_INVALID_SURFACE;
     }
