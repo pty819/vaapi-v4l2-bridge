@@ -176,15 +176,89 @@ static void copy_path(char *dst, unsigned dst_len, const char *src)
     dst[dst_len - 1] = 0;
 }
 
+static int fourcc_in(const uint32_t *list, unsigned n, uint32_t fcc);
+
+struct scan_node {
+    char path[64];
+    int nout, ncap;
+    uint32_t out_fcc[V4L2SL_PROBE_MAX_FOURCCS];
+    uint32_t cap_fcc[V4L2SL_PROBE_MAX_FOURCCS];
+    int has_jpeg_cap;
+    int has_rotate;
+};
+
+static int node_has_coded_output(const struct scan_node *nd)
+{
+    int k;
+
+    for (k = 0; k < nd->nout; k++)
+        if (fourcc_is_coded(nd->out_fcc[k]))
+            return 1;
+    return 0;
+}
+
+/* Shared walk over /dev/video0..63: every M2M_MPLANE node that offers at
+ * least one OUTPUT or CAPTURE format (unified accept criteria), carrying
+ * its fourcc lists plus the JPEG-encoder / RGA markers callers filter on.
+ * Returns the node count. */
+static int scan_nodes(struct scan_node *nodes, int max_nodes)
+{
+    int i, n = 0;
+
+    for (i = 0; i < 64 && n < max_nodes; i++) {
+        struct v4l2_capability cap;
+        struct v4l2_queryctrl qc;
+        int fd;
+
+        snprintf(nodes[n].path, sizeof(nodes[n].path), "/dev/video%d", i);
+        fd = open(nodes[n].path, O_RDWR | O_NONBLOCK);
+        if (fd < 0)
+            continue;
+        memset(&cap, 0, sizeof(cap));
+        if (ioctl(fd, VIDIOC_QUERYCAP, &cap) < 0 ||
+            !(cap.capabilities & V4L2_CAP_VIDEO_M2M_MPLANE)) {
+            close(fd);
+            continue;
+        }
+        nodes[n].nout = v4l2sl_enum_output_fourccs(fd, nodes[n].out_fcc,
+                                                   V4L2SL_PROBE_MAX_FOURCCS);
+        nodes[n].ncap = v4l2sl_enum_capture_fourccs(fd, nodes[n].cap_fcc,
+                                                    V4L2SL_PROBE_MAX_FOURCCS);
+        memset(&qc, 0, sizeof(qc));
+        qc.id = V4L2_CID_ROTATE;
+        nodes[n].has_rotate = ioctl(fd, VIDIOC_QUERYCTRL, &qc) == 0;
+        close(fd);
+
+        if (nodes[n].nout <= 0 && nodes[n].ncap <= 0)
+            continue;
+        nodes[n].has_jpeg_cap =
+            fourcc_in(nodes[n].cap_fcc, (unsigned)nodes[n].ncap,
+                      V4L2_PIX_FMT_JPEG);
+        n++;
+    }
+    return n;
+}
+
+/* Fill one v4l2sl_node_fmts decoder candidate out of a walked node. */
+static void fill_decoder_node(struct v4l2sl_node_fmts *dst,
+                              const struct scan_node *src)
+{
+    dst->path = src->path;
+    dst->fourccs = src->out_fcc;
+    dst->n_fourccs = (unsigned)src->nout;
+    /* REQUEST_ALLOC at most once per candidate node per boot — the cache
+     * makes sure later processes never repeat it. */
+    dst->request_api = v4l2sl_video_has_request_api(src->path)
+        ? V4L2SL_REQAPI_YES : V4L2SL_REQAPI_NO;
+}
+
 int v4l2sl_scan_decoder_paths_ex(char *h264_out, char *hevc_out, char *av1_out,
                                  char *vp8_out, char *mpeg2_out,
                                  unsigned out_len)
 {
     struct v4l2sl_node_fmts nodes[V4L2SL_PROBE_MAX_NODES];
-    uint32_t fourccs[V4L2SL_PROBE_MAX_NODES][V4L2SL_PROBE_MAX_FOURCCS];
-    char paths[V4L2SL_PROBE_MAX_NODES][64];
-    unsigned n_nodes = 0;
-    int i;
+    struct scan_node raw[V4L2SL_PROBE_MAX_NODES];
+    int n_raw, i, n_nodes = 0;
     const char *p;
 
     if (h264_out && out_len)
@@ -198,59 +272,15 @@ int v4l2sl_scan_decoder_paths_ex(char *h264_out, char *hevc_out, char *av1_out,
     if (mpeg2_out && out_len)
         mpeg2_out[0] = 0;
 
-    for (i = 0; i < 64 && n_nodes < V4L2SL_PROBE_MAX_NODES; i++) {
-        struct v4l2_capability cap;
-        int fd, nfmt;
-
-        snprintf(paths[n_nodes], sizeof(paths[n_nodes]), "/dev/video%d", i);
-        fd = open(paths[n_nodes], O_RDWR | O_NONBLOCK);
-        if (fd < 0)
-            continue;
-
-        memset(&cap, 0, sizeof(cap));
-        if (ioctl(fd, VIDIOC_QUERYCAP, &cap) < 0 ||
-            !(cap.capabilities & V4L2_CAP_VIDEO_M2M_MPLANE)) {
-            close(fd);
-            continue;
-        }
-
-        nfmt = v4l2sl_enum_output_fourccs(fd, fourccs[n_nodes],
-                                          V4L2SL_PROBE_MAX_FOURCCS);
-        {
-            uint32_t cap_fcc[V4L2SL_PROBE_MAX_FOURCCS];
-            int ncap, k, jpeg = 0;
-
-            ncap = v4l2sl_enum_capture_fourccs(fd, cap_fcc,
-                                               V4L2SL_PROBE_MAX_FOURCCS);
-            for (k = 0; k < ncap; k++) {
-                if (cap_fcc[k] == V4L2_PIX_FMT_JPEG)
-                    jpeg = 1;
-            }
-            close(fd);
-            if (jpeg)
-                continue;
-        }
-        if (nfmt <= 0)
-            continue;
-
-        nodes[n_nodes].path = paths[n_nodes];
-        nodes[n_nodes].fourccs = fourccs[n_nodes];
-        nodes[n_nodes].n_fourccs = (unsigned)nfmt;
-        nodes[n_nodes].request_api = v4l2sl_video_has_request_api(paths[n_nodes])
-            ? V4L2SL_REQAPI_YES : V4L2SL_REQAPI_NO;
-        if (nodes[n_nodes].request_api == V4L2SL_REQAPI_NO) {
-            unsigned k;
-            int coded = 0;
-
-            for (k = 0; k < nodes[n_nodes].n_fourccs; k++) {
-                if (fourcc_is_coded(fourccs[n_nodes][k]))
-                    coded = 1;
-            }
-            if (coded)
-                fprintf(stderr,
-                        "v4l2stateless: skip %s (coded fourcc, no media request)\n",
-                        paths[n_nodes]);
-        }
+    n_raw = scan_nodes(raw, V4L2SL_PROBE_MAX_NODES);
+    for (i = 0; i < n_raw && n_nodes < V4L2SL_PROBE_MAX_NODES; i++) {
+        if (raw[i].has_jpeg_cap || !node_has_coded_output(&raw[i]))
+            continue; /* JPEG encoders and raw converters are not decoders */
+        fill_decoder_node(&nodes[n_nodes], &raw[i]);
+        if (nodes[n_nodes].request_api == V4L2SL_REQAPI_NO)
+            fprintf(stderr,
+                    "v4l2stateless: skip %s (coded fourcc, no media request)\n",
+                    raw[i].path);
         n_nodes++;
     }
 
@@ -406,12 +436,9 @@ static int scan_all_uncached(char *h264_out, char *hevc_out, char *av1_out,
                              char *jpeg_enc_out, char *vpp_out, unsigned out_len)
 {
     struct v4l2sl_node_fmts nodes[V4L2SL_PROBE_MAX_NODES];
-    uint32_t fourccs[V4L2SL_PROBE_MAX_NODES][V4L2SL_PROBE_MAX_FOURCCS];
-    uint32_t cap_fcc[V4L2SL_PROBE_MAX_FOURCCS], out_fcc[V4L2SL_PROBE_MAX_FOURCCS];
-    char paths[V4L2SL_PROBE_MAX_NODES][64];
+    struct scan_node raw[V4L2SL_PROBE_MAX_NODES];
+    int n_raw, i, n_nodes = 0;
     const char *p;
-    unsigned n_nodes = 0;
-    int i;
 
     if (h264_out && out_len) h264_out[0] = 0;
     if (hevc_out && out_len) hevc_out[0] = 0;
@@ -421,61 +448,17 @@ static int scan_all_uncached(char *h264_out, char *hevc_out, char *av1_out,
     if (jpeg_enc_out && out_len) jpeg_enc_out[0] = 0;
     if (vpp_out && out_len) vpp_out[0] = 0;
 
-    for (i = 0; i < 64; i++) {
-        struct v4l2_capability cap;
-        struct v4l2_queryctrl qc;
-        int fd, nout, ncap, k;
-        int has_jpeg, has_coded, has_rotate;
-
-        snprintf(paths[n_nodes], sizeof(paths[n_nodes]), "/dev/video%d", i);
-        fd = open(paths[n_nodes], O_RDWR | O_NONBLOCK);
-        if (fd < 0)
+    n_raw = scan_nodes(raw, V4L2SL_PROBE_MAX_NODES);
+    for (i = 0; i < n_raw && n_nodes < V4L2SL_PROBE_MAX_NODES; i++) {
+        if (raw[i].has_jpeg_cap && jpeg_enc_out && out_len && !jpeg_enc_out[0])
+            copy_path(jpeg_enc_out, out_len, raw[i].path);
+        if (raw[i].has_rotate && !raw[i].has_jpeg_cap &&
+            !node_has_coded_output(&raw[i]) &&
+            vpp_out && out_len && !vpp_out[0])
+            copy_path(vpp_out, out_len, raw[i].path);
+        if (!node_has_coded_output(&raw[i]))
             continue;
-
-        memset(&cap, 0, sizeof(cap));
-        if (ioctl(fd, VIDIOC_QUERYCAP, &cap) < 0 ||
-            !(cap.capabilities & V4L2_CAP_VIDEO_M2M_MPLANE)) {
-            close(fd);
-            continue;
-        }
-
-        nout = v4l2sl_enum_output_fourccs(fd, out_fcc, V4L2SL_PROBE_MAX_FOURCCS);
-        ncap = v4l2sl_enum_capture_fourccs(fd, cap_fcc, V4L2SL_PROBE_MAX_FOURCCS);
-        memset(&qc, 0, sizeof(qc));
-        qc.id = V4L2_CID_ROTATE;
-        has_rotate = ioctl(fd, VIDIOC_QUERYCTRL, &qc) == 0;
-        close(fd);
-
-        if (nout <= 0 && ncap <= 0)
-            continue;
-
-        has_jpeg = fourcc_in(cap_fcc, (unsigned)ncap, V4L2_PIX_FMT_JPEG);
-        has_coded = 0;
-        for (k = 0; k < nout; k++) {
-            if (fourcc_is_coded(out_fcc[k])) {
-                has_coded = 1;
-                break;
-            }
-        }
-
-        if (has_jpeg && jpeg_enc_out && out_len && !jpeg_enc_out[0])
-            copy_path(jpeg_enc_out, out_len, paths[n_nodes]);
-        if (has_rotate && !has_coded && !has_jpeg && vpp_out && out_len &&
-            !vpp_out[0])
-            copy_path(vpp_out, out_len, paths[n_nodes]);
-
-        if (!has_coded || n_nodes >= V4L2SL_PROBE_MAX_NODES)
-            continue;
-
-        nodes[n_nodes].path = paths[n_nodes];
-        nodes[n_nodes].fourccs = fourccs[n_nodes];
-        nodes[n_nodes].n_fourccs = (unsigned)nout;
-        memcpy(fourccs[n_nodes], out_fcc,
-               (size_t)nout * sizeof(out_fcc[0]));
-        /* REQUEST_ALLOC at most once per candidate node per boot — the
-         * cache makes sure later processes never repeat it. */
-        nodes[n_nodes].request_api = v4l2sl_video_has_request_api(paths[n_nodes])
-            ? V4L2SL_REQAPI_YES : V4L2SL_REQAPI_NO;
+        fill_decoder_node(&nodes[n_nodes], &raw[i]);
         n_nodes++;
     }
 
