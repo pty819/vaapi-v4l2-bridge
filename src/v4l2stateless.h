@@ -324,6 +324,9 @@ int v4l2sl_set_global_controls(int v4l2_fd, struct v4l2_ext_controls *ctrls);
 int v4l2sl_submit_request(int request_fd);
 /* poll() wrapper that retries EINTR (device.c) */
 int v4l2sl_poll_intr(struct pollfd *fds, nfds_t n, int timeout);
+/* EINTR-retrying ioctl (device.c); VPP/JPEG route through it so the test
+ * ioctl hook covers them too. */
+int v4l2sl_xioctl(int fd, unsigned long request, void *arg);
 
 /* H.264 translation (v4l2stateless_h264.c) */
 void h264_fill_sps(struct v4l2_ctrl_h264_sps *sps, const VAPictureParameterBufferH264 *pic,

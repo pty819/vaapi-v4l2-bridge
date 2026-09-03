@@ -21,14 +21,7 @@
 
 #include "v4l2stateless.h"
 
-static int xioctl(int fd, unsigned long r, void *p)
-{
-    int n;
-    do {
-        n = ioctl(fd, r, p);
-    } while (n < 0 && errno == EINTR);
-    return n;
-}
+#define xioctl(fd, req, arg) v4l2sl_xioctl((fd), (req), (arg))
 
 static struct v4l2sl_buffer *
 buffer_by_id(struct v4l2sl_context *ctx, VABufferID id)

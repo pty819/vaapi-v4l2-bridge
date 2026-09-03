@@ -19,14 +19,7 @@
 
 #include "v4l2stateless.h"
 
-static int xioctl(int fd, unsigned long r, void *p)
-{
-    int n;
-    do {
-        n = ioctl(fd, r, p);
-    } while (n < 0 && errno == EINTR);
-    return n;
-}
+#define xioctl(fd, req, arg) v4l2sl_xioctl((fd), (req), (arg))
 
 static uint32_t va_to_v4l2_raw(uint32_t fourcc)
 {

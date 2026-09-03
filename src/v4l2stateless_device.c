@@ -35,8 +35,8 @@ void v4l2sl_set_ioctl_hook(v4l2sl_ioctl_fn fn)
     g_ioctl_hook = fn;
 }
 
-/* Helper to call ioctl with retry */
-static int xioctl(int fd, unsigned long request, void *arg)
+/* Helper to call ioctl with retry (shared via the header). */
+int v4l2sl_xioctl(int fd, unsigned long request, void *arg)
 {
     int r;
     do {
@@ -45,6 +45,8 @@ static int xioctl(int fd, unsigned long request, void *arg)
     } while (r == -1 && errno == EINTR);
     return r;
 }
+
+#define xioctl(fd, req, arg) v4l2sl_xioctl((fd), (req), (arg))
 
 /* poll() with EINTR retry — a stray signal (profiler, SIGWINCH) must never
  * be mistaken for a decode timeout; the decode path turns timeouts into
