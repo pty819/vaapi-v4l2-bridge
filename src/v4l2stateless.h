@@ -77,6 +77,7 @@ struct v4l2sl_buffer {
     void *data;
     int mmapped;             /* data from mmap (derive_image) vs malloc */
     uint32_t fourcc;         /* VAImageBufferType: fourcc of the image */
+    uint32_t pitch;          /* VAImageBufferType: allocation stride */
     struct v4l2sl_buffer *next;
 };
 

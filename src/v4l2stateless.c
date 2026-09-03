@@ -1678,6 +1678,8 @@ v4l2sl_create_image(VADriverContextP ctx, VAImageFormat *format,
     ib->type = VAImageBufferType;
     ib->size = data_size;
     ib->fourcc = format->fourcc;
+    ib->pitch = stride;  /* allocation stride — get_image must write with it,
+                          * not a stride recomputed from the blit size */
     ib->next = driver_data->orphan_buffers;
     driver_data->orphan_buffers = ib;
     pthread_mutex_unlock(&g_v4l2sl_lock);
@@ -1758,7 +1760,11 @@ v4l2sl_get_image(VADriverContextP ctx, VASurfaceID surface,
         else
             dst_fourcc = VA_FOURCC_NV12;
     }
-    dst_stride = v4l2sl_default_image_stride(dst_fourcc, copy_w);
+    /* Write at the image's allocation stride (reported to the client via
+     * VAImage.pitches at create time), never a stride recomputed from the
+     * blit size — the client reads rows at the reported pitch. */
+    dst_stride = ib->pitch ? ib->pitch
+                           : v4l2sl_default_image_stride(dst_fourcc, copy_w);
 
     /* Lazy memfd: bo-backed surfaces skip the per-frame memfd copy;
      * refill it from the bo now that someone is reading back. */
@@ -1781,7 +1787,8 @@ v4l2sl_get_image(VADriverContextP ctx, VASurfaceID surface,
         src_alh = surf->height;
         cap_fcc = V4L2_PIX_FMT_NV12;
         dst_fourcc = VA_FOURCC_NV12;
-        dst_stride = v4l2sl_default_image_stride(VA_FOURCC_NV12, copy_w);
+        dst_stride = ib->pitch ? ib->pitch
+                           : v4l2sl_default_image_stride(VA_FOURCC_NV12, copy_w);
     } else {
         pthread_mutex_unlock(&g_v4l2sl_lock);
         return VA_STATUS_ERROR_INVALID_SURFACE;
@@ -1854,11 +1861,19 @@ v4l2sl_put_image(VADriverContextP ctx,
     }
 
     src = ib->data;
+    if (ib->fourcc && ib->fourcc != VA_FOURCC_NV12) {
+        /* The upload path is NV12-only; silently reinterpreting another
+         * layout (I420/BGRA/...) produces garbage with SUCCESS. */
+        pthread_mutex_unlock(&g_v4l2sl_lock);
+        return VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT;
+    }
     copy_w = (int)src_width < surf->width ? (int)src_width : surf->width;
     copy_h = (int)src_height < surf->height ? (int)src_height : surf->height;
     v4l2sl_copy_nv12(surf->cpu_ptr, surf->cpu_stride, src,
-                     (uint32_t)copy_w, copy_h, copy_w, copy_h);
+                     ib->pitch ? ib->pitch : (uint32_t)copy_w,
+                     copy_h, copy_w, copy_h);
     surf->gbm_src = 1;
+    surf->memfd_stale = 1;
     if (surf->gbm_bo)
         v4l2sl_gbm_surface_upload(surf, surf->cpu_ptr, surf->cpu_stride,
                                   surf->height);
