@@ -7,6 +7,8 @@
  */
 
 #include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <va/va.h>
 #include <linux/videodev2.h>
@@ -66,6 +68,31 @@ uint32_t v4l2sl_capture_plane_size(uint32_t fourcc, uint32_t stride, uint32_t al
         return stride * aligned_h * 2;
     /* NV12 / NV15: Y + UV/2 */
     return stride * aligned_h * 3 / 2;
+}
+
+/*
+ * Shared per-row 10-bit unpack scratch: heap, grows on demand, sized for
+ * one Y row + one UV row. Every caller runs under g_v4l2sl_lock
+ * (get_image / put_image / vpp), so one buffer serves all converters and
+ * wide frames never hit a silent width clamp. Returns NULL on OOM.
+ */
+static uint16_t *g_row_scratch;
+static uint32_t g_row_scratch_samples;
+
+static uint16_t *row_scratch_get(int samples)
+{
+    if (samples <= 0)
+        return NULL;
+    if (samples > (int)g_row_scratch_samples) {
+        uint16_t *p = realloc(g_row_scratch,
+                              (size_t)samples * 2 * sizeof(uint16_t));
+
+        if (!p)
+            return NULL;
+        g_row_scratch = p;
+        g_row_scratch_samples = (uint32_t)samples;
+    }
+    return g_row_scratch;
 }
 
 static void unpack_le40_to_p010(const uint8_t *src, uint16_t *dst, int samples)
@@ -187,12 +214,17 @@ void v4l2sl_nv20_to_yuy2(uint8_t *dst, uint32_t dst_stride,
     int y, x;
     int rows = height;
     const uint8_t *src_uv = src + (size_t)src_stride * src_aligned_h;
-    uint16_t y10[4096], uv10[4096];
+    uint16_t *y10, *uv10;
 
     if (rows > (int)src_aligned_h)
         rows = (int)src_aligned_h;
-    if (width > 4096)
-        width = 4096;
+    y10 = row_scratch_get(width);
+    if (!y10) {
+        fprintf(stderr, "v4l2stateless: 10-bit row scratch OOM at width %d\n",
+                width);
+        return;
+    }
+    uv10 = y10 + width;
 
     for (y = 0; y < rows; y++) {
         uint8_t *d = dst + (size_t)y * dst_stride;
@@ -217,12 +249,17 @@ void v4l2sl_nv20_to_y210(uint8_t *dst, uint32_t dst_stride,
     int y, x;
     int rows = height;
     const uint8_t *src_uv = src + (size_t)src_stride * src_aligned_h;
-    uint16_t y10[4096], uv10[4096];
+    uint16_t *y10, *uv10;
 
     if (rows > (int)src_aligned_h)
         rows = (int)src_aligned_h;
-    if (width > 4096)
-        width = 4096;
+    y10 = row_scratch_get(width);
+    if (!y10) {
+        fprintf(stderr, "v4l2stateless: 10-bit row scratch OOM at width %d\n",
+                width);
+        return;
+    }
+    uv10 = y10 + width;
 
     for (y = 0; y < rows; y++) {
         uint16_t *d = (uint16_t *)(dst + (size_t)y * dst_stride);
