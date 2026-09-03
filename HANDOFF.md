@@ -1,8 +1,8 @@
 # HANDOFF — VA-API → V4L2-stateless 桥接层
 
-写于 **2026-08-27**，刷新 **2026-08-29**。机器：Orange Pi 5 NAS `192.168.1.21`，Armbian 26.8.3 resolute，kernel **7.1.8-edge-rockchip64**。
+写于 **2026-08-27**，刷新 **2026-09-03**。机器：Orange Pi 5 NAS `192.168.1.21`，Armbian 26.8.3 resolute，kernel **7.1.8-edge-rockchip64**。
 
-全量矩阵 `tests/run_full_matrix.sh`：**PASS=25 FAIL=0**（新增 h26410 + h264422×4 条目）。Git 仓库在 NAS：`https://github.com/pty819/vaapi-v4l2-bridge.git`。
+全量矩阵 `tests/run_full_matrix.sh`：**PASS=27 FAIL=0**（h26410 + h264422×4 + gbm-probe + va-export）。Git 仓库在 NAS：`https://github.com/pty819/vaapi-v4l2-bridge.git`。
 
 安装 `.so`：`/usr/lib/aarch64-linux-gnu/dri/v4l2stateless_drv_video.so`。
 
@@ -18,7 +18,7 @@ C 驱动 `v4l2stateless_drv_video.so` 把 ffmpeg VA-API 硬解接到主线 V4L2-
 | H.264 High10 | 同上，capture NV15 | **完成**：hw==sw framemd5；根因=ffmpeg VA 的 pic_init_qp_minus26 含 10bit QpBdOffsetY(+12)，内核要裸值，剥掉即好 |
 | HEVC 8-bit Main | 同上 | **完成**：Main + WPP + 4K |
 | HEVC Main10 | 同上，NV15 → P010 | **完成**：`hwdownload,format=p010le` 对软解 |
-| AV1 8-bit Profile0 | hantro `/dev/video4` + `/dev/media3` | **完成**：libaom、libaom realtime、SVT-AV1 RA、4K |
+| AV1 8-bit Profile0 | hantro `/dev/video4` + `/dev/media3` | 翻译路径保留但**不广播**（短 VA 会话反复开节点会挂 SoC）；矩阵跳过 AV1 |
 | VP8 | hantro `/dev/video2` | **完成**：480p / 720p vs ffmpeg SW |
 | MPEG-2 Simple / Main | 同上 `/dev/video2` | **完成**：vs GStreamer `v4l2slmpeg2dec`（hantro IDCT ≠ ffmpeg SW） |
 | JPEG Baseline encode | VEPU121 `/dev/video3` | **完成**：`mjpeg_vaapi`（stateful M2M） |
@@ -36,8 +36,6 @@ C 驱动 `v4l2stateless_drv_video.so` 把 ffmpeg VA-API 硬解接到主线 V4L2-
 | NAS 源码 | `~/vaapi-v4l2-bridge/src/` |
 | NAS 构建 | `~/vaapi-v4l2-bridge/builddir/`（meson + ninja） |
 | 已安装 .so | `/usr/lib/aarch64-linux-gnu/dri/v4l2stateless_drv_video.so` |
-| Mac 工作副本 | `~/v4l2bridge-dev/`（改完 scp 到 NAS 再 ninja） |
-| 探针 / dump | Mac `~/v4l2bridge-dev/{ioctlspy.c,ctrldiff.py,av1probe.c,dumpdec.c}` |
 | ffmpeg | **apt** `/usr/bin/ffmpeg` `7:8.0.1-3ubuntu2`，不是本地编的 |
 | 驱动选择 | `~/.profile` 与 `~/.config/environment.d/90-libva.conf`：`LIBVA_DRIVER_NAME=v4l2stateless` |
 | SSH | `liyifan@192.168.1.21`（密钥） |
@@ -51,11 +49,7 @@ ninja
 sudo cp -f v4l2stateless_drv_video.so /usr/lib/aarch64-linux-gnu/dri/
 ```
 
-Mac → NAS：
-
-```bash
-scp ~/v4l2bridge-dev/v4l2stateless_av1.c liyifan@192.168.1.21:~/vaapi-v4l2-bridge/src/
-```
+Mac 工作副本已于 09-02 删除（过时的 dma-heap 实验路线）；编辑走本地暂存目录 scp 到 `src/` 再 ninja。
 
 全量矩阵（写 `verify/`，已 gitignore）：
 
@@ -198,6 +192,7 @@ Debian/XtraDeb 的 arm64 Chromium 编的是 `use_v4l2_codec`，直连 `/dev/vide
 - **浏览器中途改分辨率**：驱动会对 capture 做 STREAMOFF / S_FMT / REQBUFS renegotiate；Chrome/Firefox 这条没有矩阵覆盖
 - **H.264 High422 已验收（09-02 晚）**：8/10bit hw==sw bit-exact。ffmpeg 到不了桥是上游双门控（h264 get_pixel_format 只给 4:2:0 加 VAAPI 候选 + vaapi profile map 无 H264_HIGH_422），不是桥的问题；VA 路径用 tests/va_h264422_client.c 全链路驱动，内核路径 GST v4l2slh264dec 对 avdec_h264（10-bit 经 tests/nv20_unpack.py 解包含 colmv 尾）。NV20 capture stride=1600、帧尾 460800B 是 colmv；GST videoconvert 的 10bit 解包有 ±1 舍入，勿用它做位级判据
 - 官方 Chrome **必须**走包装脚本（`scripts/google-chrome-vaapi` / `/usr/local/bin/google-chrome-stable`）。裸跑 `/usr/bin/google-chrome-stable` 会跳过非 PCI 的 panthor
+- **浏览器 10-bit（09-03 实测）**：8-bit HEVC 1080p 在 Chrome 经桥硬解**可用**（驱动侧会话验证）；Main10 在 demux 层被拒（`DEMUXER_ERROR_NO_SUPPORTED_STREAMS`），无 flag 可强开、Chrome 无 HEVC 软解回退，SDR 面板无实际意义。Firefox 的 `media.hardware-video-decoding.force-enabled` 仍然不要开
 
 ---
 
@@ -218,6 +213,9 @@ Debian/XtraDeb 的 arm64 Chromium 编的是 `use_v4l2_codec`，直连 `/dev/vide
 - SVT shown 叶 refresh 非 0、或把 shrinking mini-GOP（oh 24/28/30）当普通 GOLDEN → 第 15 帧后错
 - MPEG-2 `pending_buffers[32]` → 1080p I 帧丢 slice
 - VP8 按 ffmpeg 已剥 header 的 `first_part_size` 原样下发 → hantro 再 skip 一次，分区全错
+- VEPU JPEG：OUTPUT plane 数必须取 **QUERYBUF 的回写 length**（NV12M-out/JPEG-cap 队列实为 3 plane，G_FMT 报 2；按 G_FMT 填 QBUF → EINVAL）
+- 矩阵/vainfo 加载的是**系统 dri 路径**的 `.so`：ninja 之后必须先 `sudo cp` 到 `/usr/lib/aarch64-linux-gnu/dri/` 再跑门禁，否则测的是旧驱动
+- 调试 smoke 实例用独立 profile `~/.config/gc-smoke` + `--no-first-run --no-default-browser-check`：用户主会话若跑着 gc-dbg 但没带 `--remote-debugging-port`，脚本再拉 gc-dbg 会转发进无端口主会话 → CDP 9222 ECONNREFUSED
 - 诊断 NAS SSH 失败时怪 Clash TUN：实际是 macOS Local Network 权限
 - ffmpeg **不是**源码树，不要对着不存在的本地 build 排
 - 不要清主线去装 BSP/MPP「先看能不能解」
@@ -231,7 +229,7 @@ Debian/XtraDeb 的 arm64 Chromium 编的是 `use_v4l2_codec`，直连 `/dev/vide
 | `src/v4l2stateless.c` | libva vtable、surface、image、context、buffer ID、timestamp、EndPicture 分发 |
 | `src/v4l2stateless.h` | 结构、池大小（pending 256）、helper 声明 |
 | `src/v4l2stateless_device.c` | open、STREAMON、QBUF、request、sysfs media 查找 |
-| `src/v4l2stateless_probe.c` | 按 OUTPUT fourcc 选节点（`scan_decoder_paths_ex` 含 VP8/MPEG-2） |
+| `src/v4l2stateless_probe.c` | 按 OUTPUT fourcc 选节点（scan_nodes 共享遍历 + `scan_decoder_paths_ex` / boot 缓存） |
 | `src/v4l2stateless_h264.c` | H.264 翻译 + 同步提交 |
 | `src/v4l2stateless_hevc.c` | HEVC 翻译 + 同步提交 |
 | `src/v4l2stateless_av1.c` | AV1 翻译 + refresh 推断 |
@@ -239,7 +237,8 @@ Debian/XtraDeb 的 arm64 Chromium 编的是 `use_v4l2_codec`，直连 `/dev/vide
 | `src/v4l2stateless_mpeg2.c` | MPEG-2 翻译 |
 | `src/v4l2stateless_jpeg.c` | JPEG Baseline 编码（stateful M2M） |
 | `src/v4l2stateless_vpp.c` | RGA VPP |
-| `src/v4l2stateless_format.c` | NV12/NV15/P010/YUY2 与 PRIME fourcc |
+| `src/v4l2stateless_format.c` | NV12/NV15/P010/YUY2 转换、Annex-B 拼接、PRIME fourcc |
+| `src/v4l2stateless_gbm.c` | GBM 显示 surface（Chrome 零拷贝导出车辆） |
 | `scripts/google-chrome-vaapi` | 官方 Chrome 包装（render-node + 关 GPU sandbox） |
 | `scripts/firefox-vaapi-user.js` | Firefox VA-API prefs |
 | `APPS.md` | Chrome / Firefox / VLC 接法 |
@@ -265,3 +264,12 @@ GStreamer AV1 对照：`gstv4l2codecav1dec.c`。内核：`drivers/media/platform
 - `git push` from the NAS to GitHub is flaky over https (GnuTLS reset) and
   port-22/443 SSH is intercepted by the router proxy (28.0.0.x closes);
   retrying https a few times with 25 s gaps works.
+
+## 2026-09-03 深夜 — 延后尾项清零
+
+P3 聚群 7-11 + P4 项 6-8 全部落地并合 master（`e0ec24b`）：持久 memfd
+映射（mremap 增长 + 派生 image 借用计数/退役映射）、VPP/JPEG 持久 M2M
+队列（稳态 ~7 ioctl、0 mmap）、64B stride 对齐、Annex-B/缓冲收集/
+PRIME 层/probe 遍历四处共享 helper。解码路径 strace 收尾 **~7 ioctl/帧**
+持平。C12 双重验证不可修（libva 2.23.0 与上游 master 均无 update_grain）。
+明细见 STATE.md 与 docs/perf-baseline-2026-09.md。
