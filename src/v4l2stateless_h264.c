@@ -562,6 +562,13 @@ VAStatus v4l2sl_h264_translate(struct v4l2sl_context *ctx,
     int done_cap = v4l2sl_decode_submit(ctx, out_buf_idx, (uint32_t)total, timestamp);
     if (done_cap < 0)
         return VA_STATUS_ERROR_OPERATION_FAILED;
+    if (done_cap == -2) {
+        /* Corrupt frame (V4L2_BUF_FLAG_ERROR): mark and succeed — a failed
+         * entrypoint would be cached by Chrome for the whole session. */
+        if (ctx->current_surface)
+            ctx->current_surface->status = VASurfaceSkipped;
+        return VA_STATUS_SUCCESS;
+    }
 
     /* Attach the decoded frame to the target surface */
     struct v4l2sl_surface *surf = ctx->current_surface;

@@ -439,7 +439,8 @@ int v4l2sl_decode_submit(struct v4l2sl_context *ctx, int out_buf_idx,
         pfd.events = POLLOUT;
         if (v4l2sl_poll_intr(&pfd, 1, 200) > 0) {
             done_out = v4l2sl_dequeue_buffer(ctx->v4l2_fd,
-                                             V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE);
+                                             V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE,
+                                             NULL);
             if (done_out >= 0)
                 v4l2sl_out_pool_push(ctx, done_out);
         }
@@ -462,19 +463,34 @@ int v4l2sl_decode_submit(struct v4l2sl_context *ctx, int out_buf_idx,
         return -1;
     }
 
-    done_cap = v4l2sl_dequeue_buffer(ctx->v4l2_fd, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE);
-    if (done_cap < 0) {
-        fprintf(stderr, "v4l2stateless: no completed capture buffer\n");
-        v4l2sl_decode_reset(ctx);
-        return -1;
+    {
+        int cap_err = 0;
+
+        done_cap = v4l2sl_dequeue_buffer(ctx->v4l2_fd,
+                                         V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE,
+                                         &cap_err);
+        if (done_cap < 0) {
+            fprintf(stderr, "v4l2stateless: no completed capture buffer\n");
+            v4l2sl_decode_reset(ctx);
+            return -1;
+        }
+        if (cap_err) {
+            /* Corrupt frame: recycle the slot, recover the bitstream buffer
+             * via the shared tail, and report -2 ("skipped") — callers mark
+             * the surface instead of failing the vaEndPicture entrypoint
+             * (Chrome caches VA-API failures for the whole session). */
+            v4l2sl_cap_pool_push(ctx, done_cap);
+            done_cap = -2;
+        }
     }
 
-    done_out = v4l2sl_dequeue_buffer(ctx->v4l2_fd, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE);
+    done_out = v4l2sl_dequeue_buffer(ctx->v4l2_fd, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE, NULL);
     if (done_out < 0) {
         pfd.events = POLLOUT;
         if (v4l2sl_poll_intr(&pfd, 1, 200) > 0)
             done_out = v4l2sl_dequeue_buffer(ctx->v4l2_fd,
-                                             V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE);
+                                             V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE,
+                                             NULL);
     }
     if (done_out >= 0)
         v4l2sl_out_pool_push(ctx, done_out);
@@ -1072,7 +1088,10 @@ VAStatus v4l2sl_surface_fill_prime(const struct v4l2sl_surface *surf,
  * Dequeue a buffer from the given queue type
  * Returns buffer index or -1 on error
  */
-int v4l2sl_dequeue_buffer(int fd, enum v4l2_buf_type type)
+/* flag_error (optional) is set when the dequeued buffer carried
+ * V4L2_BUF_FLAG_ERROR — the index is still returned so the caller can
+ * recycle the slot; the data itself must not be used. */
+int v4l2sl_dequeue_buffer(int fd, enum v4l2_buf_type type, int *flag_error)
 {
     struct v4l2_buffer buf = { 0 };
     struct v4l2_plane planes[1] = { 0 };
@@ -1082,14 +1101,19 @@ int v4l2sl_dequeue_buffer(int fd, enum v4l2_buf_type type)
     buf.length = 1;
     buf.m.planes = planes;
 
+    if (flag_error)
+        *flag_error = 0;
     if (xioctl(fd, VIDIOC_DQBUF, &buf) < 0) {
         if (errno != EAGAIN)
             fprintf(stderr, "v4l2stateless: DQBUF failed: %s\n", strerror(errno));
         return -1;
     }
-    if (buf.flags & V4L2_BUF_FLAG_ERROR)
+    if (buf.flags & V4L2_BUF_FLAG_ERROR) {
         fprintf(stderr, "v4l2stateless: DQBUF type=%u idx=%u ERROR flags=0x%x bytesused=%u\n",
                 (unsigned)type, buf.index, buf.flags, planes[0].bytesused);
+        if (flag_error)
+            *flag_error = 1;
+    }
 
     return buf.index;
 }

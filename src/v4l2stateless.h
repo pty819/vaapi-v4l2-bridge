@@ -303,7 +303,7 @@ VAStatus v4l2sl_surface_fill_prime_gbm(const struct v4l2sl_surface *surf,
                                        uint32_t flags, void *descriptor);
 typedef int (*v4l2sl_ioctl_fn)(int fd, unsigned long request, void *arg);
 void v4l2sl_set_ioctl_hook(v4l2sl_ioctl_fn fn);
-int v4l2sl_dequeue_buffer(int fd, enum v4l2_buf_type type);
+int v4l2sl_dequeue_buffer(int fd, enum v4l2_buf_type type, int *flag_error);
 int v4l2sl_mmap_output_buffers(int fd, int count, void **ptrs, uint32_t *size_out);
 int v4l2sl_set_request_controls(int request_fd, int v4l2_fd, struct v4l2_ext_controls *ctrls);
 int v4l2sl_set_global_controls(int v4l2_fd, struct v4l2_ext_controls *ctrls);
