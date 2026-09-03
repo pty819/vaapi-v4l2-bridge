@@ -313,8 +313,8 @@ VAStatus v4l2sl_h264_translate(struct v4l2sl_context *ctx,
     VAIQMatrixBufferH264 *iq_matrix = NULL;
     VASliceParameterBufferH264 *slice_param = NULL;
     /* A picture may consist of many slices — one VASliceDataBuffer each */
-    const uint8_t *slice_datas[32];
-    uint32_t slice_sizes[32];
+    const uint8_t *slice_datas[V4L2SL_MAX_SLICE_DATAS];
+    uint32_t slice_sizes[V4L2SL_MAX_SLICE_DATAS];
     int n_slice_data = 0;
 
     for (int i = 0; i < num_buffers; i++) {
@@ -334,7 +334,7 @@ VAStatus v4l2sl_h264_translate(struct v4l2sl_context *ctx,
                 slice_param = buf->data;  /* first slice defines the picture */
             break;
         case VASliceDataBufferType:
-            if (n_slice_data < 32) {
+            if (n_slice_data < V4L2SL_MAX_SLICE_DATAS) {
                 slice_datas[n_slice_data] = buf->data;
                 slice_sizes[n_slice_data] = buf->size;
                 n_slice_data++;
@@ -525,7 +525,7 @@ VAStatus v4l2sl_h264_translate(struct v4l2sl_context *ctx,
      * picture are concatenated — frame-based decode consumes the whole
      * frame in one request.
      */
-    size_t prefixes[32];
+    size_t prefixes[V4L2SL_MAX_SLICE_DATAS];
     size_t total = 0;
     for (int i = 0; i < n_slice_data; i++) {
         prefixes[i] = 0;

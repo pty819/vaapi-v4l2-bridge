@@ -84,6 +84,10 @@ struct v4l2sl_buffer {
 #define V4L2SL_NUM_OUTPUT_BUFS  4
 #define V4L2SL_NUM_CAPTURE_BUFS 24
 
+/* Slice-data buffers a single picture may carry (MPEG-2 hits one per MB
+ * row; sized to match pending_buffers). */
+#define V4L2SL_MAX_SLICE_DATAS 256
+
 /* Surface table size; IDs are recycled via a free stack so a long-lived
  * process can never index past the table. */
 #define V4L2SL_MAX_SURFACES 4096
