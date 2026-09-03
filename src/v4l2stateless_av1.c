@@ -65,9 +65,6 @@ static void av1_fill_sequence_params(struct v4l2_ctrl_av1_sequence *seq,
         seq->flags |= V4L2_AV1_SEQUENCE_FLAG_FILM_GRAIN_PARAMS_PRESENT;
     if (pic->pic_info_fields.bits.use_superres)
         seq->flags |= V4L2_AV1_SEQUENCE_FLAG_ENABLE_SUPERRES;
-    if (pic->u_dc_delta_q != pic->v_dc_delta_q ||
-        pic->u_ac_delta_q != pic->v_ac_delta_q)
-        seq->flags |= V4L2_AV1_SEQUENCE_FLAG_SEPARATE_UV_DELTA_Q;
     /* Warped motion and loop restoration live in different VA sub-structs */
     if (pic->pic_info_fields.bits.allow_warped_motion)
         seq->flags |= V4L2_AV1_SEQUENCE_FLAG_ENABLE_WARPED_MOTION;
@@ -77,14 +74,10 @@ static void av1_fill_sequence_params(struct v4l2_ctrl_av1_sequence *seq,
         pic->loop_restoration_fields.bits.cbframe_restoration_type ||
         pic->loop_restoration_fields.bits.crframe_restoration_type)
         seq->flags |= V4L2_AV1_SEQUENCE_FLAG_ENABLE_RESTORATION;
-    /* Sequence-level tool bits are not all in VA seq_info_fields. libaom
-     * advertises warped-motion and ref-frame-mvs in the sequence header;
-     * they are independent of the current picture type, so if order hint
-     * is on, enable the matching sequence tools. */
-    if (pic->seq_info_fields.fields.enable_order_hint) {
-        seq->flags |= V4L2_AV1_SEQUENCE_FLAG_ENABLE_REF_FRAME_MVS;
-        seq->flags |= V4L2_AV1_SEQUENCE_FLAG_ENABLE_WARPED_MOTION;
-    }
+    /* VA's seq_info_fields exposes no sequence-level separate_uv_delta_q /
+     * warped-motion / ref-frame-mvs bits — map only what VA actually
+     * reports (the per-picture bits above). Never force sequence tools on
+     * from unrelated signals; the kernel trusts this control verbatim. */
 }
 
 static uint32_t av1_surface_order_hint(struct v4l2sl_driver_data *dd,
@@ -92,9 +85,7 @@ static uint32_t av1_surface_order_hint(struct v4l2sl_driver_data *dd,
 {
     struct v4l2sl_surface *s;
 
-    if (!dd || sid == VA_INVALID_SURFACE || (unsigned)sid >= 4096)
-        return 0;
-    s = dd->surfaces[sid];
+    s = v4l2sl_surface_by_id(dd, sid);
     return s ? s->order_hint : 0;
 }
 
@@ -211,9 +202,7 @@ static uint8_t av1_surface_level1(struct v4l2sl_driver_data *dd, VASurfaceID sid
 {
     struct v4l2sl_surface *s;
 
-    if (!dd || sid == VA_INVALID_SURFACE || (unsigned)sid >= 4096)
-        return 0;
-    s = dd->surfaces[sid];
+    s = v4l2sl_surface_by_id(dd, sid);
     return s ? s->av1_level1 : 0;
 }
 
@@ -297,28 +286,6 @@ static uint8_t av1_first_dup_from(const VASurfaceID sids[8], int start)
             if (sids[j] == sids[i])
                 return (uint8_t)(1u << i);
         }
-    }
-    return 0;
-}
-
-/* Hidden ARF still to decode in this mini-GOP (even order_hint > cur). */
-static int av1_svt_pending_arf(const uint32_t hints[8], uint32_t cur, uint32_t gop)
-{
-    int i, arf;
-
-    if (gop < 8)
-        gop = 8;
-    for (arf = 2; arf < (int)gop; arf += 2) {
-        int live = 0;
-
-        if (arf <= (int)cur)
-            continue;
-        for (i = 0; i < 8; i++) {
-            if ((int)hints[i] == arf)
-                live = 1;
-        }
-        if (!live)
-            return 1;
     }
     return 0;
 }
@@ -407,29 +374,6 @@ static uint8_t av1_infer_refresh_libaom(const VASurfaceID sids[8],
     return r ? r : 0x01;
 }
 
-static uint8_t av1_svt_layer_slot(struct v4l2sl_context *ctx, uint32_t cur)
-{
-    int tl = av1_svt_tl(cur, ctx->av1_gop);
-    uint8_t slot;
-
-    switch (tl) {
-    case 0:
-        slot = ctx->av1_l0_toggle;
-        ctx->av1_l0_toggle = (uint8_t)((ctx->av1_l0_toggle + 1) % 3);
-        return (uint8_t)(1u << slot);
-    case 1:
-        slot = (uint8_t)(3 + ctx->av1_l1_toggle);
-        ctx->av1_l1_toggle ^= 1;
-        return (uint8_t)(1u << slot);
-    case 2:
-        return 0x20; /* slot 5 */
-    case 3:
-        return 0x40; /* slot 6 */
-    default:
-        return 0x80; /* slot 7 */
-    }
-}
-
 static uint8_t av1_infer_refresh_svt(const VASurfaceID sids[8],
                                     const uint32_t hints[8],
                                     const uint8_t level1[8],
@@ -438,92 +382,70 @@ static uint8_t av1_infer_refresh_svt(const VASurfaceID sids[8],
                                     struct v4l2sl_context *ctx)
 {
     uint8_t r;
-    int bit;
 
     /* SVT RA: shown pictures are non-reference leaves or overlays.
      * Only hidden ARFs write the DPB (GStreamer refresh=0 on every show). */
     if (show)
         return 0;
 
-    if (!show) {
-        if (ctx && !ctx->av1_have_first_arf) {
-            ctx->av1_have_first_arf = 1;
-            ctx->av1_gop = (uint8_t)(cur ? cur : 8);
-            ctx->av1_l0_oh = cur;
-            ctx->av1_prev_l0_oh = 0;
-            ctx->av1_l0_toggle = 1;
-            ctx->av1_l1_toggle = 0;
-            r = av1_most_dup_first(sids, hints);
-            return r ? r : 0x01;
-        }
-        /* EOS / cut-short pyramids: each new max even ARF is L0 (16,24,28,30). */
-        if (ctx && cur > ctx->av1_l0_oh) {
-            uint8_t slot = ctx->av1_l0_toggle;
-            ctx->av1_prev_l0_oh = ctx->av1_l0_oh;
-            ctx->av1_l0_oh = cur;
-            ctx->av1_l0_toggle = (uint8_t)((slot + 1) % 3);
-            return (uint8_t)(1u << slot);
-        }
-        /* Layer map uses the current mini-GOP length (last L0 minus previous). */
-        if (ctx && ctx->av1_gop >= 16) {
-            uint32_t g = ctx->av1_gop;
-            if (ctx->av1_prev_l0_oh && ctx->av1_l0_oh > ctx->av1_prev_l0_oh)
-                g = ctx->av1_l0_oh - ctx->av1_prev_l0_oh;
-            else if (cur > ctx->av1_gop)
-                g /= 2;
-            if (g < 4)
-                g = 4;
-            {
-                int tl = av1_svt_tl(cur, g);
-                uint8_t slot;
-                switch (tl) {
-                case 0:
-                    slot = ctx->av1_l0_toggle;
-                    ctx->av1_l0_toggle = (uint8_t)((ctx->av1_l0_toggle + 1) % 3);
-                    return (uint8_t)(1u << slot);
-                case 1:
-                    slot = (uint8_t)(3 + ctx->av1_l1_toggle);
-                    ctx->av1_l1_toggle ^= 1;
-                    return (uint8_t)(1u << slot);
-                case 2:
-                    return 0x20;
-                case 3:
-                    return 0x40;
-                default:
-                    return 0x80;
-                }
-            }
-        }
-
-        /* Cut-short / 8-frame mini-GOP: occupancy. */
-        if (av1_unique_sid_count(sids) == 2 && av1_slot_is_dup(sids, 3))
-            return 0x08;
+    if (ctx && !ctx->av1_have_first_arf) {
+        ctx->av1_have_first_arf = 1;
+        ctx->av1_gop = (uint8_t)(cur ? cur : 8);
+        ctx->av1_l0_oh = cur;
+        ctx->av1_prev_l0_oh = 0;
+        ctx->av1_l0_toggle = 1;
+        ctx->av1_l1_toggle = 0;
         r = av1_most_dup_first(sids, hints);
-        if (r)
-            return r;
-        r = av1_get_refresh_idx(sids, hints, level1, cur, bits_minus_1,
-                                !show && !skip);
         return r ? r : 0x01;
     }
+    /* EOS / cut-short pyramids: each new max even ARF is L0 (16,24,28,30). */
+    if (ctx && cur > ctx->av1_l0_oh) {
+        uint8_t slot = ctx->av1_l0_toggle;
+        ctx->av1_prev_l0_oh = ctx->av1_l0_oh;
+        ctx->av1_l0_oh = cur;
+        ctx->av1_l0_toggle = (uint8_t)((slot + 1) % 3);
+        return (uint8_t)(1u << slot);
+    }
+    /* Layer map uses the current mini-GOP length (last L0 minus previous). */
+    if (ctx && ctx->av1_gop >= 16) {
+        uint32_t g = ctx->av1_gop;
+        if (ctx->av1_prev_l0_oh && ctx->av1_l0_oh > ctx->av1_prev_l0_oh)
+            g = ctx->av1_l0_oh - ctx->av1_prev_l0_oh;
+        else if (cur > ctx->av1_gop)
+            g /= 2;
+        if (g < 4)
+            g = 4;
+        {
+            int tl = av1_svt_tl(cur, g);
+            uint8_t slot;
+            switch (tl) {
+            case 0:
+                slot = ctx->av1_l0_toggle;
+                ctx->av1_l0_toggle = (uint8_t)((ctx->av1_l0_toggle + 1) % 3);
+                return (uint8_t)(1u << slot);
+            case 1:
+                slot = (uint8_t)(3 + ctx->av1_l1_toggle);
+                ctx->av1_l1_toggle ^= 1;
+                return (uint8_t)(1u << slot);
+            case 2:
+                return 0x20;
+            case 3:
+                return 0x40;
+            default:
+                return 0x80;
+            }
+        }
+    }
 
+    /* Cut-short / 8-frame mini-GOP: occupancy. */
+    if (av1_unique_sid_count(sids) == 2 && av1_slot_is_dup(sids, 3))
+        return 0x08;
+    r = av1_most_dup_first(sids, hints);
+    if (r)
+        return r;
     r = av1_get_refresh_idx(sids, hints, level1, cur, bits_minus_1,
                             !show && !skip);
-    if (!r)
-        r = av1_first_dup_from(sids, 0);
-    if (!r)
-        r = 0x01;
-    /* Shown ref overwriting KEY: prefer L1 slots 4 then 3 if they still
-     * hold a KEY copy (matches SVT lay1 3–4). */
-    bit = 0;
-    while (bit < 8 && !((r >> bit) & 1))
-        bit++;
-    if (bit < 8 && hints[bit] == 0) {
-        if (av1_slot_is_dup(sids, 4) && hints[4] == 0)
-            return 0x10;
-        if (av1_slot_is_dup(sids, 3) && hints[3] == 0)
-            return 0x08;
-    }
-    return r;
+    return r ? r : 0x01;
 }
 
 /*
@@ -789,11 +711,10 @@ static void av1_fill_frame_params(struct v4l2_ctrl_av1_frame *frame,
     for (int i = 0; i < V4L2_AV1_TOTAL_REFS_PER_FRAME; i++) {
         VASurfaceID sid = pic->ref_frame_map[i];
         uint64_t ts = 0;
-        if (dd && sid != VA_INVALID_SURFACE && (unsigned)sid < 4096) {
-            struct v4l2sl_surface *s = dd->surfaces[sid];
-            if (s)
-                ts = s->timestamp;
-        }
+        struct v4l2sl_surface *s = v4l2sl_surface_by_id(dd, sid);
+
+        if (s)
+            ts = s->timestamp;
         frame->reference_frame_ts[i] = ts;
     }
     for (int i = 0; i < V4L2_AV1_REFS_PER_FRAME; i++)
@@ -931,9 +852,16 @@ VAStatus v4l2sl_av1_translate(struct v4l2sl_context *ctx,
     /* Sequence is a GLOBAL control on hantro AV1 — request-scoped
      * submissions succeed the ioctl but leave the device unconfigured,
      * so the subsequent OUTPUT QBUF returns EINVAL. */
-    if (v4l2sl_set_global_controls(v4l2_fd, &seq_ctrls) < 0) {
-        fprintf(stderr, "v4l2stateless: failed to set AV1 sequence params\n");
-        return VA_STATUS_ERROR_OPERATION_FAILED;
+    /* Sequence-level control: resubmit only when the payload changed. */
+    _Static_assert(sizeof(seq) <= sizeof(ctx->g_ctrl_payload), "grow cache");
+    if (!ctx->g_ctrl_valid ||
+        memcmp(ctx->g_ctrl_payload, &seq, sizeof(seq)) != 0) {
+        if (v4l2sl_set_global_controls(v4l2_fd, &seq_ctrls) < 0) {
+            fprintf(stderr, "v4l2stateless: failed to set AV1 sequence params\n");
+            return VA_STATUS_ERROR_OPERATION_FAILED;
+        }
+        memcpy(ctx->g_ctrl_payload, &seq, sizeof(seq));
+        ctx->g_ctrl_valid = 1;
     }
 
     {
@@ -1077,6 +1005,13 @@ VAStatus v4l2sl_av1_translate(struct v4l2sl_context *ctx,
 
     /* On failure decode_submit resets both queues — do not push back. */
     int done_cap = v4l2sl_decode_submit(ctx, out_buf_idx, tile_data_size, timestamp);
+    if (done_cap == -2) {
+        /* Corrupt frame (V4L2_BUF_FLAG_ERROR): mark and succeed — a failed
+         * entrypoint would be cached by Chrome for the whole session. */
+        if (ctx->current_surface)
+            ctx->current_surface->status = VASurfaceSkipped;
+        return VA_STATUS_SUCCESS;
+    }
     if (done_cap < 0)
         return VA_STATUS_ERROR_OPERATION_FAILED;
 

@@ -19,14 +19,7 @@
 
 #include "v4l2stateless.h"
 
-static int xioctl(int fd, unsigned long r, void *p)
-{
-    int n;
-    do {
-        n = ioctl(fd, r, p);
-    } while (n < 0 && errno == EINTR);
-    return n;
-}
+#define xioctl(fd, req, arg) v4l2sl_xioctl((fd), (req), (arg))
 
 static uint32_t va_to_v4l2_raw(uint32_t fourcc)
 {
@@ -46,14 +39,6 @@ static uint32_t va_to_v4l2_raw(uint32_t fourcc)
     default:
         return V4L2_PIX_FMT_NV12;
     }
-}
-
-static struct v4l2sl_surface *
-surf(struct v4l2sl_driver_data *dd, VASurfaceID id)
-{
-    if (!dd || id == VA_INVALID_ID || (unsigned)id >= 4096)
-        return NULL;
-    return dd->surfaces[id];
 }
 
 static const uint32_t vpp_pixel_formats[] = {
@@ -79,10 +64,7 @@ VAStatus v4l2sl_vpp_query_filters(VAProcFilterType *filters, unsigned int *n)
     /* RGA has rotate/flip as controls, not VAProcFilter* types. */
     if (!n)
         return VA_STATUS_ERROR_INVALID_PARAMETER;
-    if (!filters) {
-        *n = 0;
-        return VA_STATUS_SUCCESS;
-    }
+    (void)filters;
     *n = 0;
     return VA_STATUS_SUCCESS;
 }
@@ -178,7 +160,7 @@ VAStatus v4l2sl_vpp_run(struct v4l2sl_context *ctx,
     if (!pipe)
         return VA_STATUS_ERROR_INVALID_PARAMETER;
 
-    src = surf(ctx->driver_data, pipe->surface);
+    src = v4l2sl_surface_by_id(ctx->driver_data, pipe->surface);
     dst = ctx->current_surface;
     if (!src || !dst)
         return VA_STATUS_ERROR_INVALID_SURFACE;
@@ -195,6 +177,16 @@ VAStatus v4l2sl_vpp_run(struct v4l2sl_context *ctx,
         dw = pipe->output_region->width;
         dh = pipe->output_region->height;
     }
+    /* Client-controlled regions are clamped to the surfaces — an oversized
+     * region must never write past the destination backing. */
+    if (dw > dst->width)
+        dw = dst->width;
+    if (dh > dst->height)
+        dh = dst->height;
+    if (sw > src->width)
+        sw = src->width;
+    if (sh > src->height)
+        sh = src->height;
     if (pipe->rotation_state == VA_ROTATION_90 ||
         pipe->rotation_state == VA_ROTATION_270)
         rotate = (pipe->rotation_state == VA_ROTATION_90) ? 90 : 270;
@@ -216,12 +208,12 @@ VAStatus v4l2sl_vpp_run(struct v4l2sl_context *ctx,
               (dst_fcc == VA_FOURCC_ARGB || dst_fcc == VA_FOURCC_BGRA ||
                dst_fcc == VA_FOURCC_BGRX) ? 4 : 1;
 
-    if (src->dma_buf_fd >= 0 && src->buf_index >= 0 && src->stride) {
+    if (src->memfd_fd >= 0 && src->buf_index >= 0 && src->stride) {
         v4l2sl_surface_ensure_memfd(src);
         src_map_sz = v4l2sl_capture_plane_size(
             src->cap_fourcc ? src->cap_fourcc : V4L2_PIX_FMT_NV12,
             src->stride, src->aligned_h ? src->aligned_h : src->height);
-        src_map = mmap(NULL, src_map_sz, PROT_READ, MAP_SHARED, src->dma_buf_fd, 0);
+        src_map = mmap(NULL, src_map_sz, PROT_READ, MAP_SHARED, src->memfd_fd, 0);
         if (src_map == MAP_FAILED)
             return VA_STATUS_ERROR_OPERATION_FAILED;
         srcp = src_map;
@@ -238,7 +230,8 @@ VAStatus v4l2sl_vpp_run(struct v4l2sl_context *ctx,
     if (!dst->cpu_ptr) {
         dst->cpu_stride = v4l2sl_default_image_stride(dst_fcc, dst->width);
         dst->cpu_size = v4l2sl_va_image_size(dst_fcc, dst->cpu_stride, dst->height);
-        dst->cpu_ptr = calloc(1, dst->cpu_size);
+        if (v4l2sl_surface_ensure_cpu(dst) < 0)
+            dst->cpu_ptr = NULL;
         if (!dst->cpu_ptr) {
             if (src_map)
                 munmap(src_map, src_map_sz);
@@ -353,7 +346,7 @@ VAStatus v4l2sl_vpp_run(struct v4l2sl_context *ctx,
 
     pfd.fd = fd;
     pfd.events = POLLIN | POLLOUT;
-    if (poll(&pfd, 1, 2000) <= 0) {
+    if (v4l2sl_poll_intr(&pfd, 1, 2000) <= 0) {
         fprintf(stderr, "v4l2stateless: VPP timeout\n");
         st = VA_STATUS_ERROR_OPERATION_FAILED;
         goto out;
@@ -379,7 +372,7 @@ VAStatus v4l2sl_vpp_run(struct v4l2sl_context *ctx,
     }
 
     st = VA_STATUS_SUCCESS;
-    dst->gbm_src = 1;
+    dst->last_writer = V4L2SL_WRITER_CPU;
     if (dst->gbm_bo && dst_fcc == VA_FOURCC_NV12)
         v4l2sl_gbm_surface_upload(dst, dst->cpu_ptr, dst->cpu_stride,
                                   dst->height);

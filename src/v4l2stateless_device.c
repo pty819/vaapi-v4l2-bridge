@@ -35,14 +35,29 @@ void v4l2sl_set_ioctl_hook(v4l2sl_ioctl_fn fn)
     g_ioctl_hook = fn;
 }
 
-/* Helper to call ioctl with retry */
-static int xioctl(int fd, unsigned long request, void *arg)
+/* Helper to call ioctl with retry (shared via the header). */
+int v4l2sl_xioctl(int fd, unsigned long request, void *arg)
 {
     int r;
     do {
         r = g_ioctl_hook ? g_ioctl_hook(fd, request, arg)
                          : ioctl(fd, request, arg);
     } while (r == -1 && errno == EINTR);
+    return r;
+}
+
+#define xioctl(fd, req, arg) v4l2sl_xioctl((fd), (req), (arg))
+
+/* poll() with EINTR retry — a stray signal (profiler, SIGWINCH) must never
+ * be mistaken for a decode timeout; the decode path turns timeouts into
+ * full STREAMOFF/STREAMON queue resets. */
+int v4l2sl_poll_intr(struct pollfd *fds, nfds_t n, int timeout)
+{
+    int r;
+
+    do {
+        r = poll(fds, n, timeout);
+    } while (r < 0 && errno == EINTR);
     return r;
 }
 
@@ -329,9 +344,7 @@ static void release_ctx_capture_surfaces(struct v4l2sl_context *ctx)
         VASurfaceID id = ctx->render_targets[i];
         struct v4l2sl_surface *s;
 
-        if (id == VA_INVALID_ID || (unsigned)id >= 4096)
-            continue;
-        s = ctx->driver_data->surfaces[id];
+        s = v4l2sl_surface_by_id(ctx->driver_data, id);
         if (!s)
             continue;
         /* Keep the create-time memfd. Closing a V4L2 EXPBUF fd while the
@@ -408,8 +421,7 @@ int v4l2sl_decode_submit(struct v4l2sl_context *ctx, int out_buf_idx,
     }
     cap_buf_idx = ctx->free_cap_bufs[--ctx->n_free_cap];
 
-    if (v4l2sl_queue_output(ctx->v4l2_fd, out_buf_idx, bytesused,
-                            ctx->request_fd, timestamp) < 0) {
+    if (v4l2sl_queue_output(ctx, out_buf_idx, bytesused, timestamp) < 0) {
         fprintf(stderr, "v4l2stateless: QBUF output[%d] failed\n", out_buf_idx);
         v4l2sl_out_pool_push(ctx, out_buf_idx);
         v4l2sl_cap_pool_push(ctx, cap_buf_idx);
@@ -424,9 +436,10 @@ int v4l2sl_decode_submit(struct v4l2sl_context *ctx, int out_buf_idx,
         /* Recover the bitstream buffer so the pool does not leak. */
         pfd.fd = ctx->v4l2_fd;
         pfd.events = POLLOUT;
-        if (poll(&pfd, 1, 200) > 0) {
+        if (v4l2sl_poll_intr(&pfd, 1, 200) > 0) {
             done_out = v4l2sl_dequeue_buffer(ctx->v4l2_fd,
-                                             V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE);
+                                             V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE,
+                                             NULL);
             if (done_out >= 0)
                 v4l2sl_out_pool_push(ctx, done_out);
         }
@@ -443,31 +456,52 @@ int v4l2sl_decode_submit(struct v4l2sl_context *ctx, int out_buf_idx,
 
     pfd.fd = ctx->v4l2_fd;
     pfd.events = POLLIN;
-    if (poll(&pfd, 1, 3000) <= 0) {
+    if (v4l2sl_poll_intr(&pfd, 1, 3000) <= 0) {
         fprintf(stderr, "v4l2stateless: decode timeout, resetting queues\n");
         v4l2sl_decode_reset(ctx);
         return -1;
     }
 
-    done_cap = v4l2sl_dequeue_buffer(ctx->v4l2_fd, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE);
-    if (done_cap < 0) {
-        fprintf(stderr, "v4l2stateless: no completed capture buffer\n");
-        v4l2sl_decode_reset(ctx);
-        return -1;
+    {
+        int cap_err = 0;
+
+        done_cap = v4l2sl_dequeue_buffer(ctx->v4l2_fd,
+                                         V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE,
+                                         &cap_err);
+        if (done_cap < 0) {
+            fprintf(stderr, "v4l2stateless: no completed capture buffer\n");
+            v4l2sl_decode_reset(ctx);
+            return -1;
+        }
+        if (cap_err) {
+            /* Corrupt frame: recycle the slot, recover the bitstream buffer
+             * via the shared tail, and report -2 ("skipped") — callers mark
+             * the surface instead of failing the vaEndPicture entrypoint
+             * (Chrome caches VA-API failures for the whole session). */
+            v4l2sl_cap_pool_push(ctx, done_cap);
+            done_cap = -2;
+        }
     }
 
-    done_out = v4l2sl_dequeue_buffer(ctx->v4l2_fd, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE);
+    done_out = v4l2sl_dequeue_buffer(ctx->v4l2_fd, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE, NULL);
     if (done_out < 0) {
         pfd.events = POLLOUT;
-        if (poll(&pfd, 1, 200) > 0)
+        if (v4l2sl_poll_intr(&pfd, 1, 200) > 0)
             done_out = v4l2sl_dequeue_buffer(ctx->v4l2_fd,
-                                             V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE);
+                                             V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE,
+                                             NULL);
     }
     if (done_out >= 0)
         v4l2sl_out_pool_push(ctx, done_out);
 
-    close(ctx->request_fd);
-    ctx->request_fd = -1;
+    /* Recycle the request instead of close+realloc every picture — two
+     * syscalls per frame saved. EINVAL (ancient kernel) falls back to the
+     * close path; begin_picture re-allocates. */
+    if (xioctl(ctx->request_fd, MEDIA_REQUEST_IOC_REINIT, NULL) < 0 &&
+        errno == EINVAL) {
+        close(ctx->request_fd);
+        ctx->request_fd = -1;
+    }
 
     return done_cap;
 }
@@ -767,11 +801,13 @@ int v4l2sl_mmap_output_buffers(int fd, int count, void **ptrs, uint32_t *size_ou
  * The bitstream was already memcpy'd into the pre-mapped output buffer by
  * the caller — only its length travels with the QBUF.
  */
-int v4l2sl_queue_output(int fd, int buf_index,
-                        uint32_t size, int request_fd, uint64_t timestamp)
+int v4l2sl_queue_output(struct v4l2sl_context *ctx, int buf_index,
+                        uint32_t size, uint64_t timestamp)
 {
     struct v4l2_buffer buf = { 0 };
     struct v4l2_plane planes[1] = { 0 };
+    int fd = ctx->v4l2_fd;
+    int request_fd = ctx->request_fd;
 
     buf.type = V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE;
     buf.memory = V4L2_MEMORY_MMAP;
@@ -787,8 +823,12 @@ int v4l2sl_queue_output(int fd, int buf_index,
     buf.timestamp.tv_sec = timestamp / 1000000000ULL;
     buf.timestamp.tv_usec = (timestamp % 1000000000ULL) / 1000ULL;
 
-    /* hantro AV1 rejects QBUF unless plane length matches the mapped size. */
-    {
+    /* hantro AV1 rejects QBUF unless plane length matches the mapped size.
+     * Lengths are fixed per REQBUFS cycle — memoize per index. */
+    if (buf_index >= 0 && buf_index < V4L2SL_NUM_OUTPUT_BUFS &&
+        ctx->output_plane_len[buf_index]) {
+        planes[0].length = ctx->output_plane_len[buf_index];
+    } else {
         struct v4l2_buffer q = { 0 };
         struct v4l2_plane qp[1] = { 0 };
         q.type = V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE;
@@ -796,8 +836,11 @@ int v4l2sl_queue_output(int fd, int buf_index,
         q.index = buf_index;
         q.length = 1;
         q.m.planes = qp;
-        if (xioctl(fd, VIDIOC_QUERYBUF, &q) == 0)
+        if (xioctl(fd, VIDIOC_QUERYBUF, &q) == 0) {
             planes[0].length = qp[0].length;
+            if (buf_index >= 0 && buf_index < V4L2SL_NUM_OUTPUT_BUFS)
+                ctx->output_plane_len[buf_index] = qp[0].length;
+        }
     }
     planes[0].bytesused = size;
 
@@ -837,25 +880,6 @@ int v4l2sl_queue_capture(int fd, int buf_index, int request_fd)
     return 0;
 }
 
-/*
- * Export a capture buffer as DMA-BUF fd
- */
-int v4l2sl_export_dmabuf(int fd, int buf_index)
-{
-    struct v4l2_exportbuffer exp = { 0 };
-    exp.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
-    exp.index = buf_index;
-    exp.flags = O_CLOEXEC | O_RDWR;
-
-    if (xioctl(fd, VIDIOC_EXPBUF, &exp) < 0) {
-        fprintf(stderr, "v4l2stateless: EXPBUF capture[%d] failed: %s\n",
-                buf_index, strerror(errno));
-        return -1;
-    }
-
-    return exp.fd;
-}
-
 int v4l2sl_surface_alloc_export_fd(struct v4l2sl_surface *s)
 {
     uint32_t stride, h, sz;
@@ -863,7 +887,7 @@ int v4l2sl_surface_alloc_export_fd(struct v4l2sl_surface *s)
 
     if (!s || s->width == 0 || s->height == 0)
         return -1;
-    if (s->dma_buf_fd >= 0)
+    if (s->memfd_fd >= 0)
         return 0;
 
     stride = s->cpu_stride ? s->cpu_stride : s->width;
@@ -879,7 +903,8 @@ int v4l2sl_surface_alloc_export_fd(struct v4l2sl_surface *s)
         close(fd);
         return -1;
     }
-    s->dma_buf_fd = fd;
+    s->memfd_fd = fd;
+    s->memfd_size = sz;
     if (!s->stride)
         s->stride = stride;
     if (!s->aligned_h)
@@ -889,16 +914,32 @@ int v4l2sl_surface_alloc_export_fd(struct v4l2sl_surface *s)
     return 0;
 }
 
+int v4l2sl_surface_ensure_cpu(struct v4l2sl_surface *s)
+{
+    if (!s || !s->cpu_size)
+        return -1;
+    if (!s->cpu_ptr) {
+        s->cpu_ptr = calloc(1, s->cpu_size);
+        if (!s->cpu_ptr)
+            return -1;
+    }
+    return 0;
+}
+
+/* Grow-only: a smaller `size` (resolution step-down) must never ftruncate —
+ * clients may still hold mappings or dup'd fds of the larger memfd, and
+ * shrinking drops pages under them (SIGBUS). */
 int v4l2sl_surface_grow_memfd(struct v4l2sl_surface *s, uint32_t size)
 {
     if (!s)
         return -1;
-    if (s->dma_buf_fd < 0 && v4l2sl_surface_alloc_export_fd(s) < 0)
+    if (s->memfd_fd < 0 && v4l2sl_surface_alloc_export_fd(s) < 0)
         return -1;
-    if (size == 0 || s->dma_buf_fd < 0)
+    if (size == 0 || s->memfd_fd < 0 || size <= s->memfd_size)
         return 0;
-    if (ftruncate(s->dma_buf_fd, (off_t)size) < 0)
+    if (ftruncate(s->memfd_fd, (off_t)size) < 0)
         return -1;
+    s->memfd_size = size;
     return 0;
 }
 
@@ -942,8 +983,7 @@ int v4l2sl_surface_pull_capture(struct v4l2sl_context *ctx,
             surf->stride = stride;
             surf->aligned_h = alh;
             surf->cap_fourcc = fcc;
-            surf->gbm_src = 3;
-            surf->memfd_stale = 1;
+            surf->last_writer = V4L2SL_WRITER_BO;
             return 0;
         }
         fprintf(stderr,
@@ -952,7 +992,7 @@ int v4l2sl_surface_pull_capture(struct v4l2sl_context *ctx,
 
     if (v4l2sl_surface_grow_memfd(surf, sz) < 0)
         return -1;
-    dst = mmap(NULL, sz, PROT_READ | PROT_WRITE, MAP_SHARED, surf->dma_buf_fd, 0);
+    dst = mmap(NULL, sz, PROT_READ | PROT_WRITE, MAP_SHARED, surf->memfd_fd, 0);
     if (dst == MAP_FAILED)
         return -1;
     memcpy(dst, src, sz);
@@ -962,8 +1002,7 @@ int v4l2sl_surface_pull_capture(struct v4l2sl_context *ctx,
     surf->stride = stride;
     surf->aligned_h = alh;
     surf->cap_fourcc = fcc;
-    surf->gbm_src = 2;
-    surf->memfd_stale = 0;
+    surf->last_writer = V4L2SL_WRITER_MEMFD;
     return 0;
 }
 
@@ -989,9 +1028,7 @@ int v4l2sl_bind_capture_export(struct v4l2sl_context *ctx)
         if (!ctx->render_targets)
             break;
         id = ctx->render_targets[i];
-        if (id == VA_INVALID_ID || (unsigned)id >= 4096)
-            continue;
-        s = ctx->driver_data->surfaces[id];
+        s = v4l2sl_surface_by_id(ctx->driver_data, id);
         if (!s)
             continue;
         if (v4l2sl_surface_grow_memfd(s, sz) < 0)
@@ -1014,7 +1051,7 @@ VAStatus v4l2sl_surface_fill_prime(const struct v4l2sl_surface *surf,
 
     if (!surf || !descriptor)
         return VA_STATUS_ERROR_INVALID_PARAMETER;
-    if (surf->dma_buf_fd < 0)
+    if (surf->memfd_fd < 0)
         return VA_STATUS_ERROR_INVALID_SURFACE;
 
     stride = surf->stride ? surf->stride :
@@ -1026,7 +1063,7 @@ VAStatus v4l2sl_surface_fill_prime(const struct v4l2sl_surface *surf,
     drm_fcc = v4l2sl_drm_fourcc_for_capture(cap_fcc);
     plane_size = v4l2sl_capture_plane_size(cap_fcc, stride, alh);
 
-    fd = dup(surf->dma_buf_fd);
+    fd = dup(surf->memfd_fd);
     if (fd < 0)
         return VA_STATUS_ERROR_OPERATION_FAILED;
 
@@ -1073,7 +1110,10 @@ VAStatus v4l2sl_surface_fill_prime(const struct v4l2sl_surface *surf,
  * Dequeue a buffer from the given queue type
  * Returns buffer index or -1 on error
  */
-int v4l2sl_dequeue_buffer(int fd, enum v4l2_buf_type type)
+/* flag_error (optional) is set when the dequeued buffer carried
+ * V4L2_BUF_FLAG_ERROR — the index is still returned so the caller can
+ * recycle the slot; the data itself must not be used. */
+int v4l2sl_dequeue_buffer(int fd, enum v4l2_buf_type type, int *flag_error)
 {
     struct v4l2_buffer buf = { 0 };
     struct v4l2_plane planes[1] = { 0 };
@@ -1083,14 +1123,19 @@ int v4l2sl_dequeue_buffer(int fd, enum v4l2_buf_type type)
     buf.length = 1;
     buf.m.planes = planes;
 
+    if (flag_error)
+        *flag_error = 0;
     if (xioctl(fd, VIDIOC_DQBUF, &buf) < 0) {
         if (errno != EAGAIN)
             fprintf(stderr, "v4l2stateless: DQBUF failed: %s\n", strerror(errno));
         return -1;
     }
-    if (buf.flags & V4L2_BUF_FLAG_ERROR)
+    if (buf.flags & V4L2_BUF_FLAG_ERROR) {
         fprintf(stderr, "v4l2stateless: DQBUF type=%u idx=%u ERROR flags=0x%x bytesused=%u\n",
                 (unsigned)type, buf.index, buf.flags, planes[0].bytesused);
+        if (flag_error)
+            *flag_error = 1;
+    }
 
     return buf.index;
 }
@@ -1140,27 +1185,10 @@ int v4l2sl_set_global_controls(int v4l2_fd, struct v4l2_ext_controls *ctrls)
     return 0;
 }
 
-/*
- * Submit a V4L2 request.
- * Uses the V4L2 request API: on the request fd, we call VIDIOC_SUBSCRIBE_EVENT
- * for V4L2_EVENT_DECODE to trigger decode, then poll/wait for completion.
- *
- * Actually, the correct mechanism is: on the request fd itself, call
- *   ioctl(request_fd, MEDIA_REQUEST_IOC_QUEUE, NULL)
- * But that requires <linux/media.h> with the newer request ioctl definitions.
- * The kernel's V4L2 request API uses the request_fd ioctl interface.
- * We fall back to the event subscription approach if MEDIA_REQUEST_IOC_QUEUE
- * is not available.
- *
- * Returns 0 on success, -1 on error.
- */
+/* Queue the request; the decoder consumes the controls bound to it.
+ * Returns 0 on success, -1 on error. */
 int v4l2sl_submit_request(int request_fd)
 {
-    /* Try MEDIA_REQUEST_IOC_QUEUE first (kernel >= 5.11) */
-#ifndef MEDIA_REQUEST_IOC_QUEUE
-#define MEDIA_REQUEST_IOC_QUEUE _IO('R', 0x01)
-#endif
-
     if (xioctl(request_fd, MEDIA_REQUEST_IOC_QUEUE, NULL) < 0) {
         fprintf(stderr, "v4l2stateless: REQUEST_IOC_QUEUE failed: %s\n", strerror(errno));
         return -1;

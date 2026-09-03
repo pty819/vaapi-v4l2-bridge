@@ -127,10 +127,19 @@ static const char *cached_device(struct v4l2sl_driver_data *dd, enum v4l2sl_code
  * VA-API driver VTable implementations
  */
 
+/* rkvdec real per-dimension limit — every max-size advertisement must
+ * agree on this (config attrs AND surface attrs). */
+#define V4L2SL_MAX_PICTURE_DIM 4096
+
+
+static void destroy_surface_locked(struct v4l2sl_driver_data *dd,
+                                   struct v4l2sl_surface *s, VASurfaceID id);
+
 static VAStatus
 v4l2sl_terminate(VADriverContextP ctx)
 {
     struct v4l2sl_driver_data *driver_data = ctx->pDriverData;
+    int i;
 
     if (!driver_data)
         return VA_STATUS_SUCCESS;
@@ -138,15 +147,50 @@ v4l2sl_terminate(VADriverContextP ctx)
     pthread_mutex_lock(&g_v4l2sl_lock);
     while (driver_data->contexts) {
         struct v4l2sl_context *context = driver_data->contexts;
+        struct v4l2sl_buffer *buf = context->buffers;
+
         driver_data->contexts = context->next;
+        while (buf) {
+            struct v4l2sl_buffer *next = buf->next;
+
+            if (buf->mmapped)
+                munmap(buf->data, buf->size);
+            else
+                free(buf->data);
+            free(buf);
+            buf = next;
+        }
         v4l2sl_release_context_device(context);
+        free(context->device_path);
         free(context->render_targets);
         free(context);
     }
-    pthread_mutex_unlock(&g_v4l2sl_lock);
+    /* Clients that terminate without destroying their surfaces (session
+     * teardown paths) still own them kernel-resource-wise: free the whole
+     * table so fds and mappings cannot leak per VA session cycle. */
+    for (i = 0; i < V4L2SL_MAX_SURFACES; i++) {
+        struct v4l2sl_surface *s = driver_data->surfaces[i];
 
-    if (driver_data->media_fd >= 0)
-        close(driver_data->media_fd);
+        if (s)
+            destroy_surface_locked(driver_data, s, (VASurfaceID)i);
+    }
+    while (driver_data->orphan_buffers) {
+        struct v4l2sl_buffer *buf = driver_data->orphan_buffers;
+
+        driver_data->orphan_buffers = buf->next;
+        if (buf->mmapped)
+            munmap(buf->data, buf->size);
+        else
+            free(buf->data);
+        free(buf);
+    }
+    while (driver_data->configs) {
+        struct v4l2sl_config *config = driver_data->configs;
+
+        driver_data->configs = config->next;
+        free(config);
+    }
+    pthread_mutex_unlock(&g_v4l2sl_lock);
 
     free(driver_data);
     ctx->pDriverData = NULL;
@@ -252,10 +296,10 @@ v4l2sl_get_config_attributes(VADriverContextP ctx,
             attrib_list[i].value = 100;
             break;
         case VAConfigAttribMaxPictureWidth:
-            attrib_list[i].value = 8192;
+            attrib_list[i].value = V4L2SL_MAX_PICTURE_DIM;
             break;
         case VAConfigAttribMaxPictureHeight:
-            attrib_list[i].value = 8192;
+            attrib_list[i].value = V4L2SL_MAX_PICTURE_DIM;
             break;
         default:
             attrib_list[i].value = VA_ATTRIB_NOT_SUPPORTED;
@@ -371,19 +415,30 @@ v4l2sl_query_config_attributes(VADriverContextP ctx,
 {
     struct v4l2sl_driver_data *driver_data = ctx->pDriverData;
     struct v4l2sl_config *config = driver_data->configs;
+    VAProfile prof;
+    VAEntrypoint entry;
+    unsigned int rt;
     VAConfigAttrib attribs[8];
     int count = 0;
 
+    pthread_mutex_lock(&g_v4l2sl_lock);
     while (config && config->config_id != config_id)
         config = config->next;
-
-    if (!config)
+    if (!config) {
+        pthread_mutex_unlock(&g_v4l2sl_lock);
         return VA_STATUS_ERROR_INVALID_CONFIG;
+    }
+    /* Snapshot the config fields under the lock (vaDestroyConfig frees
+     * nodes holding it), then build the reply unlocked. */
+    prof = config->profile;
+    entry = config->entrypoint;
+    rt = config->rt_format;
+    pthread_mutex_unlock(&g_v4l2sl_lock);
 
     if (profile)
-        *profile = config->profile;
+        *profile = prof;
     if (entrypoint)
-        *entrypoint = config->entrypoint;
+        *entrypoint = entry;
 
     /*
      * Chrome's FillProfileInfo_Locked allocates vaMaxNumConfigAttributes()
@@ -391,16 +446,16 @@ v4l2sl_query_config_attributes(VADriverContextP ctx,
      * parameter. Do not treat *num_attribs as a buffer capacity.
      */
     attribs[count].type = VAConfigAttribRTFormat;
-    attribs[count].value = config->rt_format;
+    attribs[count].value = rt;
     count++;
     attribs[count].type = VAConfigAttribDecSliceMode;
     attribs[count].value = VA_DEC_SLICE_MODE_NORMAL;
     count++;
     attribs[count].type = VAConfigAttribMaxPictureWidth;
-    attribs[count].value = 8192;
+    attribs[count].value = V4L2SL_MAX_PICTURE_DIM;
     count++;
     attribs[count].type = VAConfigAttribMaxPictureHeight;
-    attribs[count].value = 8192;
+    attribs[count].value = V4L2SL_MAX_PICTURE_DIM;
     count++;
     attribs[count].type = VAConfigAttribEncPackedHeaders;
     attribs[count].value = 0;
@@ -426,14 +481,20 @@ v4l2sl_query_surface_attributes(VADriverContextP ctx,
 {
     struct v4l2sl_driver_data *driver_data = ctx->pDriverData;
     struct v4l2sl_config *config = driver_data->configs;
+    unsigned int rt;
 
     if (!num_attribs)
         return VA_STATUS_ERROR_INVALID_PARAMETER;
 
+    pthread_mutex_lock(&g_v4l2sl_lock);
     while (config && config->config_id != config_id)
         config = config->next;
-    if (!config)
+    if (!config) {
+        pthread_mutex_unlock(&g_v4l2sl_lock);
         return VA_STATUS_ERROR_INVALID_CONFIG;
+    }
+    rt = config->rt_format;
+    pthread_mutex_unlock(&g_v4l2sl_lock);
 
     VASurfaceAttrib attribs[16];
     unsigned int count = 0;
@@ -441,11 +502,11 @@ v4l2sl_query_surface_attributes(VADriverContextP ctx,
     unsigned npix = 0, p;
 
     pix[npix++] = VA_FOURCC_NV12;
-    if (config->rt_format & VA_RT_FORMAT_YUV420_10)
+    if (rt & VA_RT_FORMAT_YUV420_10)
         pix[npix++] = VA_FOURCC_P010;
-    if (config->rt_format & (VA_RT_FORMAT_YUV422 | VA_RT_FORMAT_YUV422_10))
+    if (rt & (VA_RT_FORMAT_YUV422 | VA_RT_FORMAT_YUV422_10))
         pix[npix++] = VA_FOURCC_YUY2;
-    if (config->rt_format & VA_RT_FORMAT_RGB32)
+    if (rt & VA_RT_FORMAT_RGB32)
         pix[npix++] = VA_FOURCC_BGRX;
 
     for (p = 0; p < npix; p++) {
@@ -471,13 +532,13 @@ v4l2sl_query_surface_attributes(VADriverContextP ctx,
     attribs[count].type          = VASurfaceAttribMaxWidth;
     attribs[count].flags         = VA_SURFACE_ATTRIB_GETTABLE;
     attribs[count].value.type    = VAGenericValueTypeInteger;
-    attribs[count].value.value.i = 4096;
+    attribs[count].value.value.i = V4L2SL_MAX_PICTURE_DIM;
     count++;
 
     attribs[count].type          = VASurfaceAttribMaxHeight;
     attribs[count].flags         = VA_SURFACE_ATTRIB_GETTABLE;
     attribs[count].value.type    = VAGenericValueTypeInteger;
-    attribs[count].value.value.i = 4096;
+    attribs[count].value.value.i = V4L2SL_MAX_PICTURE_DIM;
     count++;
 
     attribs[count].type          = VASurfaceAttribMemoryType;
@@ -528,6 +589,7 @@ v4l2sl_create_surfaces(VADriverContextP ctx,
         format = VA_FOURCC_BGRX;
 
     pthread_mutex_lock(&g_v4l2sl_lock);
+    int created = 0;
     for (int i = 0; i < num_surfaces; i++) {
         struct v4l2sl_surface *surface = calloc(1, sizeof(*surface));
         VASurfaceID id;
@@ -555,16 +617,11 @@ v4l2sl_create_surfaces(VADriverContextP ctx,
         surface->format = format;
         surface->status = VASurfaceReady;
         surface->buf_index = -1;
-        surface->dma_buf_fd = -1;
+        surface->memfd_fd = -1;
         surface->cpu_stride = v4l2sl_default_image_stride(format, width);
         surface->cpu_size = v4l2sl_va_image_size(format, surface->cpu_stride, height);
-        if (surface->cpu_size) {
-            surface->cpu_ptr = calloc(1, surface->cpu_size);
-            if (!surface->cpu_ptr) {
-                free(surface);
-                goto fail;
-            }
-        }
+        /* cpu_ptr is lazy (ensure_cpu): decode-only surfaces never touch
+         * it — an eager calloc cost ~3MB/surface at 1080p for nothing. */
         /* dma-buf at create so Chrome/Firefox DRM-PRIME export works
          * before the first picture. V4L2 EXPBUF replaces this after REQBUFS. */
         if (v4l2sl_surface_alloc_export_fd(surface) < 0)
@@ -572,28 +629,30 @@ v4l2sl_create_surfaces(VADriverContextP ctx,
 
         surfaces[i] = id;
         driver_data->surfaces[id] = surface;
+        created++;
     }
 
     pthread_mutex_unlock(&g_v4l2sl_lock);
     return VA_STATUS_SUCCESS;
 
 fail:
-    pthread_mutex_unlock(&g_v4l2sl_lock);
-    /* Clean up already created surfaces */
-    for (int j = 0; j < num_surfaces; j++) {
+    /* Cleanup stays under the lock and only touches surfaces this call
+     * actually created — surfaces[] entries past `created` are the
+     * caller's uninitialized memory, never scan them. */
+    for (int j = 0; j < created; j++) {
         struct v4l2sl_surface *s = v4l2sl_surface_by_id(driver_data, surfaces[j]);
 
         if (s) {
-            if (s->dma_buf_fd >= 0)
-                close(s->dma_buf_fd);
+            if (s->memfd_fd >= 0)
+                close(s->memfd_fd);
             free(s->cpu_ptr);
             free(s);
             driver_data->surfaces[surfaces[j]] = NULL;
-            driver_data->free_surface_ids[driver_data->n_free_surface_ids++] =
-                surfaces[j];
+            v4l2sl_surface_id_push(driver_data, surfaces[j]);
             surfaces[j] = VA_INVALID_ID;
         }
     }
+    pthread_mutex_unlock(&g_v4l2sl_lock);
     return VA_STATUS_ERROR_ALLOCATION_FAILED;
 }
 
@@ -633,6 +692,22 @@ v4l2sl_create_surfaces2(VADriverContextP ctx,
                                   num_surfaces, surfaces);
 }
 
+/* Free one surface and recycle its ID. Caller holds g_v4l2sl_lock and
+ * has already detached the surface from any context (C1 does that for
+ * the explicit destroy path; terminate frees contexts first). */
+static void
+destroy_surface_locked(struct v4l2sl_driver_data *dd,
+                       struct v4l2sl_surface *s, VASurfaceID id)
+{
+    if (s->memfd_fd >= 0)
+        close(s->memfd_fd);
+    v4l2sl_gbm_surface_destroy(s);
+    free(s->cpu_ptr);
+    free(s);
+    dd->surfaces[id] = NULL;
+    v4l2sl_surface_id_push(dd, id);
+}
+
 static VAStatus
 v4l2sl_destroy_surfaces(VADriverContextP ctx,
                         VASurfaceID *surfaces,
@@ -644,21 +719,46 @@ v4l2sl_destroy_surfaces(VADriverContextP ctx,
     for (int i = 0; i < num_surfaces; i++) {
         struct v4l2sl_surface *surface = v4l2sl_surface_by_id(driver_data,
                                                               surfaces[i]);
-        if (surface) {
-            if (surface->dma_buf_fd >= 0)
-                close(surface->dma_buf_fd);
-            v4l2sl_gbm_surface_destroy(surface);
-            free(surface->cpu_ptr);
-            free(surface);
-            driver_data->surfaces[surfaces[i]] = NULL;
-            if (driver_data->n_free_surface_ids < V4L2SL_MAX_SURFACES)
-                driver_data->free_surface_ids[driver_data->n_free_surface_ids++] =
-                    surfaces[i];
+        if (!surface)
+            continue;
+        /* Detach from every context referencing the surface before freeing:
+         * hand a still-held capture slot back to its pool (destroying
+         * surfaced frames mid-session must not drain the 24-slot pool),
+         * drop render-target registrations so a recycled ID is never
+         * misidentified, and clear any in-flight current_surface. */
+        for (struct v4l2sl_context *c = driver_data->contexts; c; c = c->next) {
+            int listed = 0;
+
+            for (int k = 0; k < c->num_render_targets; k++) {
+                if (c->render_targets[k] == surfaces[i]) {
+                    c->render_targets[k] = VA_INVALID_ID;
+                    listed = 1;
+                }
+            }
+            if (listed && surface->buf_index >= 0 &&
+                surface->buf_index < c->capture_bufs_allocd)
+                v4l2sl_cap_pool_push(c, surface->buf_index);
+            if (c->current_surface == surface) {
+                c->current_surface = NULL;
+                c->current_surface_id = VA_INVALID_ID;
+            }
         }
+        surface->buf_index = -1;
+        destroy_surface_locked(driver_data, surface, surfaces[i]);
     }
     pthread_mutex_unlock(&g_v4l2sl_lock);
 
     return VA_STATUS_SUCCESS;
+}
+
+static struct v4l2sl_context *
+context_for_surface(struct v4l2sl_driver_data *dd, VASurfaceID surface)
+{
+    for (struct v4l2sl_context *c = dd->contexts; c; c = c->next)
+        for (int i = 0; i < c->num_render_targets; i++)
+            if (c->render_targets[i] == surface)
+                return c;
+    return NULL;
 }
 
 /*
@@ -703,13 +803,19 @@ v4l2sl_create_context(VADriverContextP ctx,
     while (config && config->config_id != config_id)
         config = config->next;
 
-    if (config) {
-        context->codec = config->codec;
-        context->profile = config->profile;
-        context->entrypoint = config->entrypoint;
-        context->rt_format = config->rt_format;
-        context->device_path = config->device_path;
+    if (!config) {
+        pthread_mutex_unlock(&g_v4l2sl_lock);
+        free(context->render_targets);
+        free(context);
+        return VA_STATUS_ERROR_INVALID_CONFIG;
     }
+    context->codec = config->codec;
+    context->profile = config->profile;
+    context->entrypoint = config->entrypoint;
+    context->rt_format = config->rt_format;
+    /* Own copy: vaDestroyConfig frees the config node while live contexts
+     * keep using the path (device reopen on recapture). */
+    context->device_path = strdup(config->device_path);
     context->v4l2_fd = -1;
     context->media_fd = -1;
     context->request_fd = -1;
@@ -829,6 +935,7 @@ v4l2sl_create_context(VADriverContextP ctx,
 
 fail:
     v4l2sl_release_context_device(context);
+    free(context->device_path);
     free(context->render_targets);
     free(context);
     pthread_mutex_unlock(&g_v4l2sl_lock);
@@ -848,6 +955,7 @@ v4l2sl_destroy_context(VADriverContextP ctx, VAContextID context_id)
             *pp = context->next;
 
             v4l2sl_release_context_device(context);
+            free(context->device_path);
             free(context->render_targets);
             free(context);
             pthread_mutex_unlock(&g_v4l2sl_lock);
@@ -1097,12 +1205,10 @@ v4l2sl_begin_picture(VADriverContextP ctx,
         /* Keep memfd so DRM-PRIME clients retain a stable fd. */
     }
 
-    /* Allocate a V4L2 request for this picture */
-    if (context->media_fd >= 0) {
-        if (context->request_fd >= 0)
-            close(context->request_fd);
+    /* V4L2 request: allocated once per context, recycled per picture via
+     * MEDIA_REQUEST_IOC_REINIT in decode_submit. */
+    if (context->media_fd >= 0 && context->request_fd < 0)
         context->request_fd = v4l2sl_request_alloc(context->media_fd);
-    }
 
     /* Assign a V4L2 timestamp for this picture (used for DPB reference
      * matching). Unit: nanoseconds in 1µs steps, matching what vb2 stores
@@ -1400,28 +1506,16 @@ v4l2sl_derive_image(VADriverContextP ctx,
         return VA_STATUS_ERROR_INVALID_SURFACE;
     }
 
-    if ((surf->dma_buf_fd < 0 || surf->buf_index < 0) && !surf->cpu_ptr) {
+    if ((surf->memfd_fd < 0 || surf->buf_index < 0) && !surf->cpu_ptr) {
         fprintf(stderr, "v4l2stateless: derive_image: surface %d has no decoded frame\n",
                 surface);
         pthread_mutex_unlock(&g_v4l2sl_lock);
         return VA_STATUS_ERROR_INVALID_SURFACE;
     }
 
-    /* Find the owning context to get the negotiated capture geometry —
-     * the stride can be padded well beyond the display width. */
-    struct v4l2sl_context *c = driver_data->contexts;
-    while (c) {
-        int hit = 0;
-        for (int i = 0; i < c->num_render_targets; i++) {
-            if (c->render_targets[i] == surface) {
-                hit = 1;
-                break;
-            }
-        }
-        if (hit)
-            break;
-        c = c->next;
-    }
+    /* Owning context gives the negotiated capture geometry — the stride
+     * can be padded well beyond the display width. */
+    struct v4l2sl_context *c = context_for_surface(driver_data, surface);
     uint32_t stride = surf->stride ? surf->stride :
                       ((c && c->cap_stride) ? c->cap_stride : surf->width);
     uint32_t aligned_h = surf->aligned_h ? surf->aligned_h :
@@ -1443,7 +1537,7 @@ v4l2sl_derive_image(VADriverContextP ctx,
     } else {
         v4l2sl_surface_ensure_memfd(surf);
         data_size = v4l2sl_capture_plane_size(cap_fcc, stride, aligned_h);
-        map = mmap(NULL, data_size, PROT_READ, MAP_SHARED, surf->dma_buf_fd, 0);
+        map = mmap(NULL, data_size, PROT_READ, MAP_SHARED, surf->memfd_fd, 0);
         if (map == MAP_FAILED) {
             fprintf(stderr, "v4l2stateless: derive_image: mmap dmabuf failed: %s\n",
                     strerror(errno));
@@ -1527,16 +1621,6 @@ v4l2sl_destroy_image(VADriverContextP ctx, VAImageID image_id)
     return VA_STATUS_SUCCESS;
 }
 
-static struct v4l2sl_context *
-context_for_surface(struct v4l2sl_driver_data *dd, VASurfaceID surface)
-{
-    for (struct v4l2sl_context *c = dd->contexts; c; c = c->next)
-        for (int i = 0; i < c->num_render_targets; i++)
-            if (c->render_targets[i] == surface)
-                return c;
-    return NULL;
-}
-
 /*
  * CPU-download path used by clients whose derive probe failed (e.g. ffmpeg
  * probes vaDeriveImage with a fresh surface before any decode, then falls
@@ -1580,6 +1664,8 @@ v4l2sl_create_image(VADriverContextP ctx, VAImageFormat *format,
     ib->type = VAImageBufferType;
     ib->size = data_size;
     ib->fourcc = format->fourcc;
+    ib->pitch = stride;  /* allocation stride — get_image must write with it,
+                          * not a stride recomputed from the blit size */
     ib->next = driver_data->orphan_buffers;
     driver_data->orphan_buffers = ib;
     pthread_mutex_unlock(&g_v4l2sl_lock);
@@ -1660,16 +1746,20 @@ v4l2sl_get_image(VADriverContextP ctx, VASurfaceID surface,
         else
             dst_fourcc = VA_FOURCC_NV12;
     }
-    dst_stride = v4l2sl_default_image_stride(dst_fourcc, copy_w);
+    /* Write at the image's allocation stride (reported to the client via
+     * VAImage.pitches at create time), never a stride recomputed from the
+     * blit size — the client reads rows at the reported pitch. */
+    dst_stride = ib->pitch ? ib->pitch
+                           : v4l2sl_default_image_stride(dst_fourcc, copy_w);
 
     /* Lazy memfd: bo-backed surfaces skip the per-frame memfd copy;
      * refill it from the bo now that someone is reading back. */
     if (surf->buf_index >= 0)
         v4l2sl_surface_ensure_memfd(surf);
 
-    if (surf->dma_buf_fd >= 0 && surf->buf_index >= 0) {
+    if (surf->memfd_fd >= 0 && surf->buf_index >= 0) {
         map_size = v4l2sl_capture_plane_size(cap_fcc, src_stride, src_alh);
-        mapped = mmap(NULL, map_size, PROT_READ, MAP_SHARED, surf->dma_buf_fd, 0);
+        mapped = mmap(NULL, map_size, PROT_READ, MAP_SHARED, surf->memfd_fd, 0);
         if (mapped == MAP_FAILED) {
             fprintf(stderr, "v4l2stateless: get_image: mmap dmabuf failed: %s\n",
                     strerror(errno));
@@ -1683,7 +1773,8 @@ v4l2sl_get_image(VADriverContextP ctx, VASurfaceID surface,
         src_alh = surf->height;
         cap_fcc = V4L2_PIX_FMT_NV12;
         dst_fourcc = VA_FOURCC_NV12;
-        dst_stride = v4l2sl_default_image_stride(VA_FOURCC_NV12, copy_w);
+        dst_stride = ib->pitch ? ib->pitch
+                           : v4l2sl_default_image_stride(VA_FOURCC_NV12, copy_w);
     } else {
         pthread_mutex_unlock(&g_v4l2sl_lock);
         return VA_STATUS_ERROR_INVALID_SURFACE;
@@ -1742,9 +1833,9 @@ v4l2sl_put_image(VADriverContextP ctx,
         pthread_mutex_unlock(&g_v4l2sl_lock);
         return VA_STATUS_ERROR_UNIMPLEMENTED;
     }
-    if (!surf->cpu_ptr) {
+    if (v4l2sl_surface_ensure_cpu(surf) < 0) {
         pthread_mutex_unlock(&g_v4l2sl_lock);
-        return VA_STATUS_ERROR_OPERATION_FAILED;
+        return VA_STATUS_ERROR_ALLOCATION_FAILED;
     }
 
     ib = driver_data->orphan_buffers;
@@ -1756,11 +1847,18 @@ v4l2sl_put_image(VADriverContextP ctx,
     }
 
     src = ib->data;
+    if (ib->fourcc && ib->fourcc != VA_FOURCC_NV12) {
+        /* The upload path is NV12-only; silently reinterpreting another
+         * layout (I420/BGRA/...) produces garbage with SUCCESS. */
+        pthread_mutex_unlock(&g_v4l2sl_lock);
+        return VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT;
+    }
     copy_w = (int)src_width < surf->width ? (int)src_width : surf->width;
     copy_h = (int)src_height < surf->height ? (int)src_height : surf->height;
     v4l2sl_copy_nv12(surf->cpu_ptr, surf->cpu_stride, src,
-                     (uint32_t)copy_w, copy_h, copy_w, copy_h);
-    surf->gbm_src = 1;
+                     ib->pitch ? ib->pitch : (uint32_t)copy_w,
+                     copy_h, copy_w, copy_h);
+    surf->last_writer = V4L2SL_WRITER_CPU;
     if (surf->gbm_bo)
         v4l2sl_gbm_surface_upload(surf, surf->cpu_ptr, surf->cpu_stride,
                                   surf->height);
@@ -1846,9 +1944,9 @@ v4l2sl_export_surface_handle(VADriverContextP ctx, VASurfaceID surface_id,
         pthread_mutex_unlock(&g_v4l2sl_lock);
         return st;
     }
-    if (surf->dma_buf_fd < 0)
+    if (surf->memfd_fd < 0)
         v4l2sl_surface_alloc_export_fd(surf);
-    if (surf->dma_buf_fd < 0) {
+    if (surf->memfd_fd < 0) {
         pthread_mutex_unlock(&g_v4l2sl_lock);
         return VA_STATUS_ERROR_INVALID_SURFACE;
     }
@@ -1896,8 +1994,6 @@ v4l2sl_init(VADriverContextP ctx)
     if (!driver_data)
         return VA_STATUS_ERROR_ALLOCATION_FAILED;
 
-    driver_data->media_fd = -1;
-    pthread_mutex_init(&driver_data->lock, NULL);
     ctx->pDriverData = driver_data;
 
     v4l2sl_scan_all_cached(driver_data->dev_h264, driver_data->dev_hevc,

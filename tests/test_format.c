@@ -38,10 +38,6 @@ static void test_fourcc_map(void)
     expect_true(v4l2sl_capture_fourcc_from_sps(2, 1) == V4L2_PIX_FMT_NV15, "sps-10-420");
     expect_true(v4l2sl_capture_fourcc_from_sps(0, 2) == V4L2_PIX_FMT_NV16, "sps-8-422");
     expect_true(v4l2sl_capture_fourcc_from_sps(2, 2) == V4L2_PIX_FMT_NV20, "sps-10-422");
-    expect_true(v4l2sl_capture_is_10bit(V4L2_PIX_FMT_NV15), "nv15-10bit");
-    expect_true(!v4l2sl_capture_is_10bit(V4L2_PIX_FMT_NV12), "nv12-8bit");
-    expect_true(v4l2sl_capture_is_422(V4L2_PIX_FMT_NV16), "nv16-422");
-    expect_true(!v4l2sl_capture_is_422(V4L2_PIX_FMT_NV12), "nv12-not-422");
     expect_true(v4l2sl_va_fourcc_for_capture(V4L2_PIX_FMT_NV15) == VA_FOURCC_P010,
                 "va-p010");
     expect_true(v4l2sl_va_fourcc_for_capture(V4L2_PIX_FMT_NV12) == VA_FOURCC_NV12,

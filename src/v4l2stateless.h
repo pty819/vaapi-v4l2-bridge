@@ -8,6 +8,7 @@
 
 #include <stdint.h>
 #include <pthread.h>
+#include <poll.h>
 #include <va/va.h>
 #include <va/va_backend.h>
 #include <va/va_dec_vp8.h>
@@ -39,6 +40,17 @@ struct v4l2sl_config {
     struct v4l2sl_config *next;
 };
 
+/* Single source of truth for which backing holds the freshest pixels:
+ * CPU = cpu_ptr (VPP dst, vaPutImage), MEMFD = memfd snapshot,
+ * BO = gbm bo (lazy path: memfd is stale until ensure_memfd refills it). */
+enum v4l2sl_last_writer {
+    V4L2SL_WRITER_NONE = 0,
+    V4L2SL_WRITER_CPU = 1,
+    V4L2SL_WRITER_MEMFD = 2,
+    V4L2SL_WRITER_BO = 3,
+};
+#define v4l2sl_memfd_stale(s_) ((s_)->last_writer == V4L2SL_WRITER_BO)
+
 /* Per-surface state */
 struct v4l2sl_surface {
     VASurfaceID surface_id;
@@ -48,7 +60,8 @@ struct v4l2sl_surface {
     unsigned int rt_format;
     VASurfaceStatus status;
     int buf_index;           /* V4L2 capture buffer index, -1 if not allocated */
-    int dma_buf_fd;          /* DMA-BUF fd for export */
+    int memfd_fd;          /* memfd snapshot fd (CPU-readback vehicle) */
+    uint32_t memfd_size;     /* current ftruncate size of memfd_fd (grow-only) */
     uint64_t timestamp;      /* V4L2 timestamp for reference tracking */
     uint32_t order_hint;     /* AV1 OrderHint of the frame last decoded here */
     uint8_t av1_level1;      /* AV1 KEY / level-1 ARF (hidden skip=0,0) */
@@ -60,10 +73,8 @@ struct v4l2sl_surface {
     uint32_t cpu_stride;
     struct gbm_bo *gbm_bo;   /* driver-owned display copy (linear, R8) */
     uint32_t gbm_stride;
-    uint8_t gbm_src;         /* last writer of pixel data: 1=cpu_ptr,
-                              * 2=memfd, 3=gbm bo (memfd skipped/stale) */
-    uint8_t memfd_stale;     /* 1 = memfd does not hold the latest frame
-                              * (the gbm bo does); refilled on CPU readback */
+    uint8_t last_writer;     /* v4l2sl_last_writer: who wrote pixels last.
+                              * memfd staleness is derived: writer == BO. */
 };
 
 /* Parameter buffer */
@@ -75,12 +86,17 @@ struct v4l2sl_buffer {
     void *data;
     int mmapped;             /* data from mmap (derive_image) vs malloc */
     uint32_t fourcc;         /* VAImageBufferType: fourcc of the image */
+    uint32_t pitch;          /* VAImageBufferType: allocation stride */
     struct v4l2sl_buffer *next;
 };
 
 /* Number of output/capture buffer slots */
 #define V4L2SL_NUM_OUTPUT_BUFS  4
 #define V4L2SL_NUM_CAPTURE_BUFS 24
+
+/* Slice-data buffers a single picture may carry (MPEG-2 hits one per MB
+ * row; sized to match pending_buffers). */
+#define V4L2SL_MAX_SLICE_DATAS 256
 
 /* Surface table size; IDs are recycled via a free stack so a long-lived
  * process can never index past the table. */
@@ -94,7 +110,7 @@ struct v4l2sl_context {
     VAProfile profile;
     VAEntrypoint entrypoint;
     unsigned int rt_format;
-    const char *device_path;
+    char *device_path;       /* owned strdup of the config's device path */
     struct v4l2sl_driver_data *driver_data;  /* back-pointer for surface lookup */
     int width;
     int height;
@@ -120,7 +136,7 @@ struct v4l2sl_context {
     /* Output (bitstream) buffer management */
     int output_bufs_allocd;
     uint32_t output_buf_size;
-    uint32_t output_buf_length[V4L2SL_NUM_OUTPUT_BUFS];
+    uint32_t output_plane_len[V4L2SL_NUM_OUTPUT_BUFS]; /* QUERYBUF memo */
     void  *output_buf_ptr[V4L2SL_NUM_OUTPUT_BUFS];
     int free_out_bufs[V4L2SL_NUM_OUTPUT_BUFS];
     int n_free_out;
@@ -142,6 +158,15 @@ struct v4l2sl_context {
     /* Frame counter for V4L2 timestamps (DPB reference matching) */
     uint64_t frame_count;
 
+    /* Hot-path dedup: shadow copy of the last submitted GLOBAL
+     * (sequence-level) control payload. Codec translates memcmp against
+     * it and skip the global ioctl when unchanged. Contexts are
+     * single-codec, so one slot suffices. All translates run under
+     * g_v4l2sl_lock. */
+    uint8_t g_ctrl_valid;
+    /* 1088: this UAPI's padded v4l2_ctrl_h264_sps is 1048 bytes */
+    uint8_t g_ctrl_payload[1088];
+
     /* AV1 refresh_frame_flags inference: VA does not expose the bitmask.
      * 0 = unknown, 1 = libaom-style (free slots from index 1),
      * 2 = SVT-AV1 RA pyramid. */
@@ -156,9 +181,6 @@ struct v4l2sl_context {
 
 /* Driver global state */
 struct v4l2sl_driver_data {
-    int media_fd;                /* unused leftover; decode uses per-context media_fd */
-    pthread_mutex_t lock;        /* unused — see g_v4l2sl_lock in v4l2stateless.c */
-
     struct v4l2sl_config *configs;
     VAConfigID next_config_id;
 
@@ -231,6 +253,23 @@ static inline void v4l2sl_cap_pool_push(struct v4l2sl_context *ctx, int idx)
     ctx->free_cap_bufs[ctx->n_free_cap++] = idx;
 }
 
+/* Bounded, duplicate-free surface-ID recycle push. Same contract as the
+ * pool pushes: a leaked ID beats a write past the table. */
+static inline void v4l2sl_surface_id_push(struct v4l2sl_driver_data *dd,
+                                          VASurfaceID id)
+{
+    int i;
+
+    if (!dd || id == VA_INVALID_ID || (unsigned)id >= V4L2SL_MAX_SURFACES)
+        return;
+    if (dd->n_free_surface_ids >= V4L2SL_MAX_SURFACES)
+        return;
+    for (i = 0; i < dd->n_free_surface_ids; i++)
+        if (dd->free_surface_ids[i] == id)
+            return;
+    dd->free_surface_ids[dd->n_free_surface_ids++] = id;
+}
+
 /* Device helpers (v4l2stateless_device.c) */
 int v4l2sl_open_device(const char *path);
 int v4l2sl_open_media_for_device(const char *video_path);
@@ -246,8 +285,8 @@ int v4l2sl_get_capture_geometry(int fd, uint32_t *w, uint32_t *h,
                                 uint32_t *stride, uint32_t *sizeimage);
 int v4l2sl_ensure_capture(struct v4l2sl_context *ctx, int width, int height,
                           uint32_t pixelformat);
-int v4l2sl_queue_output(int fd, int buf_index, uint32_t size,
-                        int request_fd, uint64_t timestamp);
+int v4l2sl_queue_output(struct v4l2sl_context *ctx, int buf_index,
+                        uint32_t size, uint64_t timestamp);
 int v4l2sl_queue_capture(int fd, int buf_index, int request_fd);
 /*
  * Submit one synchronous decode: pops a capture buffer, QBUFs the given
@@ -263,9 +302,11 @@ int v4l2sl_decode_submit(struct v4l2sl_context *ctx, int out_buf_idx,
  * recover from decode timeouts so a wedged job is never left in the kernel
  * (rkvdec returns every queued buffer in ERROR state on STREAMOFF). */
 void v4l2sl_decode_reset(struct v4l2sl_context *ctx);
-int v4l2sl_export_dmabuf(int fd, int buf_index);
 int v4l2sl_surface_alloc_export_fd(struct v4l2sl_surface *s);
 int v4l2sl_surface_grow_memfd(struct v4l2sl_surface *s, uint32_t size);
+/* Lazy CPU backing: decode-only surfaces never pay the multi-MB calloc;
+ * the first CPU writer (put_image, VPP dst, upload) allocates it. */
+int v4l2sl_surface_ensure_cpu(struct v4l2sl_surface *s);
 int v4l2sl_surface_pull_capture(struct v4l2sl_context *ctx,
                                 struct v4l2sl_surface *surf, int buf_index);
 int v4l2sl_bind_capture_export(struct v4l2sl_context *ctx);
@@ -289,11 +330,16 @@ VAStatus v4l2sl_surface_fill_prime_gbm(const struct v4l2sl_surface *surf,
                                        uint32_t flags, void *descriptor);
 typedef int (*v4l2sl_ioctl_fn)(int fd, unsigned long request, void *arg);
 void v4l2sl_set_ioctl_hook(v4l2sl_ioctl_fn fn);
-int v4l2sl_dequeue_buffer(int fd, enum v4l2_buf_type type);
+int v4l2sl_dequeue_buffer(int fd, enum v4l2_buf_type type, int *flag_error);
 int v4l2sl_mmap_output_buffers(int fd, int count, void **ptrs, uint32_t *size_out);
 int v4l2sl_set_request_controls(int request_fd, int v4l2_fd, struct v4l2_ext_controls *ctrls);
 int v4l2sl_set_global_controls(int v4l2_fd, struct v4l2_ext_controls *ctrls);
 int v4l2sl_submit_request(int request_fd);
+/* poll() wrapper that retries EINTR (device.c) */
+int v4l2sl_poll_intr(struct pollfd *fds, nfds_t n, int timeout);
+/* EINTR-retrying ioctl (device.c); VPP/JPEG route through it so the test
+ * ioctl hook covers them too. */
+int v4l2sl_xioctl(int fd, unsigned long request, void *arg);
 
 /* H.264 translation (v4l2stateless_h264.c) */
 void h264_fill_sps(struct v4l2_ctrl_h264_sps *sps, const VAPictureParameterBufferH264 *pic,
@@ -306,10 +352,6 @@ void h264_fill_decode_params(struct v4l2_ctrl_h264_decode_params *dec,
                              const VASliceParameterBufferH264 *slice);
 void h264_fill_scaling_matrix(struct v4l2_ctrl_h264_scaling_matrix *sm,
                               const VAIQMatrixBufferH264 *iq);
-void h264_fill_slice_params(struct v4l2_ctrl_h264_slice_params *sp,
-                            const VASliceParameterBufferH264 *slice,
-                            const VAPictureParameterBufferH264 *pic,
-                            struct v4l2sl_driver_data *dd);
 VAStatus v4l2sl_h264_translate(struct v4l2sl_context *ctx,
                                struct v4l2sl_buffer **buffers,
                                int num_buffers);
@@ -361,8 +403,6 @@ VAStatus v4l2sl_vpp_query_pipeline_caps(VAProcPipelineCaps *caps);
 /* Pixel format helpers (v4l2stateless_format.c) */
 uint32_t v4l2sl_capture_fourcc_from_rt(unsigned int rt_format);
 uint32_t v4l2sl_capture_fourcc_from_sps(int bit_depth_minus8, int chroma_format_idc);
-int v4l2sl_capture_is_10bit(uint32_t fourcc);
-int v4l2sl_capture_is_422(uint32_t fourcc);
 uint32_t v4l2sl_va_fourcc_for_capture(uint32_t v4l2_fourcc);
 uint32_t v4l2sl_drm_fourcc_for_capture(uint32_t v4l2_fourcc);
 uint32_t v4l2sl_capture_plane_size(uint32_t fourcc, uint32_t stride, uint32_t aligned_h);

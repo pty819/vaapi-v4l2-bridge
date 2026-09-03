@@ -21,22 +21,7 @@
 
 #include "v4l2stateless.h"
 
-static int xioctl(int fd, unsigned long r, void *p)
-{
-    int n;
-    do {
-        n = ioctl(fd, r, p);
-    } while (n < 0 && errno == EINTR);
-    return n;
-}
-
-static struct v4l2sl_surface *
-surface_by_id(struct v4l2sl_driver_data *dd, VASurfaceID id)
-{
-    if (!dd || id == VA_INVALID_ID || (unsigned)id >= 4096)
-        return NULL;
-    return dd->surfaces[id];
-}
+#define xioctl(fd, req, arg) v4l2sl_xioctl((fd), (req), (arg))
 
 static struct v4l2sl_buffer *
 buffer_by_id(struct v4l2sl_context *ctx, VABufferID id)
@@ -62,11 +47,11 @@ static const uint8_t *surface_nv12(struct v4l2sl_surface *s, size_t *map_size,
         *alh = s->height;
         return s->cpu_ptr;
     }
-    if (s->dma_buf_fd >= 0 && s->stride && s->aligned_h) {
+    if (s->memfd_fd >= 0 && s->stride && s->aligned_h) {
         size_t sz = v4l2sl_capture_plane_size(
             s->cap_fourcc ? s->cap_fourcc : V4L2_PIX_FMT_NV12,
             s->stride, s->aligned_h);
-        uint8_t *p = mmap(NULL, sz, PROT_READ, MAP_SHARED, s->dma_buf_fd, 0);
+        uint8_t *p = mmap(NULL, sz, PROT_READ, MAP_SHARED, s->memfd_fd, 0);
         if (p == MAP_FAILED)
             return NULL;
         *to_unmap = p;
@@ -338,7 +323,7 @@ VAStatus v4l2sl_jpeg_encode(struct v4l2sl_context *ctx,
 
     pfd.fd = fd;
     pfd.events = POLLIN | POLLOUT;
-    if (poll(&pfd, 1, 2000) <= 0) {
+    if (v4l2sl_poll_intr(&pfd, 1, 2000) <= 0) {
         fprintf(stderr, "v4l2stateless: JPEG encode timeout\n");
         st = VA_STATUS_ERROR_OPERATION_FAILED;
         goto out;
@@ -401,6 +386,5 @@ out:
     if (st == VA_STATUS_SUCCESS)
         fprintf(stderr, "v4l2stateless: JPEG encoded %dx%d quality=%d bytes=%d planes=%u\n",
                 w, h, quality, jpeg_size, ofmt.fmt.pix_mp.num_planes);
-    (void)surface_by_id;
     return st;
 }

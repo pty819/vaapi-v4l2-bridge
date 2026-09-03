@@ -46,11 +46,11 @@ static void test_export_before_decode(void)
     s.height = 240;
     s.format = VA_FOURCC_NV12;
     s.buf_index = -1;
-    s.dma_buf_fd = -1;
+    s.memfd_fd = -1;
     s.cpu_stride = 320;
 
     expect_true(v4l2sl_surface_alloc_export_fd(&s) == 0, "alloc-export-fd");
-    expect_true(s.dma_buf_fd >= 0, "pre-decode-dmabuf");
+    expect_true(s.memfd_fd >= 0, "pre-decode-dmabuf");
 
     st = v4l2sl_surface_fill_prime(&s, NULL, 0, &desc);
     expect_true(st == VA_STATUS_SUCCESS, "export-no-dqbuf-status");
@@ -60,8 +60,8 @@ static void test_export_before_decode(void)
 
     if (desc.objects[0].fd >= 0)
         close(desc.objects[0].fd);
-    if (s.dma_buf_fd >= 0)
-        close(s.dma_buf_fd);
+    if (s.memfd_fd >= 0)
+        close(s.memfd_fd);
 }
 
 static char g_ops[32][24];
@@ -114,7 +114,7 @@ static int mock_ioctl(int fd, unsigned long request, void *arg)
                     if (id == VA_INVALID_ID || (unsigned)id >= 4096)
                         continue;
                     s = g_ctx->driver_data->surfaces[id];
-                    if (s && s->dma_buf_fd >= 0)
+                    if (s && s->memfd_fd >= 0)
                         g_fds_live_at_reqbufs0++;
                 }
             }
@@ -229,13 +229,13 @@ static void test_recapture_small_to_large(void)
     s1->height = 240;
     s1->format = VA_FOURCC_NV12;
     s1->buf_index = -1;
-    s1->dma_buf_fd = -1;
+    s1->memfd_fd = -1;
     s1->cpu_stride = 320;
     s2->width = 320;
     s2->height = 240;
     s2->format = VA_FOURCC_NV12;
     s2->buf_index = -1;
-    s2->dma_buf_fd = -1;
+    s2->memfd_fd = -1;
     s2->cpu_stride = 320;
     expect_true(v4l2sl_surface_alloc_export_fd(s1) == 0, "recap-s1-memfd");
     expect_true(v4l2sl_surface_alloc_export_fd(s2) == 0, "recap-s2-memfd");
@@ -293,14 +293,14 @@ static void test_recapture_small_to_large(void)
         if (strcmp(g_ops[i0], "EXPBUF") == 0)
             nexp++;
     }
-    expect_true(s1->dma_buf_fd >= 0, "s1-memfd-kept");
-    expect_true(s2->dma_buf_fd >= 0, "s2-memfd-kept");
+    expect_true(s1->memfd_fd >= 0, "s1-memfd-kept");
+    expect_true(s2->memfd_fd >= 0, "s2-memfd-kept");
     expect_true(nexp == 0, "ensure-capture-no-expbuf");
 
-    if (s1->dma_buf_fd >= 0)
-        close(s1->dma_buf_fd);
-    if (s2->dma_buf_fd >= 0)
-        close(s2->dma_buf_fd);
+    if (s1->memfd_fd >= 0)
+        close(s1->memfd_fd);
+    if (s2->memfd_fd >= 0)
+        close(s2->memfd_fd);
     free(s1);
     free(s2);
     v4l2sl_set_ioctl_hook(NULL);
@@ -351,7 +351,7 @@ static void test_av1_translate_recapture(void)
     surf->height = 240;
     surf->format = VA_FOURCC_NV12;
     surf->buf_index = -1;
-    surf->dma_buf_fd = -1;
+    surf->memfd_fd = -1;
     surf->cpu_stride = 432;
     expect_true(v4l2sl_surface_alloc_export_fd(surf) == 0, "av1-surf-memfd");
     dd.surfaces[1] = surf;
@@ -429,8 +429,8 @@ static void test_av1_translate_recapture(void)
     expect_true(i2 >= 0 && i3 > i2, "av1-sfmt-before-reqbufsn");
     expect_true(i4 > i3, "av1-streamon-after-recapture");
 
-    if (surf->dma_buf_fd >= 0)
-        close(surf->dma_buf_fd);
+    if (surf->memfd_fd >= 0)
+        close(surf->memfd_fd);
     free(surf);
     if (ctx.request_fd >= 0)
         close(ctx.request_fd);
@@ -471,7 +471,7 @@ static int recap_env_open(struct recap_env *e, int cap_w, int cap_h)
     e->surf->height = cap_h;
     e->surf->format = VA_FOURCC_NV12;
     e->surf->buf_index = -1;
-    e->surf->dma_buf_fd = -1;
+    e->surf->memfd_fd = -1;
     e->surf->cpu_stride = (uint32_t)cap_w;
     if (v4l2sl_surface_alloc_export_fd(e->surf) < 0)
         return -1;
@@ -511,8 +511,8 @@ static int recap_env_open(struct recap_env *e, int cap_w, int cap_h)
 static void recap_env_close(struct recap_env *e)
 {
     if (e->surf) {
-        if (e->surf->dma_buf_fd >= 0)
-            close(e->surf->dma_buf_fd);
+        if (e->surf->memfd_fd >= 0)
+            close(e->surf->memfd_fd);
         free(e->surf);
         e->surf = NULL;
     }

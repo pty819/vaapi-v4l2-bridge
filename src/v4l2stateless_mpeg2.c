@@ -112,12 +112,20 @@ void v4l2sl_mpeg2_fill_quant(struct v4l2_ctrl_mpeg2_quantisation *q,
     else
         memset(q->non_intra_quantiser_matrix, 16, 64);
 
+    /* H.262 6.3.7: untransmitted chroma matrices inherit the luma values
+     * (or their defaults) — the kernel programs these tables verbatim, so
+     * the fallback is ours to apply. */
     if (iq && iq->load_chroma_intra_quantiser_matrix)
         memcpy(q->chroma_intra_quantiser_matrix,
                iq->chroma_intra_quantiser_matrix, 64);
+    else
+        memcpy(q->chroma_intra_quantiser_matrix, q->intra_quantiser_matrix, 64);
     if (iq && iq->load_chroma_non_intra_quantiser_matrix)
         memcpy(q->chroma_non_intra_quantiser_matrix,
                iq->chroma_non_intra_quantiser_matrix, 64);
+    else
+        memcpy(q->chroma_non_intra_quantiser_matrix,
+               q->non_intra_quantiser_matrix, 64);
 }
 
 VAStatus v4l2sl_mpeg2_translate(struct v4l2sl_context *ctx,
@@ -193,8 +201,14 @@ VAStatus v4l2sl_mpeg2_translate(struct v4l2sl_context *ctx,
         gctrl.size = sizeof(seq);
         gctrls.controls = &gctrl;
         gctrls.count = 1;
-        if (v4l2sl_set_global_controls(v4l2_fd, &gctrls) < 0)
-            fprintf(stderr, "v4l2stateless: warning: MPEG-2 global sequence failed\n");
+        _Static_assert(sizeof(seq) <= sizeof(ctx->g_ctrl_payload), "grow cache");
+        if (!ctx->g_ctrl_valid ||
+            memcmp(ctx->g_ctrl_payload, &seq, sizeof(seq)) != 0) {
+            if (v4l2sl_set_global_controls(v4l2_fd, &gctrls) < 0)
+                fprintf(stderr, "v4l2stateless: warning: MPEG-2 global sequence failed\n");
+            memcpy(ctx->g_ctrl_payload, &seq, sizeof(seq));
+            ctx->g_ctrl_valid = 1;
+        }
     }
 
     if (v4l2sl_ensure_capture(ctx, pic_param->horizontal_size,
@@ -274,6 +288,13 @@ VAStatus v4l2sl_mpeg2_translate(struct v4l2sl_context *ctx,
 
     /* On failure decode_submit resets both queues — do not push back. */
     done_cap = v4l2sl_decode_submit(ctx, out_buf_idx, (uint32_t)total, timestamp);
+    if (done_cap == -2) {
+        /* Corrupt frame (V4L2_BUF_FLAG_ERROR): mark and succeed — a failed
+         * entrypoint would be cached by Chrome for the whole session. */
+        if (ctx->current_surface)
+            ctx->current_surface->status = VASurfaceSkipped;
+        return VA_STATUS_SUCCESS;
+    }
     if (done_cap < 0)
         return VA_STATUS_ERROR_OPERATION_FAILED;
 

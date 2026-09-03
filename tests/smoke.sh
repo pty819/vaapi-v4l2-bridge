@@ -33,7 +33,8 @@ echo "===== vainfo ====="
 vainfo --display drm --device /dev/dri/renderD128 >"$OUT/vainfo.log" 2>&1 || true
 if grep -q "v4l2stateless/vaapi-v4l2-bridge" "$OUT/vainfo.log"; then
   echo "VAINFO_DRIVER_OK"; pass=$((pass+1))
-  for p in VAProfileH264High VAProfileHEVCMain VAProfileAV1Profile0 \
+  # AV1 intentionally un-advertised (see run_full_matrix.sh vainfo block).
+  for p in VAProfileH264High VAProfileHEVCMain \
            VAProfileVP8Version0_3 VAProfileMPEG2Main VAProfileJPEGBaseline; do
     if grep -q "$p" "$OUT/vainfo.log"; then
       echo "VAINFO_OK $p"; pass=$((pass+1))
@@ -79,7 +80,6 @@ smoke_dec() {
 echo "===== 2-frame HW decode ====="
 smoke_dec "$CLIP/h264_qcif.mp4" h264-qcif 2
 smoke_dec "$CLIP/hevc_main.mp4" hevc-main 2
-smoke_dec "$CLIP/av1_default.mp4" av1-default 2
 smoke_dec "$CLIP/vp8_480.webm" vp8-480 2
 smoke_dec "$CLIP/mpeg2_ip.mpg" mpeg2-ip 2
 

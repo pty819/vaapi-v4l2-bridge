@@ -297,54 +297,6 @@ void h264_fill_scaling_matrix(struct v4l2_ctrl_h264_scaling_matrix *sm,
 }
 
 /*
- * Translate VA-API slice parameters to V4L2 H.264 slice params
- */
-void h264_fill_slice_params(struct v4l2_ctrl_h264_slice_params *sp,
-                            const VASliceParameterBufferH264 *slice,
-                            const VAPictureParameterBufferH264 *pic,
-                            struct v4l2sl_driver_data *dd)
-{
-    memset(sp, 0, sizeof(*sp));
-
-    sp->header_bit_size = slice->slice_data_bit_offset;
-    sp->first_mb_in_slice = slice->first_mb_in_slice;
-    sp->slice_type = slice->slice_type;
-    sp->colour_plane_id = 0;
-    sp->redundant_pic_cnt = 0;
-    sp->cabac_init_idc = slice->cabac_init_idc;
-    sp->slice_qp_delta = slice->slice_qp_delta;
-    sp->disable_deblocking_filter_idc = slice->disable_deblocking_filter_idc;
-    sp->slice_alpha_c0_offset_div2 = slice->slice_alpha_c0_offset_div2;
-    sp->slice_beta_offset_div2 = slice->slice_beta_offset_div2;
-    sp->num_ref_idx_l0_active_minus1 = slice->num_ref_idx_l0_active_minus1;
-    sp->num_ref_idx_l1_active_minus1 = slice->num_ref_idx_l1_active_minus1;
-
-    /* Fill reference list 0 (P/B slice forward references) */
-    for (int i = 0; i <= slice->num_ref_idx_l0_active_minus1 && i < V4L2_H264_REF_LIST_LEN; i++) {
-        const VAPictureH264 *ref = &slice->RefPicList0[i];
-        if (ref->flags & VA_PICTURE_H264_INVALID)
-            continue;
-        sp->ref_pic_list0[i].fields = V4L2_H264_FRAME_REF;
-        /* Find this reference's timestamp in the DPB */
-        sp->ref_pic_list0[i].index = i;  /* Simplified index mapping */
-    }
-
-    /* Fill reference list 1 (B slice backward references) */
-    for (int i = 0; i <= slice->num_ref_idx_l1_active_minus1 && i < V4L2_H264_REF_LIST_LEN; i++) {
-        const VAPictureH264 *ref = &slice->RefPicList1[i];
-        if (ref->flags & VA_PICTURE_H264_INVALID)
-            continue;
-        sp->ref_pic_list1[i].fields = V4L2_H264_FRAME_REF;
-        sp->ref_pic_list1[i].index = i;
-    }
-
-    /* Flags */
-    sp->flags = 0;
-    if (slice->direct_spatial_mv_pred_flag)
-        sp->flags |= V4L2_H264_SLICE_FLAG_DIRECT_SPATIAL_MV_PRED;
-}
-
-/*
  * Main H.264 decode pipeline
  *
  * Called from v4l2sl_end_picture when all VA-API buffers have been collected.
@@ -361,8 +313,8 @@ VAStatus v4l2sl_h264_translate(struct v4l2sl_context *ctx,
     VAIQMatrixBufferH264 *iq_matrix = NULL;
     VASliceParameterBufferH264 *slice_param = NULL;
     /* A picture may consist of many slices — one VASliceDataBuffer each */
-    const uint8_t *slice_datas[32];
-    uint32_t slice_sizes[32];
+    const uint8_t *slice_datas[V4L2SL_MAX_SLICE_DATAS];
+    uint32_t slice_sizes[V4L2SL_MAX_SLICE_DATAS];
     int n_slice_data = 0;
 
     for (int i = 0; i < num_buffers; i++) {
@@ -382,7 +334,7 @@ VAStatus v4l2sl_h264_translate(struct v4l2sl_context *ctx,
                 slice_param = buf->data;  /* first slice defines the picture */
             break;
         case VASliceDataBufferType:
-            if (n_slice_data < 32) {
+            if (n_slice_data < V4L2SL_MAX_SLICE_DATAS) {
                 slice_datas[n_slice_data] = buf->data;
                 slice_sizes[n_slice_data] = buf->size;
                 n_slice_data++;
@@ -416,12 +368,6 @@ VAStatus v4l2sl_h264_translate(struct v4l2sl_context *ctx,
      * kernel parses the slice header itself from the Annex B bitstream.
      */
 
-    /* Get the driver_data for DPB timestamp lookup */
-    /* We need access to driver_data for timestamp resolution. Walk up from context. */
-    /* For now, pass NULL for dd — DPB timestamps will be 0, which means
-     * the first few frames (with no references) will work fine.
-     * Multi-reference decoding needs the actual timestamps. */
-
     h264_fill_sps(&sps, pic_param, ctx->profile);
     h264_fill_pps(&pps, pic_param, slice_param);
     h264_fill_decode_params(&dec, pic_param, ctx->driver_data, slice_param);
@@ -430,9 +376,6 @@ VAStatus v4l2sl_h264_translate(struct v4l2sl_context *ctx,
         h264_fill_scaling_matrix(&sm, iq_matrix);
     else
         memset(&sm, 0, sizeof(sm));
-
-    if (0 && slice_param)
-        h264_fill_slice_params(NULL, NULL, NULL, NULL);
 
     /*
      * Step 2: Set V4L2 ext controls bound to the request
@@ -470,11 +413,18 @@ VAStatus v4l2sl_h264_translate(struct v4l2sl_context *ctx,
         g_sps_ctrl.size = sizeof(sps);
         g_sps_ctrls.controls = &g_sps_ctrl;
         g_sps_ctrls.count = 1;
-        if (v4l2sl_set_global_controls(v4l2_fd, &g_sps_ctrls) < 0) {
-            fprintf(stderr,
-                    "v4l2stateless: H.264 global SPS not accepted\n");
-            if (ctx->capture_bufs_allocd <= 0)
-                return VA_STATUS_ERROR_OPERATION_FAILED;
+        /* Sequence-level control: resubmit only when the payload changed. */
+        _Static_assert(sizeof(sps) <= sizeof(ctx->g_ctrl_payload), "grow cache");
+        if (!ctx->g_ctrl_valid ||
+            memcmp(ctx->g_ctrl_payload, &sps, sizeof(sps)) != 0) {
+            if (v4l2sl_set_global_controls(v4l2_fd, &g_sps_ctrls) < 0) {
+                fprintf(stderr,
+                        "v4l2stateless: H.264 global SPS not accepted\n");
+                if (ctx->capture_bufs_allocd <= 0)
+                    return VA_STATUS_ERROR_OPERATION_FAILED;
+            }
+            memcpy(ctx->g_ctrl_payload, &sps, sizeof(sps));
+            ctx->g_ctrl_valid = 1;
         }
 
         if (v4l2sl_ensure_capture(ctx, w, h, cap) < 0) {
@@ -491,48 +441,24 @@ VAStatus v4l2sl_h264_translate(struct v4l2sl_context *ctx,
         }
     }
 
-    /* Set H.264 SPS */
-    struct v4l2_ext_control sps_ctrl = { 0 };
-    sps_ctrl.id = V4L2_CID_STATELESS_H264_SPS;
-    sps_ctrl.p_h264_sps = &sps;
-    sps_ctrl.size = sizeof(sps);
+    /* Request-scoped picture controls in ONE ioctl. */
+    struct v4l2_ext_control pic_ctrls[3] = { { 0 }, { 0 }, { 0 } };
+    struct v4l2_ext_controls batch = { 0 };
 
-    struct v4l2_ext_controls sps_ctrls = { 0 };
-    sps_ctrls.controls = &sps_ctrl;
-    sps_ctrls.count = 1;
+    pic_ctrls[0].id = V4L2_CID_STATELESS_H264_SPS;
+    pic_ctrls[0].p_h264_sps = &sps;
+    pic_ctrls[0].size = sizeof(sps);
+    pic_ctrls[1].id = V4L2_CID_STATELESS_H264_PPS;
+    pic_ctrls[1].p_h264_pps = &pps;
+    pic_ctrls[1].size = sizeof(pps);
+    pic_ctrls[2].id = V4L2_CID_STATELESS_H264_DECODE_PARAMS;
+    pic_ctrls[2].p_h264_decode_params = &dec;
+    pic_ctrls[2].size = sizeof(dec);
+    batch.controls = pic_ctrls;
+    batch.count = 3;
 
-    if (v4l2sl_set_request_controls(request_fd, v4l2_fd, &sps_ctrls) < 0) {
-        fprintf(stderr, "v4l2stateless: failed to set H.264 SPS\n");
-        return VA_STATUS_ERROR_OPERATION_FAILED;
-    }
-
-    /* Set H.264 PPS */
-    struct v4l2_ext_control pps_ctrl = { 0 };
-    pps_ctrl.id = V4L2_CID_STATELESS_H264_PPS;
-    pps_ctrl.p_h264_pps = &pps;
-    pps_ctrl.size = sizeof(pps);
-
-    struct v4l2_ext_controls pps_ctrls = { 0 };
-    pps_ctrls.controls = &pps_ctrl;
-    pps_ctrls.count = 1;
-
-    if (v4l2sl_set_request_controls(request_fd, v4l2_fd, &pps_ctrls) < 0) {
-        fprintf(stderr, "v4l2stateless: failed to set H.264 PPS\n");
-        return VA_STATUS_ERROR_OPERATION_FAILED;
-    }
-
-    /* Set H.264 decode params */
-    struct v4l2_ext_control dec_ctrl = { 0 };
-    dec_ctrl.id = V4L2_CID_STATELESS_H264_DECODE_PARAMS;
-    dec_ctrl.p_h264_decode_params = &dec;
-    dec_ctrl.size = sizeof(dec);
-
-    struct v4l2_ext_controls dec_ctrls = { 0 };
-    dec_ctrls.controls = &dec_ctrl;
-    dec_ctrls.count = 1;
-
-    if (v4l2sl_set_request_controls(request_fd, v4l2_fd, &dec_ctrls) < 0) {
-        fprintf(stderr, "v4l2stateless: failed to set H.264 decode params\n");
+    if (v4l2sl_set_request_controls(request_fd, v4l2_fd, &batch) < 0) {
+        fprintf(stderr, "v4l2stateless: failed to set H.264 picture controls\n");
         return VA_STATUS_ERROR_OPERATION_FAILED;
     }
 
@@ -582,7 +508,7 @@ VAStatus v4l2sl_h264_translate(struct v4l2sl_context *ctx,
      * picture are concatenated — frame-based decode consumes the whole
      * frame in one request.
      */
-    size_t prefixes[32];
+    size_t prefixes[V4L2SL_MAX_SLICE_DATAS];
     size_t total = 0;
     for (int i = 0; i < n_slice_data; i++) {
         prefixes[i] = 0;
@@ -619,6 +545,13 @@ VAStatus v4l2sl_h264_translate(struct v4l2sl_context *ctx,
     int done_cap = v4l2sl_decode_submit(ctx, out_buf_idx, (uint32_t)total, timestamp);
     if (done_cap < 0)
         return VA_STATUS_ERROR_OPERATION_FAILED;
+    if (done_cap == -2) {
+        /* Corrupt frame (V4L2_BUF_FLAG_ERROR): mark and succeed — a failed
+         * entrypoint would be cached by Chrome for the whole session. */
+        if (ctx->current_surface)
+            ctx->current_surface->status = VASurfaceSkipped;
+        return VA_STATUS_SUCCESS;
+    }
 
     /* Attach the decoded frame to the target surface */
     struct v4l2sl_surface *surf = ctx->current_surface;

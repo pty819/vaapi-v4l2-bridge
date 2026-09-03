@@ -128,6 +128,9 @@ static void test_mpeg2_fcode_and_defaults(void)
     v4l2sl_mpeg2_fill_quant(&q, NULL);
     expect_true(q.intra_quantiser_matrix[0] == 8, "mpeg2-default-intra0");
     expect_true(q.non_intra_quantiser_matrix[0] == 16, "mpeg2-default-nonintra");
+    /* H.262 6.3.7: untransmitted chroma matrices inherit the luma values. */
+    expect_true(q.chroma_intra_quantiser_matrix[0] == 8, "mpeg2-chroma-inherits-intra");
+    expect_true(q.chroma_non_intra_quantiser_matrix[0] == 16, "mpeg2-chroma-inherits-nonintra");
 }
 
 static void test_h264_sps_pps(void)
