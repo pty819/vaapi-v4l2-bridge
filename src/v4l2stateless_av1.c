@@ -525,9 +525,137 @@ static uint8_t av1_infer_refresh_flags(const VADecPictureParameterBufferAV1 *pic
                                     show, skip);
 }
 
+
+/*
+ * refresh_frame_flags: VA-API does not carry it and the slot policy is
+ * encoder-defined (bilibili's "BILIAV1" assigns slots in an order no
+ * order-hint heuristic reproduces). Clients that submit the whole OBU
+ * span (Chrome) carry the frame OBU's uncompressed header in the same
+ * buffer the tile offsets point into: parse the true 8-bit field there
+ * and verify frame_type / show_frame / order_hint / primary_ref_frame
+ * against VA's own picture parameters before trusting it. Any mismatch
+ * — including raw-tile clients like ffmpeg, whose buffer starts
+ * mid-OBU — falls back to the heuristic above.
+ */
+struct av1_br { const uint8_t *d; size_t n; size_t bit; };
+
+static unsigned av1_br_f(struct av1_br *br, unsigned nb)
+{
+    unsigned v = 0;
+    while (nb--) {
+        size_t byte = br->bit >> 3;
+        if (byte >= br->n) {
+            br->bit = (size_t)-1;
+            return 0;
+        }
+        v = (v << 1) | (unsigned)((br->d[byte] >> (7 - (br->bit & 7))) & 1u);
+        br->bit++;
+    }
+    return v;
+}
+
+static int av1_parse_hdr_refresh(const uint8_t *span, size_t span_n,
+                                 const VADecPictureParameterBufferAV1 *pic,
+                                 uint8_t *refresh_out)
+{
+    size_t pos = 0;
+    unsigned ohb = (unsigned)pic->order_hint_bits_minus_1 + 1;
+    int eoh = pic->seq_info_fields.fields.enable_order_hint;
+    int cand;
+
+    if (pic->seq_info_fields.fields.still_picture)
+        return 0;
+
+    /* Chrome submits a whole run of OBUs as one slice buffer; the current
+     * frame's header is often NOT the first frame OBU in it. Walk every
+     * frame OBU and keep the one that reproduces VA's picture params.
+     * libva does not expose the sequence's screen-content / integer-MV
+     * modes, so each header is tried with / without those optional bits. */
+    pos = 0;
+    while (pos + 1 < span_n) {
+        uint8_t h = span[pos];
+        unsigned type = (h >> 3) & 0xf;
+        int has_size = (h >> 1) & 1;
+        size_t sz;
+
+        pos += 1;
+        if (h & 0x4)
+            pos += 1;
+        if (has_size) {
+            size_t shift = 0;
+            sz = 0;
+            while (pos < span_n) {
+                uint8_t b = span[pos++];
+                sz |= (size_t)(b & 0x7f) << shift;
+                shift += 7;
+                if (!(b & 0x80))
+                    break;
+                if (shift > 28)
+                    return 0;
+            }
+        } else {
+            sz = span_n - pos;
+        }
+        if (sz > span_n - pos)
+            return 0;
+        if (type == 6 || type == 3) {
+            for (cand = 0; cand < 4; cand++) {
+                int sct_bit = cand & 1;
+                struct av1_br br = { span + pos, sz, 0 };
+                unsigned sef, ft, show, er = 1, allow_sct = 0, oh = 0, prf, refresh;
+
+                sef = av1_br_f(&br, 1);
+                if (br.bit == (size_t)-1 || sef)
+                    continue;
+                ft = av1_br_f(&br, 2);
+                show = av1_br_f(&br, 1);
+                if (!show)
+                    av1_br_f(&br, 1);
+                if (!((ft == 0 && show) || ft == 2))
+                    er = av1_br_f(&br, 1);
+                av1_br_f(&br, 1);
+                if (sct_bit) {
+                    allow_sct = av1_br_f(&br, 1);
+                    if (allow_sct)
+                        av1_br_f(&br, 1);
+                }
+                if (ft != 2)
+                    av1_br_f(&br, 1);
+                if (eoh)
+                    oh = av1_br_f(&br, ohb);
+                prf = (!er && ft == 1) ? av1_br_f(&br, 3) : 7;
+                if (ft == 2 || (ft == 0 && show))
+                    refresh = 0xff;
+                else
+                    refresh = av1_br_f(&br, 8);
+                if (br.bit == (size_t)-1)
+                    continue;
+                if (ft != pic->pic_info_fields.bits.frame_type)
+                    continue;
+                if (show != pic->pic_info_fields.bits.show_frame)
+                    continue;
+                if (eoh && oh != pic->order_hint)
+                    continue;
+                if (prf != pic->primary_ref_frame)
+                    continue;
+                if (sct_bit && allow_sct != !!pic->pic_info_fields.bits.allow_screen_content_tools)
+                    continue;
+                *refresh_out = (uint8_t)refresh;
+                return 1;
+            }
+        }
+        pos += sz;
+    }
+    return 0;
+}
+
+
 static void av1_fill_frame_params(struct v4l2_ctrl_av1_frame *frame,
                                   const VADecPictureParameterBufferAV1 *pic,
-                                  struct v4l2sl_context *ctx)
+                                  struct v4l2sl_context *ctx,
+                                  const uint8_t *span, size_t span_n,
+                                  const uint8_t * const *all_spans,
+                                  const uint32_t *all_sizes)
 {
     struct v4l2sl_driver_data *dd = ctx ? ctx->driver_data : NULL;
     memset(frame, 0, sizeof(*frame));
@@ -742,7 +870,27 @@ static void av1_fill_frame_params(struct v4l2_ctrl_av1_frame *frame,
             av1_surface_order_hint(dd, sid);
     }
 
-    frame->refresh_frame_flags = av1_infer_refresh_flags(pic, dd, ctx);
+    {
+        uint8_t parsed = 0;
+        int parsed_ok = (span && av1_parse_hdr_refresh(span, span_n, pic,
+                                                       &parsed));
+        if (!parsed_ok) {
+            /* Chrome may split the submission into several slice buffers;
+             * only some carry the OBU framing. Try them all. */
+            int si;
+            for (si = 0; si < V4L2SL_MAX_SLICE_DATAS && !parsed_ok; si++)
+                if (all_spans[si] &&
+                    av1_parse_hdr_refresh(all_spans[si], all_sizes[si],
+                                          pic, &parsed)) {
+                    parsed_ok = 1;
+                    break;
+                }
+        }
+        if (parsed_ok)
+            frame->refresh_frame_flags = parsed;
+        else
+            frame->refresh_frame_flags = av1_infer_refresh_flags(pic, dd, ctx);
+    }
 
     frame->flags = 0;
     if (pic->pic_info_fields.bits.show_frame)
@@ -828,7 +976,9 @@ VAStatus v4l2sl_av1_translate(struct v4l2sl_context *ctx,
     struct v4l2_ctrl_av1_frame frame;
 
     av1_fill_sequence_params(&seq, pic_param);
-    av1_fill_frame_params(&frame, pic_param, ctx);
+    av1_fill_frame_params(&frame, pic_param, ctx,
+                          (const uint8_t *)cb.largest, cb.largest_size,
+                          cb.slice_datas, cb.slice_sizes);
 
     int request_fd = ctx->request_fd;
     int v4l2_fd = ctx->v4l2_fd;

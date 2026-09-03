@@ -100,7 +100,15 @@ struct v4l2sl_buffer {
 
 /* Number of output/capture buffer slots */
 #define V4L2SL_NUM_OUTPUT_BUFS  4
+/* Hard ceiling on capture buffer indexes — sizes every per-context
+ * array. Keep >= the largest requested count below. */
+#define V4L2SL_MAX_CAPTURE_BUFS 40
 #define V4L2SL_NUM_CAPTURE_BUFS 24
+/* AV1 decode through Chrome WebCodecs (bilibili bwp) keeps one live
+ * surface per queued VideoFrame; 24 starves after ~5s of playback.
+ * hantro AV1 capture buffers do not come from CMA, so the deeper pool
+ * is cheap there. */
+#define V4L2SL_NUM_CAPTURE_BUFS_AV1 40
 
 /* Slice-data buffers a single picture may carry (MPEG-2 hits one per MB
  * row; sized to match pending_buffers). */
@@ -185,10 +193,10 @@ struct v4l2sl_context {
     /* Capture (decoded frame) buffer management */
     int capture_bufs_allocd;
     int streamed;         /* STREAMON done (HEVC defers it past SPS) */
-    void *capture_buf_ptr[V4L2SL_NUM_CAPTURE_BUFS];
+    void *capture_buf_ptr[V4L2SL_MAX_CAPTURE_BUFS];
     uint32_t capture_buf_size;
     int capture_buf_anon; /* calloc stub when ioctl hook is installed */
-    int free_cap_bufs[V4L2SL_NUM_CAPTURE_BUFS];
+    int free_cap_bufs[V4L2SL_MAX_CAPTURE_BUFS];
     int n_free_cap;
     uint32_t cap_width;        /* driver-chosen capture geometry */
     uint32_t cap_height;       /* aligned height (e.g. 1088 for 1080p) */
@@ -290,9 +298,9 @@ static inline void v4l2sl_cap_pool_push(struct v4l2sl_context *ctx, int idx)
 {
     int i;
 
-    if (!ctx || idx < 0 || idx >= V4L2SL_NUM_CAPTURE_BUFS)
+    if (!ctx || idx < 0 || idx >= V4L2SL_MAX_CAPTURE_BUFS)
         return;
-    if (ctx->n_free_cap >= V4L2SL_NUM_CAPTURE_BUFS)
+    if (ctx->n_free_cap >= V4L2SL_MAX_CAPTURE_BUFS)
         return;
     for (i = 0; i < ctx->n_free_cap; i++)
         if (ctx->free_cap_bufs[i] == idx)
