@@ -384,7 +384,7 @@ static void release_ctx_capture_surfaces(struct v4l2sl_context *ctx)
  * returns them when the surface is re-targeted. */
 static void rebuild_free_pools(struct v4l2sl_context *ctx)
 {
-    int claimed[V4L2SL_NUM_CAPTURE_BUFS] = { 0 };
+    int claimed[V4L2SL_MAX_CAPTURE_BUFS] = { 0 };
     int i;
 
     ctx->n_free_out = 0;
@@ -396,13 +396,13 @@ static void rebuild_free_pools(struct v4l2sl_context *ctx)
             struct v4l2sl_surface *s =
                 v4l2sl_surface_by_id(ctx->driver_data, ctx->render_targets[i]);
 
-            if (s && s->buf_index >= 0 && s->buf_index < V4L2SL_NUM_CAPTURE_BUFS)
+            if (s && s->buf_index >= 0 && s->buf_index < V4L2SL_MAX_CAPTURE_BUFS)
                 claimed[s->buf_index] = 1;
         }
     }
 
     ctx->n_free_cap = 0;
-    for (i = 0; i < ctx->capture_bufs_allocd && i < V4L2SL_NUM_CAPTURE_BUFS; i++)
+    for (i = 0; i < ctx->capture_bufs_allocd && i < V4L2SL_MAX_CAPTURE_BUFS; i++)
         if (!claimed[i])
             v4l2sl_cap_pool_push(ctx, i);
 }
@@ -442,6 +442,7 @@ int v4l2sl_decode_submit(struct v4l2sl_context *ctx, int out_buf_idx,
 
     if (ctx->n_free_cap == 0) {
         fprintf(stderr, "v4l2stateless: no free capture buffer\n");
+
         v4l2sl_out_pool_push(ctx, out_buf_idx);
         return -1;
     }
@@ -648,8 +649,17 @@ int v4l2sl_ensure_capture(struct v4l2sl_context *ctx, int width, int height,
      * exhausted (desktop GBM), and a smaller pool beats a dead context.
      * The spec puts the reference-depth burden on the client — 24 covers
      * every profile; a degraded pool only hurts deep B-pyramids. */
-    n_cap = v4l2sl_setup_capture_queue_count(ctx->v4l2_fd, width, height, fourcc,
-                                             V4L2SL_NUM_CAPTURE_BUFS);
+    {
+        int want_cap = ctx->codec == V4L2SL_CODEC_AV1 ?
+                       V4L2SL_NUM_CAPTURE_BUFS_AV1 : V4L2SL_NUM_CAPTURE_BUFS;
+        n_cap = v4l2sl_setup_capture_queue_count(ctx->v4l2_fd, width, height,
+                                                 fourcc, want_cap);
+    }
+    if (n_cap <= 0 && V4L2SL_NUM_CAPTURE_BUFS > 24) {
+        fprintf(stderr, "v4l2stateless: retrying capture REQBUFS with 24 buffers\n");
+        n_cap = v4l2sl_setup_capture_queue_count(ctx->v4l2_fd, width, height,
+                                                 fourcc, 24);
+    }
     if (n_cap <= 0 && V4L2SL_NUM_CAPTURE_BUFS > 8) {
         fprintf(stderr, "v4l2stateless: retrying capture REQBUFS with 8 buffers\n");
         n_cap = v4l2sl_setup_capture_queue_count(ctx->v4l2_fd, width, height,
@@ -664,6 +674,8 @@ int v4l2sl_ensure_capture(struct v4l2sl_context *ctx, int width, int height,
         return -1;
 
     ctx->capture_bufs_allocd = n_cap;
+    if (getenv("V4L2SL_DEBUG"))
+        fprintf(stderr, "v4l2stateless: capture pool n=%d\n", n_cap);
     ctx->n_free_cap = 0;
     {
         int i;
