@@ -1106,6 +1106,48 @@ int v4l2sl_bind_capture_export(struct v4l2sl_context *ctx)
     return 0;
 }
 
+void v4l2sl_fill_prime_layers(VADRMPRIMESurfaceDescriptor *desc,
+                              int fd, uint32_t object_size,
+                              uint64_t modifier, uint32_t va_fourcc,
+                              uint32_t width, uint32_t height,
+                              uint32_t pitch, uint32_t chroma_row,
+                              uint32_t combined_fmt, uint32_t luma_fmt,
+                              uint32_t chroma_fmt, uint32_t flags)
+{
+    memset(desc, 0, sizeof(*desc));
+    desc->fourcc = va_fourcc;
+    desc->width = width;
+    desc->height = height;
+    desc->num_objects = 1;
+    desc->objects[0].fd = fd;
+    desc->objects[0].size = object_size;
+    desc->objects[0].drm_format_modifier = modifier;
+
+    if (flags & VA_EXPORT_SURFACE_SEPARATE_LAYERS) {
+        desc->num_layers = 2;
+        desc->layers[0].drm_format = luma_fmt;
+        desc->layers[0].num_planes = 1;
+        desc->layers[0].object_index[0] = 0;
+        desc->layers[0].offset[0] = 0;
+        desc->layers[0].pitch[0] = pitch;
+        desc->layers[1].drm_format = chroma_fmt;
+        desc->layers[1].num_planes = 1;
+        desc->layers[1].object_index[0] = 0;
+        desc->layers[1].offset[0] = pitch * chroma_row;
+        desc->layers[1].pitch[0] = pitch;
+    } else {
+        desc->num_layers = 1;
+        desc->layers[0].drm_format = combined_fmt;
+        desc->layers[0].num_planes = 2;
+        desc->layers[0].object_index[0] = 0;
+        desc->layers[0].object_index[1] = 0;
+        desc->layers[0].offset[0] = 0;
+        desc->layers[0].offset[1] = pitch * chroma_row;
+        desc->layers[0].pitch[0] = pitch;
+        desc->layers[0].pitch[1] = pitch;
+    }
+}
+
 VAStatus v4l2sl_surface_fill_prime(const struct v4l2sl_surface *surf,
                                    const struct v4l2sl_context *c,
                                    uint32_t flags,
@@ -1133,42 +1175,17 @@ VAStatus v4l2sl_surface_fill_prime(const struct v4l2sl_surface *surf,
     if (fd < 0)
         return VA_STATUS_ERROR_OPERATION_FAILED;
 
-    memset(desc, 0, sizeof(*desc));
-    desc->fourcc = v4l2sl_va_fourcc_for_capture(cap_fcc);
-    if (cap_fcc == V4L2_PIX_FMT_NV12)
-        desc->fourcc = VA_FOURCC_NV12;
-    desc->width = surf->width;
-    desc->height = surf->height;
-    desc->num_objects = 1;
-    desc->objects[0].fd = fd;
-    desc->objects[0].size = plane_size;
-    desc->objects[0].drm_format_modifier = DRM_FORMAT_MOD_LINEAR;
-
-    if (flags & VA_EXPORT_SURFACE_SEPARATE_LAYERS) {
-        desc->num_layers = 2;
-        desc->layers[0].drm_format = (cap_fcc == V4L2_PIX_FMT_NV15) ?
-            DRM_FORMAT_R16 : DRM_FORMAT_R8;
-        desc->layers[0].num_planes = 1;
-        desc->layers[0].object_index[0] = 0;
-        desc->layers[0].offset[0] = 0;
-        desc->layers[0].pitch[0] = stride;
-        desc->layers[1].drm_format = (cap_fcc == V4L2_PIX_FMT_NV15) ?
-            DRM_FORMAT_GR1616 : DRM_FORMAT_GR88;
-        desc->layers[1].num_planes = 1;
-        desc->layers[1].object_index[0] = 0;
-        desc->layers[1].offset[0] = stride * alh;
-        desc->layers[1].pitch[0] = stride;
-    } else {
-        desc->num_layers = 1;
-        desc->layers[0].drm_format = drm_fcc;
-        desc->layers[0].num_planes = 2;
-        desc->layers[0].object_index[0] = 0;
-        desc->layers[0].object_index[1] = 0;
-        desc->layers[0].offset[0] = 0;
-        desc->layers[0].offset[1] = stride * alh;
-        desc->layers[0].pitch[0] = stride;
-        desc->layers[0].pitch[1] = stride;
-    }
+    v4l2sl_fill_prime_layers(desc, fd, plane_size, DRM_FORMAT_MOD_LINEAR,
+                             (cap_fcc == V4L2_PIX_FMT_NV12) ?
+                                 VA_FOURCC_NV12 :
+                                 v4l2sl_va_fourcc_for_capture(cap_fcc),
+                             surf->width, surf->height, stride, alh,
+                             drm_fcc,
+                             (cap_fcc == V4L2_PIX_FMT_NV15) ?
+                                 DRM_FORMAT_R16 : DRM_FORMAT_R8,
+                             (cap_fcc == V4L2_PIX_FMT_NV15) ?
+                                 DRM_FORMAT_GR1616 : DRM_FORMAT_GR88,
+                             flags);
     return VA_STATUS_SUCCESS;
 }
 

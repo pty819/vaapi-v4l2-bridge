@@ -13,6 +13,7 @@
 #include <va/va_backend.h>
 #include <va/va_dec_vp8.h>
 #include <va/va_vpp.h>
+#include <va/va_drmcommon.h>
 #include <linux/v4l2-controls.h>
 #include <linux/videodev2.h>
 
@@ -390,6 +391,17 @@ void v4l2sl_m2m_teardown(struct v4l2sl_context *ctx, struct v4l2sl_m2m_state *q)
 /* One-pass decode-buffer collection shared by every codec translate. */
 void v4l2sl_collect_decode_buffers(struct v4l2sl_buffer **buffers, int n,
                                    struct v4l2sl_collected *cb);
+/* Single-object VADRMPRIMESurfaceDescriptor layout shared by the memfd
+ * and GBM-bo export paths: 2 planes at `pitch`, chroma starting at row
+ * `chroma_row`; SEPARATE_LAYERS splits them into two single-plane
+ * layers (luma_fmt/chroma_fmt) instead of one `combined_fmt` layer. */
+void v4l2sl_fill_prime_layers(VADRMPRIMESurfaceDescriptor *desc,
+                              int fd, uint32_t object_size,
+                              uint64_t modifier, uint32_t va_fourcc,
+                              uint32_t width, uint32_t height,
+                              uint32_t pitch, uint32_t chroma_row,
+                              uint32_t combined_fmt, uint32_t luma_fmt,
+                              uint32_t chroma_fmt, uint32_t flags);
 /* poll() wrapper that retries EINTR (device.c) */
 int v4l2sl_poll_intr(struct pollfd *fds, nfds_t n, int timeout);
 /* EINTR-retrying ioctl (device.c); VPP/JPEG route through it so the test

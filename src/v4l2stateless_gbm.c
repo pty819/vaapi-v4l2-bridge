@@ -222,37 +222,10 @@ VAStatus v4l2sl_surface_fill_prime_gbm(const struct v4l2sl_surface *surf,
 
     h = surf->height;
     pitch = surf->gbm_stride;
-    memset(desc, 0, sizeof(*desc));
-    desc->fourcc = VA_FOURCC_NV12;
-    desc->width = surf->width;
-    desc->height = h;
-    desc->num_objects = 1;
-    desc->objects[0].fd = fd;
-    desc->objects[0].size = pitch * (h + (h + 1) / 2);
-    desc->objects[0].drm_format_modifier = gbm_bo_get_modifier(surf->gbm_bo);
-
-    if (flags & VA_EXPORT_SURFACE_SEPARATE_LAYERS) {
-        desc->num_layers = 2;
-        desc->layers[0].drm_format = DRM_FORMAT_R8;
-        desc->layers[0].num_planes = 1;
-        desc->layers[0].object_index[0] = 0;
-        desc->layers[0].offset[0] = 0;
-        desc->layers[0].pitch[0] = pitch;
-        desc->layers[1].drm_format = DRM_FORMAT_GR88;
-        desc->layers[1].num_planes = 1;
-        desc->layers[1].object_index[0] = 0;
-        desc->layers[1].offset[0] = pitch * h;
-        desc->layers[1].pitch[0] = pitch;
-    } else {
-        desc->num_layers = 1;
-        desc->layers[0].drm_format = DRM_FORMAT_NV12;
-        desc->layers[0].num_planes = 2;
-        desc->layers[0].object_index[0] = 0;
-        desc->layers[0].object_index[1] = 0;
-        desc->layers[0].offset[0] = 0;
-        desc->layers[0].offset[1] = pitch * h;
-        desc->layers[0].pitch[0] = pitch;
-        desc->layers[0].pitch[1] = pitch;
-    }
+    v4l2sl_fill_prime_layers(desc, fd, pitch * (h + (h + 1) / 2),
+                             gbm_bo_get_modifier(surf->gbm_bo),
+                             VA_FOURCC_NV12, surf->width, h, pitch, h,
+                             DRM_FORMAT_NV12, DRM_FORMAT_R8, DRM_FORMAT_GR88,
+                             flags);
     return VA_STATUS_SUCCESS;
 }
