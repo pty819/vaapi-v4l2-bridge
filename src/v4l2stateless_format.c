@@ -300,18 +300,25 @@ uint32_t v4l2sl_va_image_size(uint32_t va_fourcc, uint32_t stride, uint32_t heig
 
 uint32_t v4l2sl_default_image_stride(uint32_t va_fourcc, int width)
 {
+    uint32_t stride;
+
     switch (va_fourcc) {
     case VA_FOURCC_P010:
-        return (uint32_t)width * 2;
-    case VA_FOURCC_Y210:
-        return (uint32_t)width * 4;
     case VA_FOURCC_YUY2:
-        return (uint32_t)width * 2;
+        stride = (uint32_t)width * 2;
+        break;
+    case VA_FOURCC_Y210:
     case VA_FOURCC_ARGB:
     case VA_FOURCC_BGRA:
     case VA_FOURCC_BGRX:
-        return (uint32_t)width * 4;
+        stride = (uint32_t)width * 4;
+        break;
     default:
-        return (uint32_t)width;
+        stride = (uint32_t)width;
+        break;
     }
+    /* 64-byte alignment keeps every row copy (put/get_image, VPP, gbm
+     * upload) on NEON-friendly aligned rows. Allocation sizes and the
+     * pitches reported to clients derive from this same value. */
+    return (stride + 63) & ~63u;
 }
