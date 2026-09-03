@@ -40,7 +40,7 @@ fail 分支先 `pthread_mutex_unlock` 再循环改 `driver_data->surfaces[]` 与
 | C9 | `device.c:1091-1095` | DQBUF 带 `V4L2_BUF_FLAG_ERROR` 的缓冲当好帧返回 → 垃圾数据 + SUCCESS |
 | C10 | `device.c:446 等 / vpp.c:356` | `poll()` 无 EINTR 重试：信号（性能采样器/SIGWINCH）被当超时 → 全量 decode_reset（STREAMOFF/重建池），周期性吞吐塌方 |
 | C11 | `h264.c:385 / hevc.c:239` | slice data 超 32 个静默丢弃（pending_buffers 有 256 槽却不用）→ 无诊断的坏帧 |
-| C12 | `av1.c:966-973` | film grain 缺 `update_grain` 标志映射 → 内核无法区分"沿用上帧 grain"与"中途关闭" |
+| C12 | ~~`av1.c:966-973`~~ | **不可修（本机 libva 头文件无此字段）**：VAFilmGrainStructAV1 没有 update_grain 位（09-03 实施时发现，revert f12aba0）；libva 将来补字段后一行即可 |
 | C13 | `av1.c:84-87` | 篡改事实的启发式：enable_order_hint 时强制置 REF_FRAME_MVS/WARPED_MOTION，覆盖 72-75 行已映射的真值；SEPARATE_UV_DELTA_Q 同族 |
 | C14 | `format.c:200-235` | 10bit 4:2:2 转换器 32KB 栈缓冲 + width>4096 静默截断，但驱动宣称 MaxWidth 8192 |
 
