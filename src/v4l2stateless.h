@@ -444,6 +444,8 @@ uint32_t v4l2sl_drm_fourcc_for_capture(uint32_t v4l2_fourcc);
 uint32_t v4l2sl_capture_plane_size(uint32_t fourcc, uint32_t stride, uint32_t aligned_h);
 uint32_t v4l2sl_va_image_size(uint32_t va_fourcc, uint32_t stride, uint32_t height);
 uint32_t v4l2sl_default_image_stride(uint32_t va_fourcc, int width);
+size_t v4l2sl_annexb_concat(const uint8_t * const *datas, const uint32_t *sizes,
+                            int n, int prefix_len, uint8_t *dst, size_t dst_cap);
 void v4l2sl_nv15_to_p010(uint8_t *dst, uint32_t dst_stride,
                          const uint8_t *src, uint32_t src_stride,
                          uint32_t src_aligned_h, int width, int height);

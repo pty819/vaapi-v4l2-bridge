@@ -390,31 +390,13 @@ VAStatus v4l2sl_hevc_translate(struct v4l2sl_context *ctx,
 
     /* Concatenate all slices into the pre-mapped output buffer, prepending
      * an Annex B start code to any NAL that lacks one. */
-    size_t prefixes[V4L2SL_MAX_SLICE_DATAS];
-    size_t total = 0;
-    for (int i = 0; i < n_slice_data; i++) {
-        prefixes[i] = 0;
-        if (!(slice_sizes[i] >= 3 && slice_datas[i][0] == 0 && slice_datas[i][1] == 0 &&
-              (slice_datas[i][2] == 1 ||
-               (slice_sizes[i] >= 4 && slice_datas[i][2] == 0 && slice_datas[i][3] == 1))))
-            prefixes[i] = 4;
-        total += prefixes[i] + slice_sizes[i];
-    }
-    if (total > ctx->output_buf_size) {
+    size_t total = v4l2sl_annexb_concat(
+        slice_datas, slice_sizes, n_slice_data, 4,
+        (uint8_t *)ctx->output_buf_ptr[out_buf_idx], ctx->output_buf_size);
+    if (!total) {
         fprintf(stderr, "v4l2stateless: HEVC slice data too large\n");
         v4l2sl_out_pool_push(ctx, out_buf_idx);
         return VA_STATUS_ERROR_OPERATION_FAILED;
-    }
-    if (ctx->output_buf_ptr[out_buf_idx]) {
-        uint8_t *dst = (uint8_t *)ctx->output_buf_ptr[out_buf_idx];
-        size_t off = 0;
-        for (int i = 0; i < n_slice_data; i++) {
-            if (prefixes[i]) {
-                dst[off] = 0; dst[off + 1] = 0; dst[off + 2] = 0; dst[off + 3] = 1;
-            }
-            memcpy(dst + off + prefixes[i], slice_datas[i], slice_sizes[i]);
-            off += prefixes[i] + slice_sizes[i];
-        }
     }
 
     /* On failure decode_submit resets both queues — nothing stays queued
