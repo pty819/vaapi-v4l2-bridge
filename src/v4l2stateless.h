@@ -157,6 +157,15 @@ struct v4l2sl_context {
     /* Frame counter for V4L2 timestamps (DPB reference matching) */
     uint64_t frame_count;
 
+    /* Hot-path dedup: shadow copy of the last submitted GLOBAL
+     * (sequence-level) control payload. Codec translates memcmp against
+     * it and skip the global ioctl when unchanged. Contexts are
+     * single-codec, so one slot suffices. All translates run under
+     * g_v4l2sl_lock. */
+    uint8_t g_ctrl_valid;
+    /* 1088: this UAPI's padded v4l2_ctrl_h264_sps is 1048 bytes */
+    uint8_t g_ctrl_payload[1088];
+
     /* AV1 refresh_frame_flags inference: VA does not expose the bitmask.
      * 0 = unknown, 1 = libaom-style (free slots from index 1),
      * 2 = SVT-AV1 RA pyramid. */

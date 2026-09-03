@@ -285,9 +285,16 @@ VAStatus v4l2sl_hevc_translate(struct v4l2sl_context *ctx,
     sps_ctrls.controls = &sps_ctrl;
     sps_ctrls.count = 1;
 
-    if (v4l2sl_set_global_controls(v4l2_fd, &sps_ctrls) < 0) {
-        fprintf(stderr, "v4l2stateless: failed to set HEVC SPS\n");
-        return VA_STATUS_ERROR_OPERATION_FAILED;
+    /* Sequence-level control: resubmit only when the payload changed. */
+    _Static_assert(sizeof(sps) <= sizeof(ctx->g_ctrl_payload), "grow cache");
+    if (!ctx->g_ctrl_valid ||
+        memcmp(ctx->g_ctrl_payload, &sps, sizeof(sps)) != 0) {
+        if (v4l2sl_set_global_controls(v4l2_fd, &sps_ctrls) < 0) {
+            fprintf(stderr, "v4l2stateless: failed to set HEVC SPS\n");
+            return VA_STATUS_ERROR_OPERATION_FAILED;
+        }
+        memcpy(ctx->g_ctrl_payload, &sps, sizeof(sps));
+        ctx->g_ctrl_valid = 1;
     }
 
     {

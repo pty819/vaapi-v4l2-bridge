@@ -852,9 +852,16 @@ VAStatus v4l2sl_av1_translate(struct v4l2sl_context *ctx,
     /* Sequence is a GLOBAL control on hantro AV1 — request-scoped
      * submissions succeed the ioctl but leave the device unconfigured,
      * so the subsequent OUTPUT QBUF returns EINVAL. */
-    if (v4l2sl_set_global_controls(v4l2_fd, &seq_ctrls) < 0) {
-        fprintf(stderr, "v4l2stateless: failed to set AV1 sequence params\n");
-        return VA_STATUS_ERROR_OPERATION_FAILED;
+    /* Sequence-level control: resubmit only when the payload changed. */
+    _Static_assert(sizeof(seq) <= sizeof(ctx->g_ctrl_payload), "grow cache");
+    if (!ctx->g_ctrl_valid ||
+        memcmp(ctx->g_ctrl_payload, &seq, sizeof(seq)) != 0) {
+        if (v4l2sl_set_global_controls(v4l2_fd, &seq_ctrls) < 0) {
+            fprintf(stderr, "v4l2stateless: failed to set AV1 sequence params\n");
+            return VA_STATUS_ERROR_OPERATION_FAILED;
+        }
+        memcpy(ctx->g_ctrl_payload, &seq, sizeof(seq));
+        ctx->g_ctrl_valid = 1;
     }
 
     {

@@ -201,8 +201,14 @@ VAStatus v4l2sl_mpeg2_translate(struct v4l2sl_context *ctx,
         gctrl.size = sizeof(seq);
         gctrls.controls = &gctrl;
         gctrls.count = 1;
-        if (v4l2sl_set_global_controls(v4l2_fd, &gctrls) < 0)
-            fprintf(stderr, "v4l2stateless: warning: MPEG-2 global sequence failed\n");
+        _Static_assert(sizeof(seq) <= sizeof(ctx->g_ctrl_payload), "grow cache");
+        if (!ctx->g_ctrl_valid ||
+            memcmp(ctx->g_ctrl_payload, &seq, sizeof(seq)) != 0) {
+            if (v4l2sl_set_global_controls(v4l2_fd, &gctrls) < 0)
+                fprintf(stderr, "v4l2stateless: warning: MPEG-2 global sequence failed\n");
+            memcpy(ctx->g_ctrl_payload, &seq, sizeof(seq));
+            ctx->g_ctrl_valid = 1;
+        }
     }
 
     if (v4l2sl_ensure_capture(ctx, pic_param->horizontal_size,
