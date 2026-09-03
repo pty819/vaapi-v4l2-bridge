@@ -149,34 +149,15 @@ VAStatus v4l2sl_vp8_translate(struct v4l2sl_context *ctx,
     uint64_t timestamp;
     uint8_t *dst;
 
-    for (int i = 0; i < num_buffers; i++) {
-        struct v4l2sl_buffer *buf = buffers[i];
-        if (!buf || !buf->data)
-            continue;
-        switch (buf->type) {
-        case VAPictureParameterBufferType:
-            pic_param = buf->data;
-            break;
-        case VASliceParameterBufferType:
-            if (!slice_param)
-                slice_param = buf->data;
-            break;
-        case VASliceDataBufferType:
-            if (buf->size > slice_size) {
-                slice_data = buf->data;
-                slice_size = buf->size;
-            }
-            break;
-        case VAProbabilityBufferType:
-            prob = buf->data;
-            break;
-        case VAIQMatrixBufferType:
-            iq = buf->data;
-            break;
-        default:
-            break;
-        }
-    }
+    struct v4l2sl_collected cb;
+
+    v4l2sl_collect_decode_buffers(buffers, num_buffers, &cb);
+    pic_param = cb.pic;
+    slice_param = cb.n_slice_params ? cb.slice_params[0] : NULL;
+    prob = cb.prob;
+    iq = cb.iq;
+    slice_data = cb.largest;
+    slice_size = cb.largest_size;
 
     if (!pic_param) {
         fprintf(stderr, "v4l2stateless: VP8 decode missing picture params\n");

@@ -134,8 +134,7 @@ VAStatus v4l2sl_mpeg2_translate(struct v4l2sl_context *ctx,
 {
     VAPictureParameterBufferMPEG2 *pic_param = NULL;
     VAIQMatrixBufferMPEG2 *iq = NULL;
-    const uint8_t *slice_datas[256];
-    uint32_t slice_sizes[256];
+    struct v4l2sl_collected cb;
     int n_slice_data = 0;
     struct v4l2_ctrl_mpeg2_sequence seq;
     struct v4l2_ctrl_mpeg2_picture vpic;
@@ -145,28 +144,10 @@ VAStatus v4l2sl_mpeg2_translate(struct v4l2sl_context *ctx,
     uint64_t timestamp;
     size_t total = 0;
 
-    for (int i = 0; i < num_buffers; i++) {
-        struct v4l2sl_buffer *buf = buffers[i];
-        if (!buf || !buf->data)
-            continue;
-        switch (buf->type) {
-        case VAPictureParameterBufferType:
-            pic_param = buf->data;
-            break;
-        case VAIQMatrixBufferType:
-            iq = buf->data;
-            break;
-        case VASliceDataBufferType:
-            if (n_slice_data < 256) {
-                slice_datas[n_slice_data] = buf->data;
-                slice_sizes[n_slice_data] = buf->size;
-                n_slice_data++;
-            }
-            break;
-        default:
-            break;
-        }
-    }
+    v4l2sl_collect_decode_buffers(buffers, num_buffers, &cb);
+    pic_param = cb.pic;
+    iq = cb.iq;
+    n_slice_data = cb.n_slice_datas;
 
     if (!pic_param) {
         fprintf(stderr, "v4l2stateless: MPEG-2 decode missing picture params\n");
@@ -256,7 +237,7 @@ VAStatus v4l2sl_mpeg2_translate(struct v4l2sl_context *ctx,
     timestamp = ctx->current_surface ? ctx->current_surface->timestamp : 0;
 
     total = v4l2sl_annexb_concat(
-        slice_datas, slice_sizes, n_slice_data, 4,
+        cb.slice_datas, cb.slice_sizes, cb.n_slice_datas, 4,
         (uint8_t *)ctx->output_buf_ptr[out_buf_idx], ctx->output_buf_size);
     if (!total) {
         fprintf(stderr, "v4l2stateless: MPEG-2 slice data too large\n");

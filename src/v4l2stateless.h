@@ -105,6 +105,22 @@ struct v4l2sl_buffer {
  * row; sized to match pending_buffers). */
 #define V4L2SL_MAX_SLICE_DATAS 256
 
+/* Collected decode-buffer roles from one vaRenderPicture batch
+ * (v4l2sl_collect_decode_buffers). */
+struct v4l2sl_collected {
+    void *pic;              /* VAPictureParameterBufferType (last one wins) */
+    void *iq;               /* VAIQMatrixBufferType (last one wins) */
+    void *prob;             /* VAProbabilityBufferType (VP8) */
+    void *slice_params[32]; /* VASliceParameterBufferType, in order */
+    int n_slice_params;
+    const uint8_t *slice_datas[V4L2SL_MAX_SLICE_DATAS];
+    uint32_t slice_sizes[V4L2SL_MAX_SLICE_DATAS];
+    int n_slice_datas;
+    const uint8_t *largest;     /* biggest SliceData buffer (VP8/AV1 style) */
+    uint32_t largest_size;
+};
+
+
 /* Surface table size; IDs are recycled via a free stack so a long-lived
  * process can never index past the table. */
 #define V4L2SL_MAX_SURFACES 4096
@@ -371,6 +387,9 @@ int v4l2sl_submit_request(int request_fd);
  * directions + drop the plane mappings). Safe no-op on an unused queue;
  * call before the context's device fd goes away. */
 void v4l2sl_m2m_teardown(struct v4l2sl_context *ctx, struct v4l2sl_m2m_state *q);
+/* One-pass decode-buffer collection shared by every codec translate. */
+void v4l2sl_collect_decode_buffers(struct v4l2sl_buffer **buffers, int n,
+                                   struct v4l2sl_collected *cb);
 /* poll() wrapper that retries EINTR (device.c) */
 int v4l2sl_poll_intr(struct pollfd *fds, nfds_t n, int timeout);
 /* EINTR-retrying ioctl (device.c); VPP/JPEG route through it so the test

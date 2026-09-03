@@ -222,31 +222,15 @@ VAStatus v4l2sl_hevc_translate(struct v4l2sl_context *ctx,
     VAPictureParameterBufferHEVC *pic_param = NULL;
     VASliceParameterBufferHEVC *slice_param = NULL;
     VAQMatrixBufferHEVC *qm = NULL;
-    const uint8_t *slice_datas[V4L2SL_MAX_SLICE_DATAS];
-    uint32_t slice_sizes[V4L2SL_MAX_SLICE_DATAS];
+
+    struct v4l2sl_collected cb;
     int n_slice_data = 0;
 
-    for (int i = 0; i < num_buffers; i++) {
-        struct v4l2sl_buffer *buf = buffers[i];
-        if (!buf || !buf->data)
-            continue;
-        switch (buf->type) {
-        case VAPictureParameterBufferType: pic_param = buf->data; break;
-        case VASliceParameterBufferType:
-            if (!slice_param)
-                slice_param = buf->data;
-            break;
-        case VAIQMatrixBufferType: qm = buf->data; break;
-        case VASliceDataBufferType:
-            if (n_slice_data < V4L2SL_MAX_SLICE_DATAS) {
-                slice_datas[n_slice_data] = buf->data;
-                slice_sizes[n_slice_data] = buf->size;
-                n_slice_data++;
-            }
-            break;
-        default: break;
-        }
-    }
+    v4l2sl_collect_decode_buffers(buffers, num_buffers, &cb);
+    pic_param = cb.pic;
+    qm = cb.iq;
+    slice_param = cb.n_slice_params ? cb.slice_params[0] : NULL;
+    n_slice_data = cb.n_slice_datas;
 
     if (!pic_param) {
         fprintf(stderr, "v4l2stateless: HEVC decode missing picture params\n");
@@ -391,7 +375,7 @@ VAStatus v4l2sl_hevc_translate(struct v4l2sl_context *ctx,
     /* Concatenate all slices into the pre-mapped output buffer, prepending
      * an Annex B start code to any NAL that lacks one. */
     size_t total = v4l2sl_annexb_concat(
-        slice_datas, slice_sizes, n_slice_data, 4,
+        cb.slice_datas, cb.slice_sizes, cb.n_slice_datas, 4,
         (uint8_t *)ctx->output_buf_ptr[out_buf_idx], ctx->output_buf_size);
     if (!total) {
         fprintf(stderr, "v4l2stateless: HEVC slice data too large\n");

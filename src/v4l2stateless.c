@@ -698,6 +698,48 @@ v4l2sl_create_surfaces2(VADriverContextP ctx,
                                   num_surfaces, surfaces);
 }
 
+void v4l2sl_collect_decode_buffers(struct v4l2sl_buffer **buffers, int n,
+                                   struct v4l2sl_collected *cb)
+{
+    int i;
+
+    memset(cb, 0, sizeof(*cb));
+    for (i = 0; i < n; i++) {
+        struct v4l2sl_buffer *buf = buffers[i];
+
+        if (!buf || !buf->data)
+            continue;
+        switch (buf->type) {
+        case VAPictureParameterBufferType:
+            cb->pic = buf->data;
+            break;
+        case VASliceParameterBufferType:
+            if (cb->n_slice_params < 32)
+                cb->slice_params[cb->n_slice_params++] = buf->data;
+            break;
+        case VAIQMatrixBufferType:
+            cb->iq = buf->data;
+            break;
+        case VASliceDataBufferType:
+            if (cb->n_slice_datas < V4L2SL_MAX_SLICE_DATAS) {
+                cb->slice_datas[cb->n_slice_datas] = buf->data;
+                cb->slice_sizes[cb->n_slice_datas] = buf->size;
+                cb->n_slice_datas++;
+            }
+            if (buf->size > cb->largest_size) {
+                cb->largest = buf->data;
+                cb->largest_size = buf->size;
+            }
+            break;
+        case VAProbabilityBufferType:
+            cb->prob = buf->data;
+            break;
+        default:
+            break;
+        }
+    }
+}
+
 /* Free one surface and recycle its ID. Caller holds g_v4l2sl_lock and
  * has already detached the surface from any context (C1 does that for
  * the explicit destroy path; terminate frees contexts first). */

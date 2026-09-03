@@ -793,27 +793,18 @@ VAStatus v4l2sl_av1_translate(struct v4l2sl_context *ctx,
     uint8_t *tile_data = NULL;
     uint32_t tile_data_size = 0;
 
-    for (int i = 0; i < num_buffers; i++) {
-        struct v4l2sl_buffer *buf = buffers[i];
-        if (!buf || !buf->data)
-            continue;
-        switch (buf->type) {
-        case VAPictureParameterBufferType: pic_param = buf->data; break;
-        case VASliceParameterBufferType:
-            if (n_tiles < 32)
-                tile_params[n_tiles++] = buf->data;
-            break;
-        case VASliceDataBufferType:
-            /* Keep the largest slice-data buffer — ffmpeg's AV1 VAAPI
-             * hwaccel submits the whole OBU in one buffer. */
-            if (buf->size > tile_data_size) {
-                tile_data = buf->data;
-                tile_data_size = buf->size;
-            }
-            break;
-        default: break;
-        }
-    }
+    struct v4l2sl_collected cb;
+    int i;
+
+    v4l2sl_collect_decode_buffers(buffers, num_buffers, &cb);
+    pic_param = cb.pic;
+    for (i = 0; i < cb.n_slice_params && i < 32; i++)
+        tile_params[i] = cb.slice_params[i];
+    n_tiles = cb.n_slice_params > 32 ? 32 : cb.n_slice_params;
+    /* Largest slice-data buffer — ffmpeg's AV1 VAAPI hwaccel submits the
+     * whole OBU in one buffer. */
+    tile_data = (uint8_t *)cb.largest;
+    tile_data_size = cb.largest_size;
 
     if (!pic_param) {
         fprintf(stderr, "v4l2stateless: AV1 decode missing picture params\n");
