@@ -221,6 +221,7 @@ VAStatus v4l2sl_hevc_translate(struct v4l2sl_context *ctx,
 {
     VAPictureParameterBufferHEVC *pic_param = NULL;
     VASliceParameterBufferHEVC *slice_param = NULL;
+    VAQMatrixBufferHEVC *qm = NULL;
     const uint8_t *slice_datas[V4L2SL_MAX_SLICE_DATAS];
     uint32_t slice_sizes[V4L2SL_MAX_SLICE_DATAS];
     int n_slice_data = 0;
@@ -235,6 +236,7 @@ VAStatus v4l2sl_hevc_translate(struct v4l2sl_context *ctx,
             if (!slice_param)
                 slice_param = buf->data;
             break;
+        case VAIQMatrixBufferType: qm = buf->data; break;
         case VASliceDataBufferType:
             if (n_slice_data < V4L2SL_MAX_SLICE_DATAS) {
                 slice_datas[n_slice_data] = buf->data;
@@ -329,7 +331,14 @@ VAStatus v4l2sl_hevc_translate(struct v4l2sl_context *ctx,
     /* Set HEVC scaling matrix — the kernel expects it every frame; flat 16s
      * are the H.265 default when the stream carries no custom lists. */
     struct v4l2_ctrl_hevc_scaling_matrix sm;
-    memset(&sm, 16, sizeof(sm));
+
+    /* Streams with scaling_list_enabled_flag deliver VAQMatrixBufferHEVC;
+     * the VA and V4L2 layouts are identical. Flat 16 is only the fallback
+     * when the buffer is absent. */
+    if (qm)
+        memcpy(&sm, qm, sizeof(sm));
+    else
+        memset(&sm, 16, sizeof(sm));
 
     struct v4l2_ext_control sm_ctrl = { 0 };
     sm_ctrl.id = V4L2_CID_STATELESS_HEVC_SCALING_MATRIX;
