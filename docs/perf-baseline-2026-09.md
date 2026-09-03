@@ -54,3 +54,24 @@ and chrome smoke green after each item.
 
 Deferred (documented follow-ups): P4 items 6-8 (persistent memfd mapping,
 VPP/JPEG persistent queues, stride alignment) and P3 clusters 7-11.
+
+## Close-out (P4 items 6-8 + P3 clusters 7-11, 2026-09-03 late)
+
+Same local-clip method, decode-path ioctl counts only (12.0 s window,
+371 frames, loop page):
+
+| ioctl | calls | per frame |
+|---|---|---|
+| VIDIOC_S_EXT_CTRLS | 720 | 2.0 |
+| VIDIOC_QBUF | 720 | 2.0 |
+| VIDIOC_DQBUF | 720 | 2.0 |
+| MEDIA_REQUEST_IOC_QUEUE | 360 | 1.0 |
+| MEDIA_REQUEST_IOC_REINIT | 360 | 1.0 |
+| QUERYBUF / REQUEST_ALLOC | 0 | 0 |
+
+Decode-path driver ioctls hold at ~7/frame — unchanged vs the items 1-5
+gate, as expected: 6-8 target the readback (persistent memfd mapping),
+VPP/JPEG M2M steady state (~18 -> ~7 ioctls, mmaps -> 0) and stride
+alignment, not the Chrome decode loop. Whole-process totals are not
+comparable across window shapes (Mesa/compositor dominates); per-command
+counts are the durable metric.
