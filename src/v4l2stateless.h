@@ -304,6 +304,9 @@ int v4l2sl_decode_submit(struct v4l2sl_context *ctx, int out_buf_idx,
 void v4l2sl_decode_reset(struct v4l2sl_context *ctx);
 int v4l2sl_surface_alloc_export_fd(struct v4l2sl_surface *s);
 int v4l2sl_surface_grow_memfd(struct v4l2sl_surface *s, uint32_t size);
+/* Lazy CPU backing: decode-only surfaces never pay the multi-MB calloc;
+ * the first CPU writer (put_image, VPP dst, upload) allocates it. */
+int v4l2sl_surface_ensure_cpu(struct v4l2sl_surface *s);
 int v4l2sl_surface_pull_capture(struct v4l2sl_context *ctx,
                                 struct v4l2sl_surface *surf, int buf_index);
 int v4l2sl_bind_capture_export(struct v4l2sl_context *ctx);

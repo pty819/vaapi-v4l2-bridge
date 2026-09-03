@@ -914,6 +914,18 @@ int v4l2sl_surface_alloc_export_fd(struct v4l2sl_surface *s)
     return 0;
 }
 
+int v4l2sl_surface_ensure_cpu(struct v4l2sl_surface *s)
+{
+    if (!s || !s->cpu_size)
+        return -1;
+    if (!s->cpu_ptr) {
+        s->cpu_ptr = calloc(1, s->cpu_size);
+        if (!s->cpu_ptr)
+            return -1;
+    }
+    return 0;
+}
+
 /* Grow-only: a smaller `size` (resolution step-down) must never ftruncate —
  * clients may still hold mappings or dup'd fds of the larger memfd, and
  * shrinking drops pages under them (SIGBUS). */

@@ -620,13 +620,8 @@ v4l2sl_create_surfaces(VADriverContextP ctx,
         surface->memfd_fd = -1;
         surface->cpu_stride = v4l2sl_default_image_stride(format, width);
         surface->cpu_size = v4l2sl_va_image_size(format, surface->cpu_stride, height);
-        if (surface->cpu_size) {
-            surface->cpu_ptr = calloc(1, surface->cpu_size);
-            if (!surface->cpu_ptr) {
-                free(surface);
-                goto fail;
-            }
-        }
+        /* cpu_ptr is lazy (ensure_cpu): decode-only surfaces never touch
+         * it — an eager calloc cost ~3MB/surface at 1080p for nothing. */
         /* dma-buf at create so Chrome/Firefox DRM-PRIME export works
          * before the first picture. V4L2 EXPBUF replaces this after REQBUFS. */
         if (v4l2sl_surface_alloc_export_fd(surface) < 0)
@@ -1838,9 +1833,9 @@ v4l2sl_put_image(VADriverContextP ctx,
         pthread_mutex_unlock(&g_v4l2sl_lock);
         return VA_STATUS_ERROR_UNIMPLEMENTED;
     }
-    if (!surf->cpu_ptr) {
+    if (v4l2sl_surface_ensure_cpu(surf) < 0) {
         pthread_mutex_unlock(&g_v4l2sl_lock);
-        return VA_STATUS_ERROR_OPERATION_FAILED;
+        return VA_STATUS_ERROR_ALLOCATION_FAILED;
     }
 
     ib = driver_data->orphan_buffers;

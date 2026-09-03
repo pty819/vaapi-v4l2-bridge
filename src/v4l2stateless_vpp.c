@@ -230,7 +230,8 @@ VAStatus v4l2sl_vpp_run(struct v4l2sl_context *ctx,
     if (!dst->cpu_ptr) {
         dst->cpu_stride = v4l2sl_default_image_stride(dst_fcc, dst->width);
         dst->cpu_size = v4l2sl_va_image_size(dst_fcc, dst->cpu_stride, dst->height);
-        dst->cpu_ptr = calloc(1, dst->cpu_size);
+        if (v4l2sl_surface_ensure_cpu(dst) < 0)
+            dst->cpu_ptr = NULL;
         if (!dst->cpu_ptr) {
             if (src_map)
                 munmap(src_map, src_map_sz);
