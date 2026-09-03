@@ -106,28 +106,26 @@ VAStatus v4l2sl_vpp_query_pipeline_caps(VAProcPipelineCaps *caps)
     return VA_STATUS_SUCCESS;
 }
 
-static int mmap_copy_plane(int fd, struct v4l2_plane *pl, int write_not_read,
-                           uint8_t *cpu, uint32_t cpu_stride, int width, int height,
-                           int bpp)
+/* Row copies against a pre-mapped V4L2 plane (rows packed at width*bpp,
+ * matching what RGA negotiates for these formats). */
+static void copy_rows_to(void *dst, const uint8_t *cpu, uint32_t cpu_stride,
+                         int width, int height_rows, int bpp)
 {
-    void *p = mmap(NULL, pl->length,
-                   write_not_read ? PROT_READ | PROT_WRITE : PROT_READ,
-                   MAP_SHARED, fd, pl->m.mem_offset);
-    int y;
-    uint32_t bpl = (uint32_t)width * (uint32_t)bpp;
-    if (p == MAP_FAILED)
-        return -1;
-    if (write_not_read) {
-        for (y = 0; y < height; y++)
-            memcpy((uint8_t *)p + (size_t)y * bpl,
-                   cpu + (size_t)y * cpu_stride, (size_t)width * bpp);
-    } else {
-        for (y = 0; y < height; y++)
-            memcpy(cpu + (size_t)y * cpu_stride,
-                   (uint8_t *)p + (size_t)y * bpl, (size_t)width * bpp);
-    }
-    munmap(p, pl->length);
-    return 0;
+    size_t bpl = (size_t)width * (size_t)bpp;
+
+    for (int y = 0; y < height_rows; y++)
+        memcpy((uint8_t *)dst + y * bpl, cpu + (size_t)y * cpu_stride,
+               (size_t)width * bpp);
+}
+
+static void copy_rows_from(const void *src, uint8_t *cpu, uint32_t cpu_stride,
+                           int width, int height_rows, int bpp)
+{
+    size_t bpl = (size_t)width * (size_t)bpp;
+
+    for (int y = 0; y < height_rows; y++)
+        memcpy(cpu + (size_t)y * cpu_stride, (const uint8_t *)src + y * bpl,
+               (size_t)width * bpp);
 }
 
 VAStatus v4l2sl_vpp_run(struct v4l2sl_context *ctx,
@@ -213,8 +211,8 @@ VAStatus v4l2sl_vpp_run(struct v4l2sl_context *ctx,
         src_map_sz = v4l2sl_capture_plane_size(
             src->cap_fourcc ? src->cap_fourcc : V4L2_PIX_FMT_NV12,
             src->stride, src->aligned_h ? src->aligned_h : src->height);
-        src_map = mmap(NULL, src_map_sz, PROT_READ, MAP_SHARED, src->memfd_fd, 0);
-        if (src_map == MAP_FAILED)
+        src_map = v4l2sl_surface_map_memfd(src, src_map_sz);
+        if (!src_map)
             return VA_STATUS_ERROR_OPERATION_FAILED;
         srcp = src_map;
         src_stride = src->stride;
@@ -226,149 +224,190 @@ VAStatus v4l2sl_vpp_run(struct v4l2sl_context *ctx,
     } else {
         return VA_STATUS_ERROR_INVALID_SURFACE;
     }
+    (void)sw;
+    (void)sh;
+    (void)src_alh;
 
     if (!dst->cpu_ptr) {
         dst->cpu_stride = v4l2sl_default_image_stride(dst_fcc, dst->width);
         dst->cpu_size = v4l2sl_va_image_size(dst_fcc, dst->cpu_stride, dst->height);
         if (v4l2sl_surface_ensure_cpu(dst) < 0)
             dst->cpu_ptr = NULL;
-        if (!dst->cpu_ptr) {
-            if (src_map)
-                munmap(src_map, src_map_sz);
+        if (!dst->cpu_ptr)
             return VA_STATUS_ERROR_ALLOCATION_FAILED;
-        }
         dst->format = dst_fcc;
     }
     dstp = dst->cpu_ptr;
 
-    memset(&ofmt, 0, sizeof(ofmt));
-    ofmt.type = V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE;
-    ofmt.fmt.pix_mp.width = src->width;
-    ofmt.fmt.pix_mp.height = src->height;
-    ofmt.fmt.pix_mp.pixelformat = va_to_v4l2_raw(src_fcc);
-    ofmt.fmt.pix_mp.num_planes = 1;
-    ofmt.fmt.pix_mp.field = V4L2_FIELD_NONE;
-    if (xioctl(fd, VIDIOC_S_FMT, &ofmt) < 0) {
-        fprintf(stderr, "v4l2stateless: VPP S_FMT out: %s\n", strerror(errno));
-        st = VA_STATUS_ERROR_OPERATION_FAILED;
-        goto out;
-    }
-    memset(&cfmt, 0, sizeof(cfmt));
-    cfmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
-    cfmt.fmt.pix_mp.width = dw;
-    cfmt.fmt.pix_mp.height = dh;
-    cfmt.fmt.pix_mp.pixelformat = va_to_v4l2_raw(dst_fcc);
-    cfmt.fmt.pix_mp.num_planes = 1;
-    cfmt.fmt.pix_mp.field = V4L2_FIELD_NONE;
-    if (xioctl(fd, VIDIOC_S_FMT, &cfmt) < 0) {
-        fprintf(stderr, "v4l2stateless: VPP S_FMT cap: %s\n", strerror(errno));
-        st = VA_STATUS_ERROR_OPERATION_FAILED;
-        goto out;
-    }
-
-    ctrl.id = V4L2_CID_ROTATE;
-    ctrl.value = rotate;
-    xioctl(fd, VIDIOC_S_CTRL, &ctrl);
-    ctrl.id = V4L2_CID_HFLIP;
-    ctrl.value = hflip;
-    xioctl(fd, VIDIOC_S_CTRL, &ctrl);
-    ctrl.id = V4L2_CID_VFLIP;
-    ctrl.value = vflip;
-    xioctl(fd, VIDIOC_S_CTRL, &ctrl);
-
-    memset(&oreq, 0, sizeof(oreq));
-    oreq.count = 1;
-    oreq.type = V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE;
-    oreq.memory = V4L2_MEMORY_MMAP;
-    if (xioctl(fd, VIDIOC_REQBUFS, &oreq) < 0) {
-        st = VA_STATUS_ERROR_OPERATION_FAILED;
-        goto out;
-    }
-    memset(&creq, 0, sizeof(creq));
-    creq.count = 1;
-    creq.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
-    creq.memory = V4L2_MEMORY_MMAP;
-    if (xioctl(fd, VIDIOC_REQBUFS, &creq) < 0) {
-        st = VA_STATUS_ERROR_OPERATION_FAILED;
-        goto out;
-    }
-
-    memset(&obuf, 0, sizeof(obuf));
-    memset(opl, 0, sizeof(opl));
-    obuf.type = V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE;
-    obuf.memory = V4L2_MEMORY_MMAP;
-    obuf.index = 0;
-    obuf.length = 1;
-    obuf.m.planes = opl;
-    xioctl(fd, VIDIOC_QUERYBUF, &obuf);
     {
-        int copy_h = src->height;
+        struct v4l2sl_m2m_state *q = &ctx->vpp_q;
+        uint32_t key[8] = {
+            src->width, src->height, src_fcc, dw, dh, dst_fcc,
+            (uint32_t)rotate | ((uint32_t)hflip << 8) | ((uint32_t)vflip << 16), 0
+        };
+        int renegot = !q->valid || memcmp(q->key, key, sizeof(key));
+        int copy_h_src = src->height, copy_h_dst = dh;
+
         if (src_fcc == VA_FOURCC_NV12 || src_fcc == VA_FOURCC_I420)
-            copy_h = src->height * 3 / 2;
-        mmap_copy_plane(fd, &opl[0], 1, (uint8_t *)srcp, src_stride,
-                        src->width, copy_h, bpp_src);
-        (void)src_alh;
-        (void)sw;
-        (void)sh;
-    }
-
-    memset(&cbuf, 0, sizeof(cbuf));
-    memset(cpl, 0, sizeof(cpl));
-    cbuf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
-    cbuf.memory = V4L2_MEMORY_MMAP;
-    cbuf.index = 0;
-    cbuf.length = 1;
-    cbuf.m.planes = cpl;
-    xioctl(fd, VIDIOC_QUERYBUF, &cbuf);
-
-    {
-        enum v4l2_buf_type t = V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE;
-        xioctl(fd, VIDIOC_STREAMON, &t);
-        t = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
-        xioctl(fd, VIDIOC_STREAMON, &t);
-    }
-    memset(&cbuf, 0, sizeof(cbuf));
-    memset(cpl, 0, sizeof(cpl));
-    cbuf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
-    cbuf.memory = V4L2_MEMORY_MMAP;
-    cbuf.index = 0;
-    cbuf.length = 1;
-    cbuf.m.planes = cpl;
-    xioctl(fd, VIDIOC_QBUF, &cbuf);
-    memset(&obuf, 0, sizeof(obuf));
-    memset(opl, 0, sizeof(opl));
-    obuf.type = V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE;
-    obuf.memory = V4L2_MEMORY_MMAP;
-    obuf.index = 0;
-    obuf.length = 1;
-    obuf.m.planes = opl;
-    xioctl(fd, VIDIOC_QBUF, &obuf);
-
-    pfd.fd = fd;
-    pfd.events = POLLIN | POLLOUT;
-    if (v4l2sl_poll_intr(&pfd, 1, 2000) <= 0) {
-        fprintf(stderr, "v4l2stateless: VPP timeout\n");
-        st = VA_STATUS_ERROR_OPERATION_FAILED;
-        goto out;
-    }
-    memset(&cbuf, 0, sizeof(cbuf));
-    memset(cpl, 0, sizeof(cpl));
-    cbuf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
-    cbuf.memory = V4L2_MEMORY_MMAP;
-    cbuf.length = 1;
-    cbuf.m.planes = cpl;
-    if (xioctl(fd, VIDIOC_DQBUF, &cbuf) < 0) {
-        fprintf(stderr, "v4l2stateless: VPP DQBUF: %s\n", strerror(errno));
-        st = VA_STATUS_ERROR_OPERATION_FAILED;
-        goto out;
-    }
-    {
-        int copy_h = dh;
+            copy_h_src = src->height * 3 / 2;
         if (dst_fcc == VA_FOURCC_NV12 || dst_fcc == VA_FOURCC_I420)
-            copy_h = dh * 3 / 2;
-        mmap_copy_plane(fd, &cpl[0], 0, dstp,
-                        dst->cpu_stride ? dst->cpu_stride : (uint32_t)dw * bpp_dst,
-                        dw, copy_h, bpp_dst);
+            copy_h_dst = dh * 3 / 2;
+
+        if (renegot) {
+            v4l2sl_m2m_teardown(ctx, q);
+
+            memset(&ofmt, 0, sizeof(ofmt));
+            ofmt.type = V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE;
+            ofmt.fmt.pix_mp.width = src->width;
+            ofmt.fmt.pix_mp.height = src->height;
+            ofmt.fmt.pix_mp.pixelformat = va_to_v4l2_raw(src_fcc);
+            ofmt.fmt.pix_mp.num_planes = 1;
+            ofmt.fmt.pix_mp.field = V4L2_FIELD_NONE;
+            if (xioctl(fd, VIDIOC_S_FMT, &ofmt) < 0) {
+                fprintf(stderr, "v4l2stateless: VPP S_FMT out: %s\n", strerror(errno));
+                st = VA_STATUS_ERROR_OPERATION_FAILED;
+                goto fail;
+            }
+            memset(&cfmt, 0, sizeof(cfmt));
+            cfmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
+            cfmt.fmt.pix_mp.width = dw;
+            cfmt.fmt.pix_mp.height = dh;
+            cfmt.fmt.pix_mp.pixelformat = va_to_v4l2_raw(dst_fcc);
+            cfmt.fmt.pix_mp.num_planes = 1;
+            cfmt.fmt.pix_mp.field = V4L2_FIELD_NONE;
+            if (xioctl(fd, VIDIOC_S_FMT, &cfmt) < 0) {
+                fprintf(stderr, "v4l2stateless: VPP S_FMT cap: %s\n", strerror(errno));
+                st = VA_STATUS_ERROR_OPERATION_FAILED;
+                goto fail;
+            }
+
+            ctrl.id = V4L2_CID_ROTATE;
+            ctrl.value = rotate;
+            xioctl(fd, VIDIOC_S_CTRL, &ctrl);
+            ctrl.id = V4L2_CID_HFLIP;
+            ctrl.value = hflip;
+            xioctl(fd, VIDIOC_S_CTRL, &ctrl);
+            ctrl.id = V4L2_CID_VFLIP;
+            ctrl.value = vflip;
+            xioctl(fd, VIDIOC_S_CTRL, &ctrl);
+
+            memset(&oreq, 0, sizeof(oreq));
+            oreq.count = 1;
+            oreq.type = V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE;
+            oreq.memory = V4L2_MEMORY_MMAP;
+            if (xioctl(fd, VIDIOC_REQBUFS, &oreq) < 0) {
+                st = VA_STATUS_ERROR_OPERATION_FAILED;
+                goto fail;
+            }
+            memset(&creq, 0, sizeof(creq));
+            creq.count = 1;
+            creq.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
+            creq.memory = V4L2_MEMORY_MMAP;
+            if (xioctl(fd, VIDIOC_REQBUFS, &creq) < 0) {
+                st = VA_STATUS_ERROR_OPERATION_FAILED;
+                goto fail;
+            }
+
+            memset(&obuf, 0, sizeof(obuf));
+            memset(opl, 0, sizeof(opl));
+            obuf.type = V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE;
+            obuf.memory = V4L2_MEMORY_MMAP;
+            obuf.index = 0;
+            obuf.length = 1;
+            obuf.m.planes = opl;
+            if (xioctl(fd, VIDIOC_QUERYBUF, &obuf) < 0) {
+                st = VA_STATUS_ERROR_OPERATION_FAILED;
+                goto fail;
+            }
+            q->out_map[0] = mmap(NULL, opl[0].length,
+                                 PROT_READ | PROT_WRITE, MAP_SHARED, fd,
+                                 opl[0].m.mem_offset);
+
+            memset(&cbuf, 0, sizeof(cbuf));
+            memset(cpl, 0, sizeof(cpl));
+            cbuf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
+            cbuf.memory = V4L2_MEMORY_MMAP;
+            cbuf.index = 0;
+            cbuf.length = 1;
+            cbuf.m.planes = cpl;
+            if (xioctl(fd, VIDIOC_QUERYBUF, &cbuf) < 0) {
+                st = VA_STATUS_ERROR_OPERATION_FAILED;
+                goto fail;
+            }
+            q->cap_map = mmap(NULL, cpl[0].length,
+                              PROT_READ | PROT_WRITE, MAP_SHARED, fd,
+                              cpl[0].m.mem_offset);
+
+            if (q->out_map[0] == MAP_FAILED || q->cap_map == MAP_FAILED) {
+                st = VA_STATUS_ERROR_OPERATION_FAILED;
+                goto fail;
+            }
+            q->out_len[0] = opl[0].length;
+            q->cap_len = cpl[0].length;
+            q->out_planes = 1;
+            memcpy(q->key, key, sizeof(key));
+            q->valid = 1;
+        }
+
+        copy_rows_to(q->out_map[0], srcp, src_stride, src->width,
+                     copy_h_src, bpp_src);
+
+        {
+            enum v4l2_buf_type t = V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE;
+            if (xioctl(fd, VIDIOC_STREAMON, &t) < 0) {
+                st = VA_STATUS_ERROR_OPERATION_FAILED;
+                goto fail;
+            }
+            t = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
+            if (xioctl(fd, VIDIOC_STREAMON, &t) < 0) {
+                st = VA_STATUS_ERROR_OPERATION_FAILED;
+                goto fail;
+            }
+        }
+        memset(&cbuf, 0, sizeof(cbuf));
+        memset(cpl, 0, sizeof(cpl));
+        cbuf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
+        cbuf.memory = V4L2_MEMORY_MMAP;
+        cbuf.index = 0;
+        cbuf.length = 1;
+        cbuf.m.planes = cpl;
+        if (xioctl(fd, VIDIOC_QBUF, &cbuf) < 0) {
+            st = VA_STATUS_ERROR_OPERATION_FAILED;
+            goto fail;
+        }
+        memset(&obuf, 0, sizeof(obuf));
+        memset(opl, 0, sizeof(opl));
+        obuf.type = V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE;
+        obuf.memory = V4L2_MEMORY_MMAP;
+        obuf.index = 0;
+        obuf.length = 1;
+        obuf.m.planes = opl;
+        if (xioctl(fd, VIDIOC_QBUF, &obuf) < 0) {
+            st = VA_STATUS_ERROR_OPERATION_FAILED;
+            goto fail;
+        }
+
+        pfd.fd = fd;
+        pfd.events = POLLIN | POLLOUT;
+        if (v4l2sl_poll_intr(&pfd, 1, 2000) <= 0) {
+            fprintf(stderr, "v4l2stateless: VPP timeout\n");
+            st = VA_STATUS_ERROR_OPERATION_FAILED;
+            goto fail;
+        }
+        memset(&cbuf, 0, sizeof(cbuf));
+        memset(cpl, 0, sizeof(cpl));
+        cbuf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
+        cbuf.memory = V4L2_MEMORY_MMAP;
+        cbuf.length = 1;
+        cbuf.m.planes = cpl;
+        if (xioctl(fd, VIDIOC_DQBUF, &cbuf) < 0) {
+            fprintf(stderr, "v4l2stateless: VPP DQBUF: %s\n", strerror(errno));
+            st = VA_STATUS_ERROR_OPERATION_FAILED;
+            goto fail;
+        }
+        copy_rows_from(q->cap_map, dstp,
+                       dst->cpu_stride ? dst->cpu_stride : (uint32_t)dw * bpp_dst,
+                       dw, copy_h_dst, bpp_dst);
     }
 
     st = VA_STATUS_SUCCESS;
@@ -376,24 +415,20 @@ VAStatus v4l2sl_vpp_run(struct v4l2sl_context *ctx,
     if (dst->gbm_bo && dst_fcc == VA_FOURCC_NV12)
         v4l2sl_gbm_surface_upload(dst, dst->cpu_ptr, dst->cpu_stride,
                                   dst->height);
-
-out:
-    if (src_map)
-        munmap(src_map, src_map_sz);
-    /* Always tear down: leaving RGA streaming wedges every later call on
-     * this fd (S_FMT/REQBUFS fail with EBUSY). */
+    /* Keep the queue: a per-frame STREAMOFF returns the buffers to
+     * userspace while the allocation and mappings stay valid. */
     {
         enum v4l2_buf_type t = V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE;
         xioctl(fd, VIDIOC_STREAMOFF, &t);
         t = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
         xioctl(fd, VIDIOC_STREAMOFF, &t);
-        oreq.count = 0;
-        xioctl(fd, VIDIOC_REQBUFS, &oreq);
-        creq.count = 0;
-        xioctl(fd, VIDIOC_REQBUFS, &creq);
     }
-    if (st == VA_STATUS_SUCCESS)
+    if (getenv("V4L2SL_DEBUG"))
         fprintf(stderr, "v4l2stateless: VPP %dx%d -> %dx%d rot=%d\n",
                 src->width, src->height, dw, dh, rotate);
+    return st;
+
+fail:
+    v4l2sl_m2m_teardown(ctx, &ctx->vpp_q);
     return st;
 }

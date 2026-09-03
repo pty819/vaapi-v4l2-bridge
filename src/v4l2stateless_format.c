@@ -298,20 +298,65 @@ uint32_t v4l2sl_va_image_size(uint32_t va_fourcc, uint32_t stride, uint32_t heig
     }
 }
 
+static int annexb_missing_prefix(const uint8_t *d, uint32_t sz)
+{
+    return !(sz >= 3 && d[0] == 0 && d[1] == 0 &&
+             (d[2] == 1 || (sz >= 4 && d[2] == 0 && d[3] == 1)));
+}
+
+/* Concatenate slice NALs into a pre-mapped Annex-B bitstream. A NAL that
+ * already carries a start code is copied verbatim; one without gets a
+ * `prefix_len`-byte start code (3 or 4, per codec convention). Returns
+ * the total byte count (0 when it does not fit dst_cap; a NULL dst only
+ * sizes the result, matching the anon-buffer test mode). */
+size_t v4l2sl_annexb_concat(const uint8_t * const *datas, const uint32_t *sizes,
+                            int n, int prefix_len, uint8_t *dst, size_t dst_cap)
+{
+    size_t total = 0, off = 0;
+    int i;
+
+    for (i = 0; i < n; i++)
+        total += annexb_missing_prefix(datas[i], sizes[i]) ?
+                 (size_t)prefix_len + sizes[i] : sizes[i];
+    if (total > dst_cap)
+        return 0;
+    if (!dst)
+        return total;
+    for (i = 0; i < n; i++) {
+        if (annexb_missing_prefix(datas[i], sizes[i])) {
+            if (prefix_len == 4)
+                dst[off++] = 0;
+            dst[off++] = 0;
+            dst[off++] = 0;
+            dst[off++] = 1;
+        }
+        memcpy(dst + off, datas[i], sizes[i]);
+        off += sizes[i];
+    }
+    return total;
+}
+
 uint32_t v4l2sl_default_image_stride(uint32_t va_fourcc, int width)
 {
+    uint32_t stride;
+
     switch (va_fourcc) {
     case VA_FOURCC_P010:
-        return (uint32_t)width * 2;
-    case VA_FOURCC_Y210:
-        return (uint32_t)width * 4;
     case VA_FOURCC_YUY2:
-        return (uint32_t)width * 2;
+        stride = (uint32_t)width * 2;
+        break;
+    case VA_FOURCC_Y210:
     case VA_FOURCC_ARGB:
     case VA_FOURCC_BGRA:
     case VA_FOURCC_BGRX:
-        return (uint32_t)width * 4;
+        stride = (uint32_t)width * 4;
+        break;
     default:
-        return (uint32_t)width;
+        stride = (uint32_t)width;
+        break;
     }
+    /* 64-byte alignment keeps every row copy (put/get_image, VPP, gbm
+     * upload) on NEON-friendly aligned rows. Allocation sizes and the
+     * pitches reported to clients derive from this same value. */
+    return (stride + 63) & ~63u;
 }

@@ -129,3 +129,53 @@ xioctl, surface_by_id everywhere, context_for_surface, 4096 attr unify;
 7-11 deferred). P4 items 1-5 done with measured -5..6 ioctls/frame
 (docs/perf-baseline-2026-09.md); items 6-8 deferred. Merged to master
 2026-09-03; follow-ups live in the audit + P3/P4 plan files.
+
+## 2026-09-03 late — deferred tail closed (branch refactor/tail-2026-09-03)
+
+All eight deferred items landed, gates green after each (matrix 27/27,
+chrome smoke, units):
+
+- P4-6 persistent per-surface memfd mapping (mremap grow; derived images
+  borrow it, a grow while borrowed parks a retired mapping instead of
+  moving pages under live clients). Readback clients drop 2 mmap/munmap
+  per frame.
+- P4-7 persistent VPP/JPEG M2M queues — steady state is STREAMON + QBUF +
+  DQBUF + STREAMOFF only (~18 -> ~7 ioctls, mmaps -> 0 per frame); any
+  failure or setup-key change tears down and renegotiates. VEPU quirk
+  kept: the OUTPUT plane count must come from the QUERYBUF writeback
+  (the queue reports 3 planes for NV12M-out/JPEG-cap, not G_FMT's 2).
+  Also fixed the uninitialized oreq/creq REQBUFS(0) early-exit path and
+  gated the per-frame VPP/JPEG success prints behind V4L2SL_DEBUG (the
+  matrix JPEG/VPP legs export it).
+- P4-8 64-byte aligned default image stride.
+- P3-7 one Annex-B concat helper (h264 prefix 3, hevc/mpeg2 4).
+- P3-8 v4l2sl_collect_decode_buffers shared by all five codec translates.
+- P3-9 v4l2sl_fill_prime_layers shared by the memfd and GBM export paths.
+- P3-10 AV1 refresh heuristics in a ctx->av1 sub-struct; the av1
+  recapture test now builds on recap_env (the two-surface test keeps its
+  own env by design).
+- P3-11 probe scanners share the scan_nodes() walk (unified accept
+  criteria nout>0 || ncap>0); V4L2SL_REQAPI_UNKNOWN stays — the picker
+  tests use it as the dont-care marker.
+
+Close-out strace: decode path still ~7 ioctl/frame (2 S_EXT_CTRLS,
+2 QBUF, 2 DQBUF, QUEUE + REINIT; 0 QUERYBUF / REQUEST_ALLOC) —
+docs/perf-baseline-2026-09.md.
+
+C12 re-check: update_grain is absent from VAFilmGrainStructAV1 in BOTH
+the installed libva-dev 2.23.0 (latest apt candidate) and upstream libva
+master — still not actionable, now double-verified.
+
+Browser 10-bit (investigation, no config change): 8-bit HEVC 1080p over
+http DECODES THROUGH THE BRIDGE in Chrome (bridge-side session verified:
+media for /dev/video1, 24 capture buffers at 1920x1088) — a new
+supported fact beyond H.264. Main10 is rejected by Chrome's demuxer
+(DEMUXER_ERROR_NO_SUPPORTED_STREAMS) before any decoder runs; no
+user-facing flag exists and Chrome has no HEVC software fallback by
+design, so on this SDR panel there is nothing to enable. Matrix-level
+Main10/High10 correctness stays ffmpeg-verified. YouTube untouched.
+
+Ops note: the smoke debug instance now uses ~/.config/gc-smoke with
+--no-first-run --no-default-browser-check (the user session runs gc-dbg
+WITHOUT --remote-debugging-port, so a gc-dbg smoke launch would forward
+into the portless main session and ECONNREFUSE on 9222).

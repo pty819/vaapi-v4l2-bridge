@@ -388,30 +388,30 @@ static uint8_t av1_infer_refresh_svt(const VASurfaceID sids[8],
     if (show)
         return 0;
 
-    if (ctx && !ctx->av1_have_first_arf) {
-        ctx->av1_have_first_arf = 1;
-        ctx->av1_gop = (uint8_t)(cur ? cur : 8);
-        ctx->av1_l0_oh = cur;
-        ctx->av1_prev_l0_oh = 0;
-        ctx->av1_l0_toggle = 1;
-        ctx->av1_l1_toggle = 0;
+    if (ctx && !ctx->av1.have_first_arf) {
+        ctx->av1.have_first_arf = 1;
+        ctx->av1.gop = (uint8_t)(cur ? cur : 8);
+        ctx->av1.l0_oh = cur;
+        ctx->av1.prev_l0_oh = 0;
+        ctx->av1.l0_toggle = 1;
+        ctx->av1.l1_toggle = 0;
         r = av1_most_dup_first(sids, hints);
         return r ? r : 0x01;
     }
     /* EOS / cut-short pyramids: each new max even ARF is L0 (16,24,28,30). */
-    if (ctx && cur > ctx->av1_l0_oh) {
-        uint8_t slot = ctx->av1_l0_toggle;
-        ctx->av1_prev_l0_oh = ctx->av1_l0_oh;
-        ctx->av1_l0_oh = cur;
-        ctx->av1_l0_toggle = (uint8_t)((slot + 1) % 3);
+    if (ctx && cur > ctx->av1.l0_oh) {
+        uint8_t slot = ctx->av1.l0_toggle;
+        ctx->av1.prev_l0_oh = ctx->av1.l0_oh;
+        ctx->av1.l0_oh = cur;
+        ctx->av1.l0_toggle = (uint8_t)((slot + 1) % 3);
         return (uint8_t)(1u << slot);
     }
     /* Layer map uses the current mini-GOP length (last L0 minus previous). */
-    if (ctx && ctx->av1_gop >= 16) {
-        uint32_t g = ctx->av1_gop;
-        if (ctx->av1_prev_l0_oh && ctx->av1_l0_oh > ctx->av1_prev_l0_oh)
-            g = ctx->av1_l0_oh - ctx->av1_prev_l0_oh;
-        else if (cur > ctx->av1_gop)
+    if (ctx && ctx->av1.gop >= 16) {
+        uint32_t g = ctx->av1.gop;
+        if (ctx->av1.prev_l0_oh && ctx->av1.l0_oh > ctx->av1.prev_l0_oh)
+            g = ctx->av1.l0_oh - ctx->av1.prev_l0_oh;
+        else if (cur > ctx->av1.gop)
             g /= 2;
         if (g < 4)
             g = 4;
@@ -420,12 +420,12 @@ static uint8_t av1_infer_refresh_svt(const VASurfaceID sids[8],
             uint8_t slot;
             switch (tl) {
             case 0:
-                slot = ctx->av1_l0_toggle;
-                ctx->av1_l0_toggle = (uint8_t)((ctx->av1_l0_toggle + 1) % 3);
+                slot = ctx->av1.l0_toggle;
+                ctx->av1.l0_toggle = (uint8_t)((ctx->av1.l0_toggle + 1) % 3);
                 return (uint8_t)(1u << slot);
             case 1:
-                slot = (uint8_t)(3 + ctx->av1_l1_toggle);
-                ctx->av1_l1_toggle ^= 1;
+                slot = (uint8_t)(3 + ctx->av1.l1_toggle);
+                ctx->av1.l1_toggle ^= 1;
                 return (uint8_t)(1u << slot);
             case 2:
                 return 0x20;
@@ -476,13 +476,13 @@ static uint8_t av1_infer_refresh_flags(const VADecPictureParameterBufferAV1 *pic
         ft == V4L2_AV1_SWITCH_FRAME ||
         ft == V4L2_AV1_INTRA_ONLY_FRAME) {
         if (ctx) {
-            ctx->av1_style = AV1_STYLE_UNKNOWN;
-            ctx->av1_gop = 0;
-            ctx->av1_l0_toggle = 0;
-            ctx->av1_l1_toggle = 0;
-            ctx->av1_have_first_arf = 0;
-            ctx->av1_l0_oh = 0;
-            ctx->av1_prev_l0_oh = 0;
+            ctx->av1.style = AV1_STYLE_UNKNOWN;
+            ctx->av1.gop = 0;
+            ctx->av1.l0_toggle = 0;
+            ctx->av1.l1_toggle = 0;
+            ctx->av1.have_first_arf = 0;
+            ctx->av1.l0_oh = 0;
+            ctx->av1.prev_l0_oh = 0;
         }
         return 0xff;
     }
@@ -499,26 +499,26 @@ static uint8_t av1_infer_refresh_flags(const VADecPictureParameterBufferAV1 *pic
             return 0;
     }
 
-    if (ctx && ctx->av1_style == AV1_STYLE_UNKNOWN &&
+    if (ctx && ctx->av1.style == AV1_STYLE_UNKNOWN &&
         ft == V4L2_AV1_INTER_FRAME) {
         if (show) {
             /* libaom --usage=realtime / low-delay: first inter is shown.
              * LAST cycles through map slots 0..5 (order_hint % 6); slots
              * 6-7 stay KEY. Pyramid GOPs hide the first ARF instead. */
-            ctx->av1_style = AV1_STYLE_LIBAOM_RTC;
+            ctx->av1.style = AV1_STYLE_LIBAOM_RTC;
         } else if (pic->pic_info_fields.bits.showable_frame &&
                    pic->primary_ref_frame != 7) {
             /* SVT RA: first picture after KEY is a showable hidden ARF
              * that still uses LAST's CDF. */
-            ctx->av1_style = AV1_STYLE_SVT;
+            ctx->av1.style = AV1_STYLE_SVT;
         } else {
-            ctx->av1_style = AV1_STYLE_LIBAOM;
+            ctx->av1.style = AV1_STYLE_LIBAOM;
         }
     }
 
-    if (ctx && ctx->av1_style == AV1_STYLE_LIBAOM_RTC)
+    if (ctx && ctx->av1.style == AV1_STYLE_LIBAOM_RTC)
         return (uint8_t)(1u << (cur % 6));
-    if (ctx && ctx->av1_style == AV1_STYLE_SVT)
+    if (ctx && ctx->av1.style == AV1_STYLE_SVT)
         return av1_infer_refresh_svt(sids, hints, level1, cur, bits_minus_1,
                                      show, skip, ctx);
     return av1_infer_refresh_libaom(sids, hints, level1, cur, bits_minus_1,
@@ -793,27 +793,18 @@ VAStatus v4l2sl_av1_translate(struct v4l2sl_context *ctx,
     uint8_t *tile_data = NULL;
     uint32_t tile_data_size = 0;
 
-    for (int i = 0; i < num_buffers; i++) {
-        struct v4l2sl_buffer *buf = buffers[i];
-        if (!buf || !buf->data)
-            continue;
-        switch (buf->type) {
-        case VAPictureParameterBufferType: pic_param = buf->data; break;
-        case VASliceParameterBufferType:
-            if (n_tiles < 32)
-                tile_params[n_tiles++] = buf->data;
-            break;
-        case VASliceDataBufferType:
-            /* Keep the largest slice-data buffer — ffmpeg's AV1 VAAPI
-             * hwaccel submits the whole OBU in one buffer. */
-            if (buf->size > tile_data_size) {
-                tile_data = buf->data;
-                tile_data_size = buf->size;
-            }
-            break;
-        default: break;
-        }
-    }
+    struct v4l2sl_collected cb;
+    int i;
+
+    v4l2sl_collect_decode_buffers(buffers, num_buffers, &cb);
+    pic_param = cb.pic;
+    for (i = 0; i < cb.n_slice_params && i < 32; i++)
+        tile_params[i] = cb.slice_params[i];
+    n_tiles = cb.n_slice_params > 32 ? 32 : cb.n_slice_params;
+    /* Largest slice-data buffer — ffmpeg's AV1 VAAPI hwaccel submits the
+     * whole OBU in one buffer. */
+    tile_data = (uint8_t *)cb.largest;
+    tile_data_size = cb.largest_size;
 
     if (!pic_param) {
         fprintf(stderr, "v4l2stateless: AV1 decode missing picture params\n");

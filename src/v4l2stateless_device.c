@@ -285,12 +285,38 @@ static int reqbufs_zero(int fd, enum v4l2_buf_type type)
     return 0;
 }
 
+void v4l2sl_m2m_teardown(struct v4l2sl_context *ctx, struct v4l2sl_m2m_state *q)
+{
+    int i;
+
+    if (!ctx || !q || !q->valid)
+        return;
+    if (ctx->v4l2_fd >= 0) {
+        v4l2sl_streamoff(ctx->v4l2_fd, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE);
+        v4l2sl_streamoff(ctx->v4l2_fd, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE);
+        reqbufs_zero(ctx->v4l2_fd, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE);
+        reqbufs_zero(ctx->v4l2_fd, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE);
+    }
+    for (i = 0; i < 3; i++) {
+        if (q->out_map[i] && q->out_map[i] != MAP_FAILED)
+            munmap(q->out_map[i], q->out_len[i]);
+    }
+    if (q->cap_map && q->cap_map != MAP_FAILED)
+        munmap(q->cap_map, q->cap_len);
+    memset(q, 0, sizeof(*q));
+}
+
 void v4l2sl_release_context_device(struct v4l2sl_context *ctx)
 {
     int i;
 
     if (!ctx)
         return;
+
+    /* Persistent M2M queues hold V4L2 MMAP mappings — release them while
+     * the device fd is still open. */
+    v4l2sl_m2m_teardown(ctx, &ctx->vpp_q);
+    v4l2sl_m2m_teardown(ctx, &ctx->jpeg_q);
 
     if (ctx->v4l2_fd >= 0 && ctx->streamed) {
         v4l2sl_streamoff(ctx->v4l2_fd, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE);
@@ -943,6 +969,47 @@ int v4l2sl_surface_grow_memfd(struct v4l2sl_surface *s, uint32_t size)
     return 0;
 }
 
+/* Persistent per-surface mapping of memfd_fd (RW shared). Grow-only:
+ * when `need` exceeds the cached length the mapping is grown — via
+ * mremap, or when derived images still borrow the current mapping (a
+ * moving remap would pull the pages from under them) by parking the old
+ * one as "retired" until the last borrower releases it. Callers must
+ * NOT munmap the result — the surface owns it. NULL on failure. */
+void *v4l2sl_surface_map_memfd(struct v4l2sl_surface *s, uint32_t need)
+{
+    void *nm;
+
+    if (!s || s->memfd_fd < 0 || need == 0)
+        return NULL;
+    if (s->memfd_map && s->memfd_map_size >= need)
+        return s->memfd_map;
+    if (need > s->memfd_size && v4l2sl_surface_grow_memfd(s, need) < 0)
+        return NULL;
+    if (s->memfd_map) {
+        if (s->memfd_borrows) {
+            if (s->memfd_retired)
+                munmap(s->memfd_retired, s->memfd_retired_size);
+            s->memfd_retired = s->memfd_map;
+            s->memfd_retired_size = s->memfd_map_size;
+            nm = mmap(NULL, need, PROT_READ | PROT_WRITE, MAP_SHARED,
+                      s->memfd_fd, 0);
+        } else {
+            nm = mremap(s->memfd_map, s->memfd_map_size, need,
+                        MREMAP_MAYMOVE);
+        }
+        if (nm == MAP_FAILED)
+            return NULL;
+    } else {
+        nm = mmap(NULL, need, PROT_READ | PROT_WRITE, MAP_SHARED,
+                  s->memfd_fd, 0);
+        if (nm == MAP_FAILED)
+            return NULL;
+    }
+    s->memfd_map = nm;
+    s->memfd_map_size = need;
+    return s->memfd_map;
+}
+
 int v4l2sl_surface_pull_capture(struct v4l2sl_context *ctx,
                                 struct v4l2sl_surface *surf, int buf_index)
 {
@@ -992,11 +1059,10 @@ int v4l2sl_surface_pull_capture(struct v4l2sl_context *ctx,
 
     if (v4l2sl_surface_grow_memfd(surf, sz) < 0)
         return -1;
-    dst = mmap(NULL, sz, PROT_READ | PROT_WRITE, MAP_SHARED, surf->memfd_fd, 0);
-    if (dst == MAP_FAILED)
+    dst = v4l2sl_surface_map_memfd(surf, sz);
+    if (!dst)
         return -1;
     memcpy(dst, src, sz);
-    munmap(dst, sz);
 
     surf->buf_index = buf_index;
     surf->stride = stride;
@@ -1040,6 +1106,48 @@ int v4l2sl_bind_capture_export(struct v4l2sl_context *ctx)
     return 0;
 }
 
+void v4l2sl_fill_prime_layers(VADRMPRIMESurfaceDescriptor *desc,
+                              int fd, uint32_t object_size,
+                              uint64_t modifier, uint32_t va_fourcc,
+                              uint32_t width, uint32_t height,
+                              uint32_t pitch, uint32_t chroma_row,
+                              uint32_t combined_fmt, uint32_t luma_fmt,
+                              uint32_t chroma_fmt, uint32_t flags)
+{
+    memset(desc, 0, sizeof(*desc));
+    desc->fourcc = va_fourcc;
+    desc->width = width;
+    desc->height = height;
+    desc->num_objects = 1;
+    desc->objects[0].fd = fd;
+    desc->objects[0].size = object_size;
+    desc->objects[0].drm_format_modifier = modifier;
+
+    if (flags & VA_EXPORT_SURFACE_SEPARATE_LAYERS) {
+        desc->num_layers = 2;
+        desc->layers[0].drm_format = luma_fmt;
+        desc->layers[0].num_planes = 1;
+        desc->layers[0].object_index[0] = 0;
+        desc->layers[0].offset[0] = 0;
+        desc->layers[0].pitch[0] = pitch;
+        desc->layers[1].drm_format = chroma_fmt;
+        desc->layers[1].num_planes = 1;
+        desc->layers[1].object_index[0] = 0;
+        desc->layers[1].offset[0] = pitch * chroma_row;
+        desc->layers[1].pitch[0] = pitch;
+    } else {
+        desc->num_layers = 1;
+        desc->layers[0].drm_format = combined_fmt;
+        desc->layers[0].num_planes = 2;
+        desc->layers[0].object_index[0] = 0;
+        desc->layers[0].object_index[1] = 0;
+        desc->layers[0].offset[0] = 0;
+        desc->layers[0].offset[1] = pitch * chroma_row;
+        desc->layers[0].pitch[0] = pitch;
+        desc->layers[0].pitch[1] = pitch;
+    }
+}
+
 VAStatus v4l2sl_surface_fill_prime(const struct v4l2sl_surface *surf,
                                    const struct v4l2sl_context *c,
                                    uint32_t flags,
@@ -1067,42 +1175,17 @@ VAStatus v4l2sl_surface_fill_prime(const struct v4l2sl_surface *surf,
     if (fd < 0)
         return VA_STATUS_ERROR_OPERATION_FAILED;
 
-    memset(desc, 0, sizeof(*desc));
-    desc->fourcc = v4l2sl_va_fourcc_for_capture(cap_fcc);
-    if (cap_fcc == V4L2_PIX_FMT_NV12)
-        desc->fourcc = VA_FOURCC_NV12;
-    desc->width = surf->width;
-    desc->height = surf->height;
-    desc->num_objects = 1;
-    desc->objects[0].fd = fd;
-    desc->objects[0].size = plane_size;
-    desc->objects[0].drm_format_modifier = DRM_FORMAT_MOD_LINEAR;
-
-    if (flags & VA_EXPORT_SURFACE_SEPARATE_LAYERS) {
-        desc->num_layers = 2;
-        desc->layers[0].drm_format = (cap_fcc == V4L2_PIX_FMT_NV15) ?
-            DRM_FORMAT_R16 : DRM_FORMAT_R8;
-        desc->layers[0].num_planes = 1;
-        desc->layers[0].object_index[0] = 0;
-        desc->layers[0].offset[0] = 0;
-        desc->layers[0].pitch[0] = stride;
-        desc->layers[1].drm_format = (cap_fcc == V4L2_PIX_FMT_NV15) ?
-            DRM_FORMAT_GR1616 : DRM_FORMAT_GR88;
-        desc->layers[1].num_planes = 1;
-        desc->layers[1].object_index[0] = 0;
-        desc->layers[1].offset[0] = stride * alh;
-        desc->layers[1].pitch[0] = stride;
-    } else {
-        desc->num_layers = 1;
-        desc->layers[0].drm_format = drm_fcc;
-        desc->layers[0].num_planes = 2;
-        desc->layers[0].object_index[0] = 0;
-        desc->layers[0].object_index[1] = 0;
-        desc->layers[0].offset[0] = 0;
-        desc->layers[0].offset[1] = stride * alh;
-        desc->layers[0].pitch[0] = stride;
-        desc->layers[0].pitch[1] = stride;
-    }
+    v4l2sl_fill_prime_layers(desc, fd, plane_size, DRM_FORMAT_MOD_LINEAR,
+                             (cap_fcc == V4L2_PIX_FMT_NV12) ?
+                                 VA_FOURCC_NV12 :
+                                 v4l2sl_va_fourcc_for_capture(cap_fcc),
+                             surf->width, surf->height, stride, alh,
+                             drm_fcc,
+                             (cap_fcc == V4L2_PIX_FMT_NV15) ?
+                                 DRM_FORMAT_R16 : DRM_FORMAT_R8,
+                             (cap_fcc == V4L2_PIX_FMT_NV15) ?
+                                 DRM_FORMAT_GR1616 : DRM_FORMAT_GR88,
+                             flags);
     return VA_STATUS_SUCCESS;
 }
 

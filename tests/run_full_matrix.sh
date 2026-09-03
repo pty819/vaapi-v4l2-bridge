@@ -359,7 +359,9 @@ pair_gst_mpeg2 "$CLIP/mpeg2_b.mpg" 40 mpeg2-b
 pair_gst_mpeg2 "$CLIP/mpeg2_1080.mpg" 40 mpeg2-1080
 
 echo "== JPEG mjpeg_vaapi =="
-$FF -hide_banner -vaapi_device /dev/dri/renderD128 -f lavfi \
+# V4L2SL_DEBUG: JPEG/VPP success prints are debug-gated; the gate below
+# greps them as proof the bridge was used.
+V4L2SL_DEBUG=1 $FF -hide_banner -vaapi_device /dev/dri/renderD128 -f lavfi \
   -i testsrc=size=320x240:rate=5:duration=1 -vf "format=nv12,hwupload" \
   -c:v mjpeg_vaapi -y "$OUT/va.jpg" >"$OUT/jpeg.stderr" 2>&1
 if grep -q "v4l2stateless: JPEG encoded" "$OUT/jpeg.stderr" && \
@@ -371,7 +373,7 @@ else
 fi
 
 echo "== VPP scale_vaapi =="
-$FF -hide_banner -hwaccel vaapi -hwaccel_output_format vaapi \
+V4L2SL_DEBUG=1 $FF -hide_banner -hwaccel vaapi -hwaccel_output_format vaapi \
   -vaapi_device /dev/dri/renderD128 -i "$CLIP/h264_qcif.mp4" \
   -vf "scale_vaapi=w=160:h=120,hwdownload,format=nv12" -frames:v 8 \
   -f framemd5 -y "$OUT/vpp.md5" >"$OUT/vpp.stderr" 2>&1

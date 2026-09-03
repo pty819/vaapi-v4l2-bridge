@@ -178,9 +178,11 @@ v4l2sl_terminate(VADriverContextP ctx)
         struct v4l2sl_buffer *buf = driver_data->orphan_buffers;
 
         driver_data->orphan_buffers = buf->next;
-        if (buf->mmapped)
+        /* mmapped==2 borrows a surface-owned mapping (or cpu_ptr) — both
+         * were already released by destroy_surface_locked above. */
+        if (buf->mmapped == 1)
             munmap(buf->data, buf->size);
-        else
+        else if (buf->mmapped == 0)
             free(buf->data);
         free(buf);
     }
@@ -643,6 +645,10 @@ fail:
         struct v4l2sl_surface *s = v4l2sl_surface_by_id(driver_data, surfaces[j]);
 
         if (s) {
+            if (s->memfd_map)
+                munmap(s->memfd_map, s->memfd_map_size);
+            if (s->memfd_retired)
+                munmap(s->memfd_retired, s->memfd_retired_size);
             if (s->memfd_fd >= 0)
                 close(s->memfd_fd);
             free(s->cpu_ptr);
@@ -692,6 +698,48 @@ v4l2sl_create_surfaces2(VADriverContextP ctx,
                                   num_surfaces, surfaces);
 }
 
+void v4l2sl_collect_decode_buffers(struct v4l2sl_buffer **buffers, int n,
+                                   struct v4l2sl_collected *cb)
+{
+    int i;
+
+    memset(cb, 0, sizeof(*cb));
+    for (i = 0; i < n; i++) {
+        struct v4l2sl_buffer *buf = buffers[i];
+
+        if (!buf || !buf->data)
+            continue;
+        switch (buf->type) {
+        case VAPictureParameterBufferType:
+            cb->pic = buf->data;
+            break;
+        case VASliceParameterBufferType:
+            if (cb->n_slice_params < 32)
+                cb->slice_params[cb->n_slice_params++] = buf->data;
+            break;
+        case VAIQMatrixBufferType:
+            cb->iq = buf->data;
+            break;
+        case VASliceDataBufferType:
+            if (cb->n_slice_datas < V4L2SL_MAX_SLICE_DATAS) {
+                cb->slice_datas[cb->n_slice_datas] = buf->data;
+                cb->slice_sizes[cb->n_slice_datas] = buf->size;
+                cb->n_slice_datas++;
+            }
+            if (buf->size > cb->largest_size) {
+                cb->largest = buf->data;
+                cb->largest_size = buf->size;
+            }
+            break;
+        case VAProbabilityBufferType:
+            cb->prob = buf->data;
+            break;
+        default:
+            break;
+        }
+    }
+}
+
 /* Free one surface and recycle its ID. Caller holds g_v4l2sl_lock and
  * has already detached the surface from any context (C1 does that for
  * the explicit destroy path; terminate frees contexts first). */
@@ -699,6 +747,10 @@ static void
 destroy_surface_locked(struct v4l2sl_driver_data *dd,
                        struct v4l2sl_surface *s, VASurfaceID id)
 {
+    if (s->memfd_map)
+        munmap(s->memfd_map, s->memfd_map_size);
+    if (s->memfd_retired)
+        munmap(s->memfd_retired, s->memfd_retired_size);
     if (s->memfd_fd >= 0)
         close(s->memfd_fd);
     v4l2sl_gbm_surface_destroy(s);
@@ -1537,14 +1589,17 @@ v4l2sl_derive_image(VADriverContextP ctx,
     } else {
         v4l2sl_surface_ensure_memfd(surf);
         data_size = v4l2sl_capture_plane_size(cap_fcc, stride, aligned_h);
-        map = mmap(NULL, data_size, PROT_READ, MAP_SHARED, surf->memfd_fd, 0);
-        if (map == MAP_FAILED) {
-            fprintf(stderr, "v4l2stateless: derive_image: mmap dmabuf failed: %s\n",
+        map = v4l2sl_surface_map_memfd(surf, data_size);
+        if (!map) {
+            fprintf(stderr, "v4l2stateless: derive_image: map memfd failed: %s\n",
                     strerror(errno));
             pthread_mutex_unlock(&g_v4l2sl_lock);
             return VA_STATUS_ERROR_OPERATION_FAILED;
         }
-        mmapped = 1;
+        /* Borrowed persistent mapping — the surface owns it; DestroyImage
+         * releases the borrow (mmapped == 2). */
+        mmapped = 2;
+        surf->memfd_borrows++;
         /* Derive reports the native V4L2 layout so zero-copy clients can
          * consume NV15/NV16; GetImage converts to P010/YUY2. */
         if (cap_fcc == V4L2_PIX_FMT_NV12)
@@ -1557,7 +1612,6 @@ v4l2sl_derive_image(VADriverContextP ctx,
 
     struct v4l2sl_buffer *ib = calloc(1, sizeof(*ib));
     if (!ib) {
-        munmap(map, data_size);
         pthread_mutex_unlock(&g_v4l2sl_lock);
         return VA_STATUS_ERROR_ALLOCATION_FAILED;
     }
@@ -1567,6 +1621,7 @@ v4l2sl_derive_image(VADriverContextP ctx,
     ib->size = data_size;
     ib->data = map;
     ib->mmapped = mmapped;
+    ib->borrow_surf = (mmapped == 2 && map != surf->cpu_ptr) ? surf : NULL;
     ib->next = driver_data->orphan_buffers;
     driver_data->orphan_buffers = ib;
 
@@ -1609,6 +1664,19 @@ v4l2sl_destroy_image(VADriverContextP ctx, VAImageID image_id)
                 munmap(ib->data, ib->size);
             else if (ib->mmapped == 0)
                 free(ib->data);
+            else if (ib->mmapped == 2 && ib->borrow_surf) {
+                /* Release the borrowed persistent memfd mapping; once the
+                 * last borrower is gone a retired mapping can be freed. */
+                struct v4l2sl_surface *bs = ib->borrow_surf;
+
+                if (bs->memfd_borrows)
+                    bs->memfd_borrows--;
+                if (!bs->memfd_borrows && bs->memfd_retired) {
+                    munmap(bs->memfd_retired, bs->memfd_retired_size);
+                    bs->memfd_retired = NULL;
+                    bs->memfd_retired_size = 0;
+                }
+            }
             *pp = ib->next;
             free(ib);
             pthread_mutex_unlock(&g_v4l2sl_lock);
@@ -1759,9 +1827,9 @@ v4l2sl_get_image(VADriverContextP ctx, VASurfaceID surface,
 
     if (surf->memfd_fd >= 0 && surf->buf_index >= 0) {
         map_size = v4l2sl_capture_plane_size(cap_fcc, src_stride, src_alh);
-        mapped = mmap(NULL, map_size, PROT_READ, MAP_SHARED, surf->memfd_fd, 0);
-        if (mapped == MAP_FAILED) {
-            fprintf(stderr, "v4l2stateless: get_image: mmap dmabuf failed: %s\n",
+        mapped = v4l2sl_surface_map_memfd(surf, map_size);
+        if (!mapped) {
+            fprintf(stderr, "v4l2stateless: get_image: map memfd failed: %s\n",
                     strerror(errno));
             pthread_mutex_unlock(&g_v4l2sl_lock);
             return VA_STATUS_ERROR_OPERATION_FAILED;
@@ -1794,13 +1862,9 @@ v4l2sl_get_image(VADriverContextP ctx, VASurfaceID surface,
         fprintf(stderr, "v4l2stateless: get_image: no path cap=%.4s -> %.4s\n",
                 (char *)&cap_fcc, (char *)&dst_fourcc);
         pthread_mutex_unlock(&g_v4l2sl_lock);
-        if (mapped)
-            munmap(mapped, map_size);
         return VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT;
     }
 
-    if (mapped)
-        munmap(mapped, map_size);
     pthread_mutex_unlock(&g_v4l2sl_lock);
     return VA_STATUS_SUCCESS;
 }

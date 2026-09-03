@@ -134,8 +134,7 @@ VAStatus v4l2sl_mpeg2_translate(struct v4l2sl_context *ctx,
 {
     VAPictureParameterBufferMPEG2 *pic_param = NULL;
     VAIQMatrixBufferMPEG2 *iq = NULL;
-    const uint8_t *slice_datas[256];
-    uint32_t slice_sizes[256];
+    struct v4l2sl_collected cb;
     int n_slice_data = 0;
     struct v4l2_ctrl_mpeg2_sequence seq;
     struct v4l2_ctrl_mpeg2_picture vpic;
@@ -143,31 +142,12 @@ VAStatus v4l2sl_mpeg2_translate(struct v4l2sl_context *ctx,
     int request_fd, v4l2_fd;
     int out_buf_idx, done_cap;
     uint64_t timestamp;
-    size_t prefixes[256];
     size_t total = 0;
 
-    for (int i = 0; i < num_buffers; i++) {
-        struct v4l2sl_buffer *buf = buffers[i];
-        if (!buf || !buf->data)
-            continue;
-        switch (buf->type) {
-        case VAPictureParameterBufferType:
-            pic_param = buf->data;
-            break;
-        case VAIQMatrixBufferType:
-            iq = buf->data;
-            break;
-        case VASliceDataBufferType:
-            if (n_slice_data < 256) {
-                slice_datas[n_slice_data] = buf->data;
-                slice_sizes[n_slice_data] = buf->size;
-                n_slice_data++;
-            }
-            break;
-        default:
-            break;
-        }
-    }
+    v4l2sl_collect_decode_buffers(buffers, num_buffers, &cb);
+    pic_param = cb.pic;
+    iq = cb.iq;
+    n_slice_data = cb.n_slice_datas;
 
     if (!pic_param) {
         fprintf(stderr, "v4l2stateless: MPEG-2 decode missing picture params\n");
@@ -256,34 +236,13 @@ VAStatus v4l2sl_mpeg2_translate(struct v4l2sl_context *ctx,
 
     timestamp = ctx->current_surface ? ctx->current_surface->timestamp : 0;
 
-    for (int i = 0; i < n_slice_data; i++) {
-        prefixes[i] = 0;
-        if (!(slice_sizes[i] >= 3 && slice_datas[i][0] == 0 &&
-              slice_datas[i][1] == 0 &&
-              (slice_datas[i][2] == 1 ||
-               (slice_sizes[i] >= 4 && slice_datas[i][2] == 0 &&
-                slice_datas[i][3] == 1))))
-            prefixes[i] = 4;
-        total += prefixes[i] + slice_sizes[i];
-    }
-    if (total > ctx->output_buf_size) {
+    total = v4l2sl_annexb_concat(
+        cb.slice_datas, cb.slice_sizes, cb.n_slice_datas, 4,
+        (uint8_t *)ctx->output_buf_ptr[out_buf_idx], ctx->output_buf_size);
+    if (!total) {
         fprintf(stderr, "v4l2stateless: MPEG-2 slice data too large\n");
         v4l2sl_out_pool_push(ctx, out_buf_idx);
         return VA_STATUS_ERROR_OPERATION_FAILED;
-    }
-    if (ctx->output_buf_ptr[out_buf_idx]) {
-        uint8_t *dst = (uint8_t *)ctx->output_buf_ptr[out_buf_idx];
-        size_t off = 0;
-        for (int i = 0; i < n_slice_data; i++) {
-            if (prefixes[i]) {
-                dst[off] = 0;
-                dst[off + 1] = 0;
-                dst[off + 2] = 0;
-                dst[off + 3] = 1;
-            }
-            memcpy(dst + off + prefixes[i], slice_datas[i], slice_sizes[i]);
-            off += prefixes[i] + slice_sizes[i];
-        }
     }
 
     /* On failure decode_submit resets both queues — do not push back. */

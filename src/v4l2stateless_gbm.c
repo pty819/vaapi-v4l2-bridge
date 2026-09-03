@@ -120,8 +120,8 @@ int v4l2sl_surface_ensure_memfd(struct v4l2sl_surface *s)
                          GBM_BO_TRANSFER_READ, &bo_stride, &bo_map);
     if (!bo_data)
         return -1;
-    m = mmap(NULL, sz, PROT_READ | PROT_WRITE, MAP_SHARED, s->memfd_fd, 0);
-    if (m == MAP_FAILED) {
+    m = v4l2sl_surface_map_memfd(s, sz);
+    if (!m) {
         gbm_bo_unmap(s->gbm_bo, bo_map);
         return -1;
     }
@@ -133,7 +133,6 @@ int v4l2sl_surface_ensure_memfd(struct v4l2sl_surface *s)
     for (uint32_t y = 0; y < (h + 1) / 2; y++)
         memcpy(dst + (size_t)s->stride * y,
                bo_data + (size_t)bo_stride * (h + y), uvw);
-    munmap(m, sz);
     gbm_bo_unmap(s->gbm_bo, bo_map);
     s->last_writer = V4L2SL_WRITER_MEMFD;
     return 0;
@@ -187,13 +186,12 @@ int v4l2sl_gbm_surface_sync(struct v4l2sl_surface *s)
         s->stride && s->aligned_h) {
         uint32_t sz = v4l2sl_capture_plane_size(V4L2_PIX_FMT_NV12,
                                                 s->stride, s->aligned_h);
-        void *m = mmap(NULL, sz, PROT_READ, MAP_SHARED, s->memfd_fd, 0);
+        void *m = v4l2sl_surface_map_memfd(s, sz);
         int r;
 
-        if (m == MAP_FAILED)
+        if (!m)
             return -1;
         r = v4l2sl_gbm_surface_upload(s, m, s->stride, s->aligned_h);
-        munmap(m, sz);
         if (r == 0)
             s->last_writer = V4L2SL_WRITER_BO; /* bo now holds the frame */
         return r;
@@ -224,37 +222,10 @@ VAStatus v4l2sl_surface_fill_prime_gbm(const struct v4l2sl_surface *surf,
 
     h = surf->height;
     pitch = surf->gbm_stride;
-    memset(desc, 0, sizeof(*desc));
-    desc->fourcc = VA_FOURCC_NV12;
-    desc->width = surf->width;
-    desc->height = h;
-    desc->num_objects = 1;
-    desc->objects[0].fd = fd;
-    desc->objects[0].size = pitch * (h + (h + 1) / 2);
-    desc->objects[0].drm_format_modifier = gbm_bo_get_modifier(surf->gbm_bo);
-
-    if (flags & VA_EXPORT_SURFACE_SEPARATE_LAYERS) {
-        desc->num_layers = 2;
-        desc->layers[0].drm_format = DRM_FORMAT_R8;
-        desc->layers[0].num_planes = 1;
-        desc->layers[0].object_index[0] = 0;
-        desc->layers[0].offset[0] = 0;
-        desc->layers[0].pitch[0] = pitch;
-        desc->layers[1].drm_format = DRM_FORMAT_GR88;
-        desc->layers[1].num_planes = 1;
-        desc->layers[1].object_index[0] = 0;
-        desc->layers[1].offset[0] = pitch * h;
-        desc->layers[1].pitch[0] = pitch;
-    } else {
-        desc->num_layers = 1;
-        desc->layers[0].drm_format = DRM_FORMAT_NV12;
-        desc->layers[0].num_planes = 2;
-        desc->layers[0].object_index[0] = 0;
-        desc->layers[0].object_index[1] = 0;
-        desc->layers[0].offset[0] = 0;
-        desc->layers[0].offset[1] = pitch * h;
-        desc->layers[0].pitch[0] = pitch;
-        desc->layers[0].pitch[1] = pitch;
-    }
+    v4l2sl_fill_prime_layers(desc, fd, pitch * (h + (h + 1) / 2),
+                             gbm_bo_get_modifier(surf->gbm_bo),
+                             VA_FOURCC_NV12, surf->width, h, pitch, h,
+                             DRM_FORMAT_NV12, DRM_FORMAT_R8, DRM_FORMAT_GR88,
+                             flags);
     return VA_STATUS_SUCCESS;
 }

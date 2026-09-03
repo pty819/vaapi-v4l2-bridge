@@ -13,6 +13,7 @@
 #include <va/va_backend.h>
 #include <va/va_dec_vp8.h>
 #include <va/va_vpp.h>
+#include <va/va_drmcommon.h>
 #include <linux/v4l2-controls.h>
 #include <linux/videodev2.h>
 
@@ -62,6 +63,11 @@ struct v4l2sl_surface {
     int buf_index;           /* V4L2 capture buffer index, -1 if not allocated */
     int memfd_fd;          /* memfd snapshot fd (CPU-readback vehicle) */
     uint32_t memfd_size;     /* current ftruncate size of memfd_fd (grow-only) */
+    void *memfd_map;         /* persistent RW mapping of memfd_fd (grow-only) */
+    uint32_t memfd_map_size; /* mapped length of memfd_map */
+    void *memfd_retired;     /* superseded mapping still held by derived images */
+    uint32_t memfd_retired_size;
+    uint32_t memfd_borrows;  /* live derived images pointing at memfd_map */
     uint64_t timestamp;      /* V4L2 timestamp for reference tracking */
     uint32_t order_hint;     /* AV1 OrderHint of the frame last decoded here */
     uint8_t av1_level1;      /* AV1 KEY / level-1 ARF (hidden skip=0,0) */
@@ -85,6 +91,8 @@ struct v4l2sl_buffer {
     unsigned int num_elements;
     void *data;
     int mmapped;             /* data from mmap (derive_image) vs malloc */
+    struct v4l2sl_surface *borrow_surf; /* mmapped==2: surface whose mapping
+                                         * is borrowed (NULL = cpu_ptr borrow) */
     uint32_t fourcc;         /* VAImageBufferType: fourcc of the image */
     uint32_t pitch;          /* VAImageBufferType: allocation stride */
     struct v4l2sl_buffer *next;
@@ -98,9 +106,42 @@ struct v4l2sl_buffer {
  * row; sized to match pending_buffers). */
 #define V4L2SL_MAX_SLICE_DATAS 256
 
+/* Collected decode-buffer roles from one vaRenderPicture batch
+ * (v4l2sl_collect_decode_buffers). */
+struct v4l2sl_collected {
+    void *pic;              /* VAPictureParameterBufferType (last one wins) */
+    void *iq;               /* VAIQMatrixBufferType (last one wins) */
+    void *prob;             /* VAProbabilityBufferType (VP8) */
+    void *slice_params[32]; /* VASliceParameterBufferType, in order */
+    int n_slice_params;
+    const uint8_t *slice_datas[V4L2SL_MAX_SLICE_DATAS];
+    uint32_t slice_sizes[V4L2SL_MAX_SLICE_DATAS];
+    int n_slice_datas;
+    const uint8_t *largest;     /* biggest SliceData buffer (VP8/AV1 style) */
+    uint32_t largest_size;
+};
+
+
 /* Surface table size; IDs are recycled via a free stack so a long-lived
  * process can never index past the table. */
 #define V4L2SL_MAX_SURFACES 4096
+
+/* Persistent M2M queue state (VPP / JPEG encode): when the negotiated
+ * setup is unchanged across pictures, S_FMT / S_CTRL / REQBUFS / QUERYBUF
+ * and the plane mappings are skipped — steady state is STREAMON + QBUF +
+ * DQBUF + STREAMOFF only (~18 -> ~7 ioctls, 4 mmap -> 0 per frame). A
+ * setup change or any steady-state failure triggers a full teardown and
+ * renegotiation on the next picture. */
+struct v4l2sl_m2m_state {
+    uint8_t  valid;
+    uint32_t key[8];         /* codec-specific setup key */
+    void    *out_map[3];     /* mapped OUTPUT planes (JPEG: Y, UV[, pad]) */
+    size_t   out_len[3];
+    int      out_planes;     /* negotiated OUTPUT plane count */
+    void    *cap_map;        /* mapped CAPTURE plane */
+    size_t   cap_len;
+    struct v4l2_format ofmt; /* negotiated OUTPUT format (plane layout) */
+};
 
 /* Per-context state (one decode session) */
 struct v4l2sl_context {
@@ -167,16 +208,22 @@ struct v4l2sl_context {
     /* 1088: this UAPI's padded v4l2_ctrl_h264_sps is 1048 bytes */
     uint8_t g_ctrl_payload[1088];
 
-    /* AV1 refresh_frame_flags inference: VA does not expose the bitmask.
-     * 0 = unknown, 1 = libaom-style (free slots from index 1),
-     * 2 = SVT-AV1 RA pyramid. */
-    uint8_t av1_style;
-    uint8_t av1_gop;           /* first hidden ARF order_hint (mini-GOP) */
-    uint8_t av1_l0_toggle;     /* SVT L0 slots 0-1-2 */
-    uint8_t av1_l1_toggle;     /* SVT L1 slots 3-4 */
-    uint8_t av1_have_first_arf;
-    uint32_t av1_l0_oh;        /* last SVT L0 ARF order_hint */
-    uint32_t av1_prev_l0_oh;   /* previous L0 ARF (mini-GOP length) */
+    /* AV1 refresh_frame_flags inference heuristics: VA does not expose
+     * the bitmask. style: 0 = unknown, 1 = libaom-style (free slots from
+     * index 1), 2 = SVT-AV1 RA pyramid. */
+    struct {
+        uint8_t style;
+        uint8_t gop;           /* first hidden ARF order_hint (mini-GOP) */
+        uint8_t l0_toggle;     /* SVT L0 slots 0-1-2 */
+        uint8_t l1_toggle;     /* SVT L1 slots 3-4 */
+        uint8_t have_first_arf;
+        uint32_t l0_oh;        /* last SVT L0 ARF order_hint */
+        uint32_t prev_l0_oh;   /* previous L0 ARF (mini-GOP length) */
+    } av1;
+
+    /* Persistent M2M queues (stateful devices: RGA VPP / VEPU JPEG) */
+    struct v4l2sl_m2m_state vpp_q;
+    struct v4l2sl_m2m_state jpeg_q;
 };
 
 /* Driver global state */
@@ -304,6 +351,10 @@ int v4l2sl_decode_submit(struct v4l2sl_context *ctx, int out_buf_idx,
 void v4l2sl_decode_reset(struct v4l2sl_context *ctx);
 int v4l2sl_surface_alloc_export_fd(struct v4l2sl_surface *s);
 int v4l2sl_surface_grow_memfd(struct v4l2sl_surface *s, uint32_t size);
+/* Persistent per-surface mapping of memfd_fd (RW shared, grow-only; the
+ * memfd itself only ever grows). Callers must NOT munmap the result —
+ * the surface owns it and releases it at destroy. NULL on failure. */
+void *v4l2sl_surface_map_memfd(struct v4l2sl_surface *s, uint32_t need);
 /* Lazy CPU backing: decode-only surfaces never pay the multi-MB calloc;
  * the first CPU writer (put_image, VPP dst, upload) allocates it. */
 int v4l2sl_surface_ensure_cpu(struct v4l2sl_surface *s);
@@ -335,6 +386,24 @@ int v4l2sl_mmap_output_buffers(int fd, int count, void **ptrs, uint32_t *size_ou
 int v4l2sl_set_request_controls(int request_fd, int v4l2_fd, struct v4l2_ext_controls *ctrls);
 int v4l2sl_set_global_controls(int v4l2_fd, struct v4l2_ext_controls *ctrls);
 int v4l2sl_submit_request(int request_fd);
+/* Full teardown of a persistent M2M queue (STREAMOFF + REQBUFS(0) both
+ * directions + drop the plane mappings). Safe no-op on an unused queue;
+ * call before the context's device fd goes away. */
+void v4l2sl_m2m_teardown(struct v4l2sl_context *ctx, struct v4l2sl_m2m_state *q);
+/* One-pass decode-buffer collection shared by every codec translate. */
+void v4l2sl_collect_decode_buffers(struct v4l2sl_buffer **buffers, int n,
+                                   struct v4l2sl_collected *cb);
+/* Single-object VADRMPRIMESurfaceDescriptor layout shared by the memfd
+ * and GBM-bo export paths: 2 planes at `pitch`, chroma starting at row
+ * `chroma_row`; SEPARATE_LAYERS splits them into two single-plane
+ * layers (luma_fmt/chroma_fmt) instead of one `combined_fmt` layer. */
+void v4l2sl_fill_prime_layers(VADRMPRIMESurfaceDescriptor *desc,
+                              int fd, uint32_t object_size,
+                              uint64_t modifier, uint32_t va_fourcc,
+                              uint32_t width, uint32_t height,
+                              uint32_t pitch, uint32_t chroma_row,
+                              uint32_t combined_fmt, uint32_t luma_fmt,
+                              uint32_t chroma_fmt, uint32_t flags);
 /* poll() wrapper that retries EINTR (device.c) */
 int v4l2sl_poll_intr(struct pollfd *fds, nfds_t n, int timeout);
 /* EINTR-retrying ioctl (device.c); VPP/JPEG route through it so the test
@@ -408,6 +477,8 @@ uint32_t v4l2sl_drm_fourcc_for_capture(uint32_t v4l2_fourcc);
 uint32_t v4l2sl_capture_plane_size(uint32_t fourcc, uint32_t stride, uint32_t aligned_h);
 uint32_t v4l2sl_va_image_size(uint32_t va_fourcc, uint32_t stride, uint32_t height);
 uint32_t v4l2sl_default_image_stride(uint32_t va_fourcc, int width);
+size_t v4l2sl_annexb_concat(const uint8_t * const *datas, const uint32_t *sizes,
+                            int n, int prefix_len, uint8_t *dst, size_t dst_cap);
 void v4l2sl_nv15_to_p010(uint8_t *dst, uint32_t dst_stride,
                          const uint8_t *src, uint32_t src_stride,
                          uint32_t src_aligned_h, int width, int height);

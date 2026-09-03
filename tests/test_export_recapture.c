@@ -307,138 +307,6 @@ static void test_recapture_small_to_large(void)
     g_ctx = NULL;
 }
 
-static void test_av1_translate_recapture(void)
-{
-    struct v4l2sl_driver_data dd;
-    struct v4l2sl_context ctx;
-    struct v4l2sl_surface *surf;
-    VASurfaceID targets[1] = { 1 };
-    VADecPictureParameterBufferAV1 pic;
-    uint8_t tile[64];
-    uint8_t outbuf[4096];
-    struct v4l2sl_buffer pic_buf, data_buf;
-    struct v4l2sl_buffer *bufs[2];
-    int sp[2];
-    int i0, i1, i2, i3, i4;
-    VAStatus st;
-
-    memset(&dd, 0, sizeof(dd));
-    memset(&ctx, 0, sizeof(ctx));
-    memset(&pic, 0, sizeof(pic));
-    memset(tile, 0xab, sizeof(tile));
-    surf = calloc(1, sizeof(*surf));
-    if (!surf) {
-        fprintf(stderr, "FAIL calloc av1 surface\n");
-        g_fail++;
-        return;
-    }
-    if (pipe(sp) < 0) {
-        fprintf(stderr, "FAIL pipe\n");
-        g_fail++;
-        free(surf);
-        return;
-    }
-    if (write(sp[1], "x", 1) != 1) {
-        fprintf(stderr, "FAIL pipe write\n");
-        g_fail++;
-        close(sp[0]);
-        close(sp[1]);
-        free(surf);
-        return;
-    }
-
-    surf->width = 432;
-    surf->height = 240;
-    surf->format = VA_FOURCC_NV12;
-    surf->buf_index = -1;
-    surf->memfd_fd = -1;
-    surf->cpu_stride = 432;
-    expect_true(v4l2sl_surface_alloc_export_fd(surf) == 0, "av1-surf-memfd");
-    dd.surfaces[1] = surf;
-
-    pic.frame_width_minus1 = 1919;
-    pic.frame_height_minus1 = 1079;
-    pic.bit_depth_idx = 0;
-    pic.tile_cols = 1;
-    pic.tile_rows = 1;
-    pic.seq_info_fields.fields.subsampling_x = 1;
-    pic.seq_info_fields.fields.subsampling_y = 1;
-    pic.pic_info_fields.bits.frame_type = 0; /* key */
-    pic.pic_info_fields.bits.show_frame = 1;
-    pic.pic_info_fields.bits.uniform_tile_spacing_flag = 1;
-
-    memset(&pic_buf, 0, sizeof(pic_buf));
-    memset(&data_buf, 0, sizeof(data_buf));
-    pic_buf.type = VAPictureParameterBufferType;
-    pic_buf.data = &pic;
-    pic_buf.size = sizeof(pic);
-    data_buf.type = VASliceDataBufferType;
-    data_buf.data = tile;
-    data_buf.size = sizeof(tile);
-    bufs[0] = &pic_buf;
-    bufs[1] = &data_buf;
-
-    ctx.driver_data = &dd;
-    ctx.v4l2_fd = sp[0];
-    ctx.media_fd = -1;
-    ctx.request_fd = sp[1];
-    ctx.width = 432;
-    ctx.height = 240;
-    ctx.cap_width = 432;
-    ctx.cap_height = 240;
-    ctx.cap_stride = 432;
-    ctx.cap_sizeimage = 432 * 240 * 3 / 2;
-    ctx.cap_pixelformat = V4L2_PIX_FMT_NV12;
-    ctx.capture_bufs_allocd = 24;
-    ctx.output_bufs_allocd = 2;
-    ctx.streamed = 1;
-    ctx.n_free_out = 1;
-    ctx.free_out_bufs[0] = 0;
-    ctx.output_buf_ptr[0] = outbuf;
-    ctx.output_buf_size = sizeof(outbuf);
-    ctx.render_targets = targets;
-    ctx.num_render_targets = 1;
-    ctx.current_surface = surf;
-    ctx.codec = V4L2SL_CODEC_AV1;
-
-    g_ctx = &ctx;
-    g_nops = 0;
-    g_streamoff = g_reqbufs0 = g_reqbufs_n = g_sfmt_cap = 0;
-    g_fds_live_at_reqbufs0 = -1;
-    g_last_cap_w = 432;
-    g_last_cap_h = 240;
-    v4l2sl_set_ioctl_hook(mock_ioctl);
-
-    st = v4l2sl_av1_translate(&ctx, bufs, 2);
-    expect_true(st == VA_STATUS_SUCCESS, "av1-translate-status");
-    expect_true(g_streamoff >= 2, "av1-streamoff");
-    expect_true(g_reqbufs0 == 1, "av1-reqbufs0");
-    expect_true(g_fds_live_at_reqbufs0 == 1, "av1-memfd-kept-at-reqbufs0");
-    expect_true(ctx.cap_width >= 1920 && ctx.cap_height >= 1080,
-                "av1-capture-holds-4k");
-    expect_true(g_last_cap_w == 1920 && g_last_cap_h == 1080,
-                "av1-sfm-coded-size");
-
-    i0 = op_index("STREAMOFF");
-    i1 = op_index("REQBUFS0");
-    i2 = op_index("S_FMT_CAP");
-    i3 = op_index("REQBUFSN");
-    i4 = op_index("STREAMON");
-    expect_true(i0 >= 0 && i1 > i0, "av1-streamoff-before-reqbufs0");
-    expect_true(i1 >= 0 && i2 > i1, "av1-reqbufs0-before-sfmt");
-    expect_true(i2 >= 0 && i3 > i2, "av1-sfmt-before-reqbufsn");
-    expect_true(i4 > i3, "av1-streamon-after-recapture");
-
-    if (surf->memfd_fd >= 0)
-        close(surf->memfd_fd);
-    free(surf);
-    if (ctx.request_fd >= 0)
-        close(ctx.request_fd);
-    close(sp[0]);
-    v4l2sl_set_ioctl_hook(NULL);
-    g_ctx = NULL;
-}
-
 struct recap_env {
     struct v4l2sl_driver_data dd;
     struct v4l2sl_context ctx;
@@ -544,6 +412,56 @@ static void expect_grew_to(struct recap_env *e, int w, int h, const char *tag)
     i4 = op_index("STREAMON");
     snprintf(t, sizeof(t), "%s-order", tag);
     expect_true(i0 >= 0 && i1 > i0 && i2 > i1 && i3 > i2 && i4 > i3, t);
+}
+
+static void test_av1_translate_recapture(void)
+{
+    struct recap_env e;
+    VADecPictureParameterBufferAV1 pic;
+    uint8_t tile[64];
+    struct v4l2sl_buffer pic_buf, data_buf;
+    struct v4l2sl_buffer *bufs[2];
+    VAStatus st;
+
+    if (recap_env_open(&e, 432, 240) < 0) {
+        fprintf(stderr, "FAIL recap_env_open av1\n");
+        g_fail++;
+        return;
+    }
+    e.ctx.codec = V4L2SL_CODEC_AV1;
+
+    memset(&pic, 0, sizeof(pic));
+    memset(tile, 0xab, sizeof(tile));
+    pic.frame_width_minus1 = 1919;
+    pic.frame_height_minus1 = 1079;
+    pic.bit_depth_idx = 0;
+    pic.tile_cols = 1;
+    pic.tile_rows = 1;
+    pic.seq_info_fields.fields.subsampling_x = 1;
+    pic.seq_info_fields.fields.subsampling_y = 1;
+    pic.pic_info_fields.bits.frame_type = 0; /* key */
+    pic.pic_info_fields.bits.show_frame = 1;
+    pic.pic_info_fields.bits.uniform_tile_spacing_flag = 1;
+
+    memset(&pic_buf, 0, sizeof(pic_buf));
+    memset(&data_buf, 0, sizeof(data_buf));
+    pic_buf.type = VAPictureParameterBufferType;
+    pic_buf.data = &pic;
+    pic_buf.size = sizeof(pic);
+    data_buf.type = VASliceDataBufferType;
+    data_buf.data = tile;
+    data_buf.size = sizeof(tile);
+    bufs[0] = &pic_buf;
+    bufs[1] = &data_buf;
+
+    st = v4l2sl_av1_translate(&e.ctx, bufs, 2);
+    expect_true(st == VA_STATUS_SUCCESS, "av1-translate-status");
+    expect_grew_to(&e, 1920, 1080, "av1");
+    expect_true(g_last_cap_w == 1920 && g_last_cap_h == 1080,
+                "av1-sfm-coded-size");
+    expect_true(g_streamoff >= 2, "av1-streamoff");
+
+    recap_env_close(&e);
 }
 
 static void test_ensure_noop_shrink_fmt(void)
