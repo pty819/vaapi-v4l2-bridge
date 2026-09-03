@@ -112,3 +112,14 @@ now expects no AV1 while it stays un-advertised. Changes:
 | NAS git | `/home/liyifan/vaapi-v4l2-bridge/` — **only source of truth** |
 | Mac work copy | deleted 2026-09-02 (stale dma-heap experiment; that approach has a chip bug) |
 | Install | `/usr/lib/aarch64-linux-gnu/dri/v4l2stateless_drv_video.so` |
+
+## 2026-09-03 refactor branch (audit-driven P0-P4)
+Branch `refactor/audit-2026-09` (docs/refactor-audit-2026-09-03.md + spec):
+P0 safety net + dead-code sweep (-~270 src lines) done; P2 memory-safety
+done (create_surfaces fail path, terminate teardown 11MB->0 leak, VPP clamp,
+grow_memfd grow-only, lock coverage, context device_path, capture-slot
+recycle, EINTR poll, skipped-frame DQBUF, 256 slice arrays, image stride,
+putImage fourcc, HEVC IQ, MPEG-2 chroma fallback, AV1 flags; C12 not
+actionable - libva header lacks update_grain). Gates: matrix 27/27,
+ASan va_leak_client 0 leaks, chrome smoke via scripts/chrome_smoke.sh
+(live room OR local 8931 clip fallback). P3/P4 pending.
