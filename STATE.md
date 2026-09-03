@@ -21,7 +21,7 @@ Host matrix `tests/run_full_matrix.sh` last recorded **PASS=32 FAIL=0** (h26410 
 | H.264 High422 | same, capture NV16/NV20 | bit-exact 8+10-bit: VA path via tests/va_h264422_client.c (stock ffmpeg never offers VAAPI for 4:2:2 — decoder pix_fmt list + profile map), kernel path via GST vs GST |
 | HEVC Main 8-bit (WPP, 4K) | rkvdec `/dev/video1` | bit-exact vs ffmpeg SW |
 | HEVC Main10 | same, NV15 → P010 | bit-exact vs ffmpeg SW (`hwdownload,format=p010le`) |
-| AV1 Profile0 8-bit | hantro `/dev/video4` + sysfs media node | bit-exact vs ffmpeg SW (libaom, libaom realtime, SVT-AV1 RA, 4K); **re-advertised 2026-09-03** (old hang = undersized PSU) and Chrome-verified (local file + YouTube) |
+| AV1 Profile0 8-bit | hantro `/dev/video4` + sysfs media node | bit-exact vs ffmpeg SW (libaom, libaom realtime, SVT-AV1 RA, 4K); **re-advertised 2026-09-03** (old hang = undersized PSU) and Chrome-verified (local file + YouTube + bilibili WebCodecs, 9a6a4ce) |
 | VP8 | hantro `/dev/video2` | bit-exact vs ffmpeg SW |
 | MPEG-2 Simple / Main | same `/dev/video2` | bit-exact vs GST `v4l2slmpeg2dec` (hantro IDCT ≠ ffmpeg SW) |
 | JPEG Baseline encode | VEPU121 `/dev/video3` | `mjpeg_vaapi` (stateful M2M) |
@@ -210,3 +210,37 @@ the session, zero decode errors; the only 2 `vaEndPicture` failures were transie
 ladder is server-side: default sessions get VP9; with VP9 hidden via a page-level
 `MediaSource.isTypeSupported` shim it picks avc1, and AV1 shows up during adaptation.
 No h264ify-style extension exists in any profile on this box.
+
+## 2026-09-04 — bilibili (WebCodecs) AV1: refresh truth parsing + 40-slot pool (9a6a4ce)
+
+bilibili's "BILIAV1" encoder exposed two gaps the YouTube/local-file verification
+never hit:
+
+1. **refresh_frame_flags inference broke**: BILIAV1 assigns DPB slots in an order
+   no order-hint heuristic reproduces (hidden-showable ARF chain, prf 7->4->0,
+   sequential-then-reused slots). Every INTER frame decoded wrong (reference
+   ghosting; only keyframes matched sw). VA-API cannot carry the field, but
+   Chrome's slice buffer contains the whole OBU run — the frame headers are
+   right there. `av1_parse_hdr_refresh()` walks every frame OBU in every
+   submitted slice buffer, parses the uncompressed header under 4 candidate
+   layouts (libva hides the screen-content / integer-MV sequence modes), and
+   accepts only parses whose frame_type / show_frame / order_hint /
+   primary_ref_frame all match VA's picture params. ffmpeg's raw-tile buffers
+   fail the walk and keep the heuristics (matrix paths unchanged). 1285/1289
+   frames parsed true in-session, refresh sequence bit-identical to an
+   independent dav1d-order bitstream dump. Bitstream-parsing traps that cost
+   hours: order_hint_bits = f(3)+1; BOTH frame-dimension length prefixes are
+   read before the dimensions; a leading show_existing_frame bit; KEY && !show
+   DOES read f(8).
+2. **WebCodecs pool depth**: bwp allocates one surface per queued VideoFrame
+   (vaCreateSurfaces n=1, repeatedly) and decodes ahead of display; the shared
+   24-slot capture pool drained in ~5s (no-free-capture -> vaEndPicture error
+   -> player falls back to HEVC). AV1 capture buffers are NOT CMA-backed on
+   this hantro, so AV1 requests 40 slots (`V4L2SL_NUM_CAPTURE_BUFS_AV1`); the
+   per-context arrays now use `V4L2SL_MAX_CAPTURE_BUFS`. Remaining limitation:
+   an unbounded prebuffer burst before playback starts can still drain 40 and
+   fall back to HEVC gracefully (no corruption, no crash) — pool growth is
+   capped by design there.
+
+Verification: refresh truth + 1285-frame 0-error session (dropped 0), matrix
+PASS=32 before and after. Known-good ffmpeg heuristic paths unchanged.

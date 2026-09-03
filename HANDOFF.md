@@ -18,7 +18,7 @@ C 驱动 `v4l2stateless_drv_video.so` 把 ffmpeg VA-API 硬解接到主线 V4L2-
 | H.264 High10 | 同上，capture NV15 | **完成**：hw==sw framemd5；根因=ffmpeg VA 的 pic_init_qp_minus26 含 10bit QpBdOffsetY(+12)，内核要裸值，剥掉即好 |
 | HEVC 8-bit Main | 同上 | **完成**：Main + WPP + 4K |
 | HEVC Main10 | 同上，NV15 → P010 | **完成**：`hwdownload,format=p010le` 对软解 |
-| AV1 8-bit Profile0 | hantro `/dev/video4` + `/dev/media3` | **完成 + 重新广播（09-03）**：libaom、realtime、SVT-AV1 RA、4K 全 bit-exact；Chrome 本地片 + YouTube 段验证。旧"反复开节点挂 SoC"实为电源功率不足（已换电源），压测 15×vainfo + 5 连解码 + 两轮矩阵零错误 |
+| AV1 8-bit Profile0 | hantro `/dev/video4` + `/dev/media3` | **完成 + 重新广播（09-03）**：libaom、realtime、SVT-AV1 RA、4K 全 bit-exact；Chrome 本地片 + YouTube + bilibili(WebCodecs) 验证（09-04 `9a6a4ce`：refresh 从 OBU span 解析真值 + AV1 capture 池 40 槽）。旧"反复开节点挂 SoC"实为电源功率不足（已换电源） |
 | VP8 | hantro `/dev/video2` | **完成**：480p / 720p vs ffmpeg SW |
 | MPEG-2 Simple / Main | 同上 `/dev/video2` | **完成**：vs GStreamer `v4l2slmpeg2dec`（hantro IDCT ≠ ffmpeg SW） |
 | JPEG Baseline encode | VEPU121 `/dev/video3` | **完成**：`mjpeg_vaapi`（stateful M2M） |
@@ -210,6 +210,9 @@ Debian/XtraDeb 的 arm64 Chromium 编的是 `use_v4l2_codec`，直连 `/dev/vide
 - 给 ffmpeg 的裸 AV1 tile 再包一层自制 OBU → 更灰
 - AV1 OUTPUT 塞 OBU span 而不抽 tile 载荷 → Chrome 逐帧 DQBUF ERROR
 - AV1 uniform tile 时照抄 VA 的 in_sbs_minus_1（全零）→ 内核拒绝每帧，画面绿转白
+- AV1 refresh 只靠启发式 → bilibili BILIAV1 类编码器必花屏（参考帧鬼影）；Chrome 提交的 slice buffer 里就有 OBU 头，walk-all + VA 四字段校验拿真值，ffmpeg 裸 tile 自动回退
+- AV1 手撕 uncompressed header 的四个坑：order_hint_bits=f(3)+1、两个尺寸长度前缀连读、开头的 show_existing_frame 位、KEY&&!show 也读 f(8)
+- WebCodecs（bilibili bwp）逐帧 vaCreateSurfaces(n=1) + 预解码深队列 → 24 槽池 ~5s 干涸回退 HEVC；AV1 池 40 槽（hantro AV1 capture 不占 CMA），播放中不再干涸；开播前预缓冲风暴仍可能优雅回退
 - `tx_mode` 留 0 → 关键帧也灰
 - AV1 P 帧 `refresh_frame_flags=0` → CDF 永不更新
 - libaom realtime 用 8 槽 first_dup → 第 7 帧错；应锁 RTC `order_hint % 6`
