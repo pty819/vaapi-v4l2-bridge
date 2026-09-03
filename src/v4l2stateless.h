@@ -136,6 +136,7 @@ struct v4l2sl_context {
     /* Output (bitstream) buffer management */
     int output_bufs_allocd;
     uint32_t output_buf_size;
+    uint32_t output_plane_len[V4L2SL_NUM_OUTPUT_BUFS]; /* QUERYBUF memo */
     void  *output_buf_ptr[V4L2SL_NUM_OUTPUT_BUFS];
     int free_out_bufs[V4L2SL_NUM_OUTPUT_BUFS];
     int n_free_out;
@@ -284,8 +285,8 @@ int v4l2sl_get_capture_geometry(int fd, uint32_t *w, uint32_t *h,
                                 uint32_t *stride, uint32_t *sizeimage);
 int v4l2sl_ensure_capture(struct v4l2sl_context *ctx, int width, int height,
                           uint32_t pixelformat);
-int v4l2sl_queue_output(int fd, int buf_index, uint32_t size,
-                        int request_fd, uint64_t timestamp);
+int v4l2sl_queue_output(struct v4l2sl_context *ctx, int buf_index,
+                        uint32_t size, uint64_t timestamp);
 int v4l2sl_queue_capture(int fd, int buf_index, int request_fd);
 /*
  * Submit one synchronous decode: pops a capture buffer, QBUFs the given

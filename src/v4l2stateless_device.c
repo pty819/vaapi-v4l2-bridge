@@ -421,8 +421,7 @@ int v4l2sl_decode_submit(struct v4l2sl_context *ctx, int out_buf_idx,
     }
     cap_buf_idx = ctx->free_cap_bufs[--ctx->n_free_cap];
 
-    if (v4l2sl_queue_output(ctx->v4l2_fd, out_buf_idx, bytesused,
-                            ctx->request_fd, timestamp) < 0) {
+    if (v4l2sl_queue_output(ctx, out_buf_idx, bytesused, timestamp) < 0) {
         fprintf(stderr, "v4l2stateless: QBUF output[%d] failed\n", out_buf_idx);
         v4l2sl_out_pool_push(ctx, out_buf_idx);
         v4l2sl_cap_pool_push(ctx, cap_buf_idx);
@@ -802,11 +801,13 @@ int v4l2sl_mmap_output_buffers(int fd, int count, void **ptrs, uint32_t *size_ou
  * The bitstream was already memcpy'd into the pre-mapped output buffer by
  * the caller — only its length travels with the QBUF.
  */
-int v4l2sl_queue_output(int fd, int buf_index,
-                        uint32_t size, int request_fd, uint64_t timestamp)
+int v4l2sl_queue_output(struct v4l2sl_context *ctx, int buf_index,
+                        uint32_t size, uint64_t timestamp)
 {
     struct v4l2_buffer buf = { 0 };
     struct v4l2_plane planes[1] = { 0 };
+    int fd = ctx->v4l2_fd;
+    int request_fd = ctx->request_fd;
 
     buf.type = V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE;
     buf.memory = V4L2_MEMORY_MMAP;
@@ -822,8 +823,12 @@ int v4l2sl_queue_output(int fd, int buf_index,
     buf.timestamp.tv_sec = timestamp / 1000000000ULL;
     buf.timestamp.tv_usec = (timestamp % 1000000000ULL) / 1000ULL;
 
-    /* hantro AV1 rejects QBUF unless plane length matches the mapped size. */
-    {
+    /* hantro AV1 rejects QBUF unless plane length matches the mapped size.
+     * Lengths are fixed per REQBUFS cycle — memoize per index. */
+    if (buf_index >= 0 && buf_index < V4L2SL_NUM_OUTPUT_BUFS &&
+        ctx->output_plane_len[buf_index]) {
+        planes[0].length = ctx->output_plane_len[buf_index];
+    } else {
         struct v4l2_buffer q = { 0 };
         struct v4l2_plane qp[1] = { 0 };
         q.type = V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE;
@@ -831,8 +836,11 @@ int v4l2sl_queue_output(int fd, int buf_index,
         q.index = buf_index;
         q.length = 1;
         q.m.planes = qp;
-        if (xioctl(fd, VIDIOC_QUERYBUF, &q) == 0)
+        if (xioctl(fd, VIDIOC_QUERYBUF, &q) == 0) {
             planes[0].length = qp[0].length;
+            if (buf_index >= 0 && buf_index < V4L2SL_NUM_OUTPUT_BUFS)
+                ctx->output_plane_len[buf_index] = qp[0].length;
+        }
     }
     planes[0].bytesused = size;
 
