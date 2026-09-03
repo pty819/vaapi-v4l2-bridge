@@ -208,16 +208,18 @@ struct v4l2sl_context {
     /* 1088: this UAPI's padded v4l2_ctrl_h264_sps is 1048 bytes */
     uint8_t g_ctrl_payload[1088];
 
-    /* AV1 refresh_frame_flags inference: VA does not expose the bitmask.
-     * 0 = unknown, 1 = libaom-style (free slots from index 1),
-     * 2 = SVT-AV1 RA pyramid. */
-    uint8_t av1_style;
-    uint8_t av1_gop;           /* first hidden ARF order_hint (mini-GOP) */
-    uint8_t av1_l0_toggle;     /* SVT L0 slots 0-1-2 */
-    uint8_t av1_l1_toggle;     /* SVT L1 slots 3-4 */
-    uint8_t av1_have_first_arf;
-    uint32_t av1_l0_oh;        /* last SVT L0 ARF order_hint */
-    uint32_t av1_prev_l0_oh;   /* previous L0 ARF (mini-GOP length) */
+    /* AV1 refresh_frame_flags inference heuristics: VA does not expose
+     * the bitmask. style: 0 = unknown, 1 = libaom-style (free slots from
+     * index 1), 2 = SVT-AV1 RA pyramid. */
+    struct {
+        uint8_t style;
+        uint8_t gop;           /* first hidden ARF order_hint (mini-GOP) */
+        uint8_t l0_toggle;     /* SVT L0 slots 0-1-2 */
+        uint8_t l1_toggle;     /* SVT L1 slots 3-4 */
+        uint8_t have_first_arf;
+        uint32_t l0_oh;        /* last SVT L0 ARF order_hint */
+        uint32_t prev_l0_oh;   /* previous L0 ARF (mini-GOP length) */
+    } av1;
 
     /* Persistent M2M queues (stateful devices: RGA VPP / VEPU JPEG) */
     struct v4l2sl_m2m_state vpp_q;
