@@ -65,9 +65,6 @@ static void av1_fill_sequence_params(struct v4l2_ctrl_av1_sequence *seq,
         seq->flags |= V4L2_AV1_SEQUENCE_FLAG_FILM_GRAIN_PARAMS_PRESENT;
     if (pic->pic_info_fields.bits.use_superres)
         seq->flags |= V4L2_AV1_SEQUENCE_FLAG_ENABLE_SUPERRES;
-    if (pic->u_dc_delta_q != pic->v_dc_delta_q ||
-        pic->u_ac_delta_q != pic->v_ac_delta_q)
-        seq->flags |= V4L2_AV1_SEQUENCE_FLAG_SEPARATE_UV_DELTA_Q;
     /* Warped motion and loop restoration live in different VA sub-structs */
     if (pic->pic_info_fields.bits.allow_warped_motion)
         seq->flags |= V4L2_AV1_SEQUENCE_FLAG_ENABLE_WARPED_MOTION;
@@ -77,14 +74,10 @@ static void av1_fill_sequence_params(struct v4l2_ctrl_av1_sequence *seq,
         pic->loop_restoration_fields.bits.cbframe_restoration_type ||
         pic->loop_restoration_fields.bits.crframe_restoration_type)
         seq->flags |= V4L2_AV1_SEQUENCE_FLAG_ENABLE_RESTORATION;
-    /* Sequence-level tool bits are not all in VA seq_info_fields. libaom
-     * advertises warped-motion and ref-frame-mvs in the sequence header;
-     * they are independent of the current picture type, so if order hint
-     * is on, enable the matching sequence tools. */
-    if (pic->seq_info_fields.fields.enable_order_hint) {
-        seq->flags |= V4L2_AV1_SEQUENCE_FLAG_ENABLE_REF_FRAME_MVS;
-        seq->flags |= V4L2_AV1_SEQUENCE_FLAG_ENABLE_WARPED_MOTION;
-    }
+    /* VA's seq_info_fields exposes no sequence-level separate_uv_delta_q /
+     * warped-motion / ref-frame-mvs bits — map only what VA actually
+     * reports (the per-picture bits above). Never force sequence tools on
+     * from unrelated signals; the kernel trusts this control verbatim. */
 }
 
 static uint32_t av1_surface_order_hint(struct v4l2sl_driver_data *dd,
