@@ -751,6 +751,16 @@ v4l2sl_destroy_surfaces(VADriverContextP ctx,
     return VA_STATUS_SUCCESS;
 }
 
+static struct v4l2sl_context *
+context_for_surface(struct v4l2sl_driver_data *dd, VASurfaceID surface)
+{
+    for (struct v4l2sl_context *c = dd->contexts; c; c = c->next)
+        for (int i = 0; i < c->num_render_targets; i++)
+            if (c->render_targets[i] == surface)
+                return c;
+    return NULL;
+}
+
 /*
  * Context — one per decode session
  */
@@ -1505,21 +1515,9 @@ v4l2sl_derive_image(VADriverContextP ctx,
         return VA_STATUS_ERROR_INVALID_SURFACE;
     }
 
-    /* Find the owning context to get the negotiated capture geometry —
-     * the stride can be padded well beyond the display width. */
-    struct v4l2sl_context *c = driver_data->contexts;
-    while (c) {
-        int hit = 0;
-        for (int i = 0; i < c->num_render_targets; i++) {
-            if (c->render_targets[i] == surface) {
-                hit = 1;
-                break;
-            }
-        }
-        if (hit)
-            break;
-        c = c->next;
-    }
+    /* Owning context gives the negotiated capture geometry — the stride
+     * can be padded well beyond the display width. */
+    struct v4l2sl_context *c = context_for_surface(driver_data, surface);
     uint32_t stride = surf->stride ? surf->stride :
                       ((c && c->cap_stride) ? c->cap_stride : surf->width);
     uint32_t aligned_h = surf->aligned_h ? surf->aligned_h :
@@ -1623,16 +1621,6 @@ v4l2sl_destroy_image(VADriverContextP ctx, VAImageID image_id)
     pthread_mutex_unlock(&g_v4l2sl_lock);
 
     return VA_STATUS_SUCCESS;
-}
-
-static struct v4l2sl_context *
-context_for_surface(struct v4l2sl_driver_data *dd, VASurfaceID surface)
-{
-    for (struct v4l2sl_context *c = dd->contexts; c; c = c->next)
-        for (int i = 0; i < c->num_render_targets; i++)
-            if (c->render_targets[i] == surface)
-                return c;
-    return NULL;
 }
 
 /*
