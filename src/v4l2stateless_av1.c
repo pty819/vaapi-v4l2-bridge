@@ -553,6 +553,7 @@ static void av1_fill_frame_params(struct v4l2_ctrl_av1_frame *frame,
          * the superblock widths VA already computed. */
         frame->tile_info.mi_col_starts[0] = 0;
         frame->tile_info.mi_row_starts[0] = 0;
+        int sb_mi = pic->seq_info_fields.fields.use_128x128_superblock ? 32 : 16;
         if (pic->pic_info_fields.bits.uniform_tile_spacing_flag ||
             (cols <= 1 && rows <= 1)) {
             for (int i = 0; i < cols; i++)
@@ -561,8 +562,20 @@ static void av1_fill_frame_params(struct v4l2_ctrl_av1_frame *frame,
             for (int i = 0; i < rows; i++)
                 frame->tile_info.mi_row_starts[i] = mi_rows * i / rows;
             frame->tile_info.mi_row_starts[rows] = mi_rows;
+            /* Tile sizes in superblocks are DERIVED for uniform spacing;
+             * VA-API clients do not fill width/height_in_sbs_minus_1
+             * there (Chrome leaves zeros, ffmpeg happens to compute
+             * them). Derive from the grid we just built so the kernel
+             * gets a consistent tile config either way. */
+            for (int i = 0; i < cols && i < 64; i++)
+                frame->tile_info.width_in_sbs_minus_1[i] =
+                    (frame->tile_info.mi_col_starts[i + 1] -
+                     frame->tile_info.mi_col_starts[i] + sb_mi - 1) / sb_mi - 1;
+            for (int i = 0; i < rows && i < 64; i++)
+                frame->tile_info.height_in_sbs_minus_1[i] =
+                    (frame->tile_info.mi_row_starts[i + 1] -
+                     frame->tile_info.mi_row_starts[i] + sb_mi - 1) / sb_mi - 1;
         } else {
-            int sb_mi = pic->seq_info_fields.fields.use_128x128_superblock ? 32 : 16;
             uint32_t col = 0, row = 0;
             for (int i = 0; i < cols; i++) {
                 frame->tile_info.width_in_sbs_minus_1[i] = pic->width_in_sbs_minus_1[i];
@@ -575,10 +588,6 @@ static void av1_fill_frame_params(struct v4l2_ctrl_av1_frame *frame,
                 frame->tile_info.mi_row_starts[i + 1] = row;
             }
         }
-        for (int i = 0; i < cols && i < 63; i++)
-            frame->tile_info.width_in_sbs_minus_1[i] = pic->width_in_sbs_minus_1[i];
-        for (int i = 0; i < rows && i < 63; i++)
-            frame->tile_info.height_in_sbs_minus_1[i] = pic->height_in_sbs_minus_1[i];
     }
 
     /* Quantization */
@@ -805,7 +814,6 @@ VAStatus v4l2sl_av1_translate(struct v4l2sl_context *ctx,
      * whole OBU in one buffer. */
     tile_data = (uint8_t *)cb.largest;
     tile_data_size = cb.largest_size;
-
     if (!pic_param) {
         fprintf(stderr, "v4l2stateless: AV1 decode missing picture params\n");
         return VA_STATUS_ERROR_INVALID_PARAMETER;
@@ -959,26 +967,53 @@ VAStatus v4l2sl_av1_translate(struct v4l2sl_context *ctx,
      * av1dec (typically a TILE_GROUP / FRAME OBU) plus per-tile
      * slice_data_offset values relative to that buffer. Copy it verbatim
      * and honour those offsets — do not wrap another OBU. */
+    /* This kernel's frame-based UAPI wants RAW TILE DATA in the OUTPUT
+     * buffer — no OBU framing (ffmpeg submits it raw and is bit-exact).
+     * Chrome submits the whole OBU span (sequence/frame OBUs) with each
+     * tile's offset/size relative to that span. Extract just the tile
+     * payloads and rebase the offsets onto the concatenated stream. */
     uint8_t *dst = ctx->output_buf_ptr[out_buf_idx];
-    if (tile_data_size > ctx->output_buf_size) {
-        fprintf(stderr, "v4l2stateless: AV1 tile data too large\n");
-        v4l2sl_out_pool_push(ctx, out_buf_idx);
-        return VA_STATUS_ERROR_OPERATION_FAILED;
-    }
-    if (dst) {
-        memcpy(dst, tile_data, tile_data_size);
+    uint32_t total = 0;
+    if (n_tiles > 0) {
+        for (int i = 0; i < n_tiles; i++) {
+            uint32_t off = tile_params[i]->slice_data_offset;
+            uint32_t sz = tile_params[i]->slice_data_size;
+
+            if (off > tile_data_size || sz > tile_data_size - off ||
+                total + sz > ctx->output_buf_size) {
+                fprintf(stderr, "v4l2stateless: AV1 tile %d out of range "
+                        "(off=%u sz=%u buf=%u)\n", i, off, sz, tile_data_size);
+                v4l2sl_out_pool_push(ctx, out_buf_idx);
+                return VA_STATUS_ERROR_OPERATION_FAILED;
+            }
+            if (dst)
+                memcpy(dst + total, tile_data + off, sz);
+            total += sz;
+        }
     } else {
-        fprintf(stderr, "v4l2stateless: AV1 output buffer not mapped\n");
+        if (tile_data_size > ctx->output_buf_size) {
+            fprintf(stderr, "v4l2stateless: AV1 tile data too large\n");
+            v4l2sl_out_pool_push(ctx, out_buf_idx);
+            return VA_STATUS_ERROR_OPERATION_FAILED;
+        }
+        if (dst)
+            memcpy(dst, tile_data, tile_data_size);
+        total = tile_data_size;
     }
+    tile_data_size = total;
+    if (!dst)
+        fprintf(stderr, "v4l2stateless: AV1 output buffer not mapped\n");
 
     if (n_tiles > 0) {
         struct v4l2_ctrl_av1_tile_group_entry entries[32];
+        uint32_t base = 0;
         for (int i = 0; i < n_tiles; i++) {
             memset(&entries[i], 0, sizeof(entries[i]));
-            entries[i].tile_offset = tile_params[i]->slice_data_offset;
+            entries[i].tile_offset = base;
             entries[i].tile_size = tile_params[i]->slice_data_size;
             entries[i].tile_row = tile_params[i]->tile_row;
             entries[i].tile_col = tile_params[i]->tile_column;
+            base += tile_params[i]->slice_data_size;
         }
         struct v4l2_ext_control tg_ctrl = { 0 };
         tg_ctrl.id = V4L2_CID_STATELESS_AV1_TILE_GROUP_ENTRY;

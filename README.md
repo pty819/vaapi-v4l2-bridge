@@ -16,7 +16,7 @@ Codecs:
 | H.264 High422 8/10-bit | same, capture NV16/NV20 | bit-exact; VA path exercised by `tests/va_h264422_client.c` (stock ffmpeg never offers VAAPI for 4:2:2 — decoder pix_fmt list + profile map), kernel path GStreamer `v4l2slh264dec` vs `avdec_h264` |
 | HEVC 8-bit Main (incl. WPP) | same | bit-exact |
 | HEVC Main10 | same, capture NV15 → P010 | bit-exact vs ffmpeg software (`hwdownload,format=p010le`) |
-| AV1 Profile0 8-bit | hantro `/dev/video4` + matching media node | **not advertised** — short VA-API sessions reopening the node could hang the SoC; translate path retained, matrix skips AV1 |
+| AV1 Profile0 8-bit | hantro `/dev/video4` + matching media node | bit-exact vs ffmpeg SW (libaom, libaom realtime, SVT-AV1 RA, 4K, default). Re-advertised 2026-09-03: the old "node reopen hangs the SoC" was an undersized PSU, not a driver bug. Chrome AV1 verified (local file + YouTube) — see OBU-span tile extraction + uniform tile-size derivation in `src/v4l2stateless_av1.c` |
 | VP8 | hantro `/dev/video2` | bit-exact vs ffmpeg software |
 | MPEG-2 Simple / Main | same `/dev/video2` | bit-exact vs GStreamer `v4l2slmpeg2dec` (hantro IDCT ≠ ffmpeg SW) |
 | JPEG Baseline encode | VEPU121 `/dev/video3` | `mjpeg_vaapi` (stateful M2M) |
@@ -56,7 +56,7 @@ Full host matrix (needs `/dev/video*` and writes clips under `verify/`, gitignor
 bash tests/run_full_matrix.sh
 ```
 
-Last recorded host run: **PASS=27 FAIL=0** (2026-09-03, after the audit-refactor merge). The script covers H.264 (CB/Main/High/B/all-P/slices/4K/QCIF/High10 p010le/High422 8+10-bit), HEVC (Main/WPP/4K/Main10 p010le), VP8 (480+720), MPEG-2 vs GST (IP/B/1080), JPEG `mjpeg_vaapi`, RGA `scale_vaapi`, unit probe/fill, the `gbm-probe` and `va-export` clients, and `vainfo`. AV1 entries are commented out while AV1 stays un-advertised.
+Last recorded host run: **PASS=32 FAIL=0** (2026-09-03/04, after AV1 re-advertisement). The script covers H.264 (CB/Main/High/B/all-P/slices/4K/QCIF/High10 p010le/High422 8+10-bit), HEVC (Main/WPP/4K/Main10 p010le), **AV1 (aom-8, aom-49, svt-32, 4K, default)**, VP8 (480+720), MPEG-2 vs GST (IP/B/1080), JPEG `mjpeg_vaapi`, RGA `scale_vaapi`, unit probe/fill, the `gbm-probe` and `va-export` clients, and `vainfo`.
 
 ## Desktop apps (Chrome / Firefox / VLC)
 
@@ -73,6 +73,7 @@ Full steps, checks, and caveats: **[APPS.md](APPS.md)**.
 
 ## Status highlights (2026-09-03)
 
+- **AV1 re-advertised (branch `feat/av1-readvertise`)**: the profile is back in `vaQueryConfigProfiles`; the historical hang was PSU undersizing (since replaced), not kernel instability — 15x vainfo, 5 back-to-back decodes and two full matrices ran with zero runtime dmesg errors. Two Chrome-only incompatibilities fixed along the way: (1) the kernel wants **raw tile data** in the OUTPUT buffer while Chrome submits the whole OBU span with per-tile offsets — the driver now extracts tile payloads and rebases the offsets; (2) with `uniform_tile_spacing`, `width/height_in_sbs_minus_1` are **derived** from the mi-col/row grid (VA clients leave them zero there; the old unconditional copy contradicted the grid and the kernel rejected every frame). Chrome verified on a local AV1 file (zero DQBUF errors, correct picture) and on YouTube (AV1 segments during ABR adaptation decoded clean; 4500+ pictures, zero decode errors).
 - **Stability round `27e8b7a` (2026-09-02)**: decode timeouts now `STREAMOFF` + rebuild both queues (a wedged job is never left in the kernel), every stateful vtable entry takes the driver lock, surface IDs recycled with bounds checks, probe results cached per boot (`v4l2stateless-probe.cache`, `V4L2SL_PROBE_NOCACHE=1` bypasses), capture `REQBUFS` degrades 24→8→4 under CMA pressure.
 - **GBM display surfaces `f53f3f1..452de04`**: Chrome `VaapiVideoDecoder` hardware-decodes with a visible picture (bilibili 1080p live; canvas non-black, zero `eglCreateImage` errors, GPU process holds rkvdec). Platform constraints and the VPP-output-surface export model are documented in [STATE.md](STATE.md).
 - **Audit-driven refactor merged `c359f91`** (full audit: [docs/refactor-audit-2026-09-03.md](docs/refactor-audit-2026-09-03.md)): P0–P2 done (terminate leak 11MB/session → 0, `create_surfaces` failure path, VPP region clamp), P3 clusters 1-6 and P4 items 1-5 landed — decode-path driver ioctls measured ~12 → ~7 per frame ([docs/perf-baseline-2026-09.md](docs/perf-baseline-2026-09.md)), lazy `cpu_ptr` saves 60–240MB per pool. The deferred tail (P3 clusters 7-11 + P4 items 6-8: persistent per-surface memfd mappings, persistent VPP/JPEG M2M queues, 64-byte stride alignment, shared Annex-B / buffer-collection / PRIME-layer / probe-walk helpers) landed the same night — decode path holds at ~7 ioctls/frame; browser-verified 8-bit HEVC hw decode came out of the 10-bit investigation. C12 (AV1 `update_grain`) stays blocked: the field is absent from libva 2.23.0 **and** upstream master.

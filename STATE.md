@@ -12,7 +12,7 @@ C libva backend `v4l2stateless_drv_video.so` translates VA-API to mainline V4L2-
 
 Installed: `/usr/lib/aarch64-linux-gnu/dri/v4l2stateless_drv_video.so`. Graphical sessions export `LIBVA_DRIVER_NAME=v4l2stateless` via `~/.config/environment.d/90-libva.conf` and `~/.profile`.
 
-Host matrix `tests/run_full_matrix.sh` last recorded **PASS=27 FAIL=0** (h26410 + h264422 + gbm-probe + va-export entries). Success is `hwdownload` framemd5 vs software (MPEG-2 vs GStreamer `v4l2slmpeg2dec`), plus a log line `v4l2stateless: .* config uses /dev/video`. Silent ffmpeg software fallback is not success.
+Host matrix `tests/run_full_matrix.sh` last recorded **PASS=32 FAIL=0** (h26410 + h264422 + gbm-probe + va-export + 5 AV1 legs). Success is `hwdownload` framemd5 vs software (MPEG-2 vs GStreamer `v4l2slmpeg2dec`), plus a log line `v4l2stateless: .* config uses /dev/video`. Silent ffmpeg software fallback is not success.
 
 | Path | Device | Status |
 |---|---|---|
@@ -21,7 +21,7 @@ Host matrix `tests/run_full_matrix.sh` last recorded **PASS=27 FAIL=0** (h26410 
 | H.264 High422 | same, capture NV16/NV20 | bit-exact 8+10-bit: VA path via tests/va_h264422_client.c (stock ffmpeg never offers VAAPI for 4:2:2 — decoder pix_fmt list + profile map), kernel path via GST vs GST |
 | HEVC Main 8-bit (WPP, 4K) | rkvdec `/dev/video1` | bit-exact vs ffmpeg SW |
 | HEVC Main10 | same, NV15 → P010 | bit-exact vs ffmpeg SW (`hwdownload,format=p010le`) |
-| AV1 Profile0 8-bit | hantro `/dev/video4` + sysfs media node | bit-exact vs ffmpeg SW (libaom, libaom realtime, SVT-AV1 RA, 4K) |
+| AV1 Profile0 8-bit | hantro `/dev/video4` + sysfs media node | bit-exact vs ffmpeg SW (libaom, libaom realtime, SVT-AV1 RA, 4K); **re-advertised 2026-09-03** (old hang = undersized PSU) and Chrome-verified (local file + YouTube) |
 | VP8 | hantro `/dev/video2` | bit-exact vs ffmpeg SW |
 | MPEG-2 Simple / Main | same `/dev/video2` | bit-exact vs GST `v4l2slmpeg2dec` (hantro IDCT ≠ ffmpeg SW) |
 | JPEG Baseline encode | VEPU121 `/dev/video3` | `mjpeg_vaapi` (stateful M2M) |
@@ -179,3 +179,34 @@ Ops note: the smoke debug instance now uses ~/.config/gc-smoke with
 --no-first-run --no-default-browser-check (the user session runs gc-dbg
 WITHOUT --remote-debugging-port, so a gc-dbg smoke launch would forward
 into the portless main session and ECONNREFUSE on 9222).
+## 2026-09-03/04 night — AV1 re-advertised + Chrome AV1 end-to-end (feat/av1-readvertise)
+
+Re-enabled `VAProfileAV1Profile0` (profile table, rt_formats, codec_map; dropped the
+`dev_av1` suppression). The old "reopening the node hangs the SoC" theory is retired:
+the box had an undersized PSU back then; the replacement supply went through 15x vainfo,
+5 back-to-back decodes and two full matrices with zero runtime dmesg errors. Matrix went
+PASS=27 -> 32 (av1-aom-8, av1-aom-49, av1-svt-32, av1-4k, av1-default-16 all bit-exact).
+
+Two Chrome-only incompatibilities surfaced (ffmpeg path never hit them) and were fixed:
+
+1. **OUTPUT payload framing**: this frame-based UAPI wants RAW tile data. ffmpeg's AV1
+   hwaccel submits exactly that; Chrome submits the whole OBU span (sequence + frame
+   OBUs) with each tile's `slice_data_offset/size` pointing into that span. The driver
+   now extracts each tile's payload via the slice params, concatenates, and rebases
+   `V4L2_CID_STATELESS_AV1_TILE_GROUP_ENTRY` offsets onto the concatenation.
+   (`n_tiles == 0` falls back to submitting the whole buffer.)
+2. **Uniform tile sizes**: with `uniform_tile_spacing_flag` set, `width/height_in_sbs_minus_1`
+   are *derived* quantities. VA-API clients don't fill them there (Chrome leaves zeros,
+   ffmpeg happens to compute them); the old code unconditionally copied the VA array,
+   contradicting the freshly derived `mi_col/row_starts` grid — the kernel then rejected
+   every frame (DQBUF ERROR / green-then-white picture). Now they're derived from the
+   grid we build ourselves, both in uniform and non-uniform cases.
+
+Verification evidence: local `av1_aom.mp4` in Chrome — hardware decode (GPU process holds
+video4/media3), zero DQBUF errors, canvas shows a correct picture; YouTube — AV1 480p/720p
+segments delivered during the player's ABR adaptation decoded clean (4500+ pictures across
+the session, zero decode errors; the only 2 `vaEndPicture` failures were transient
+"no free capture buffer" during format swaps, unrelated to AV1). Note YouTube's codec
+ladder is server-side: default sessions get VP9; with VP9 hidden via a page-level
+`MediaSource.isTypeSupported` shim it picks avc1, and AV1 shows up during adaptation.
+No h264ify-style extension exists in any profile on this box.

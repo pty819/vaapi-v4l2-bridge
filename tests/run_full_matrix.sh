@@ -201,14 +201,14 @@ enc "$CLIP/hevc10.mp4" -f lavfi -i testsrc=size=1280x720:rate=30:duration=1 \
   -pix_fmt yuv420p10le -c:v libx265 -preset ultrafast -x265-params "log-level=error" -frames:v 8
 
 # AV1 clips unused while AV1 is un-advertised (see decode matrix below).
-# enc "$CLIP/av1_aom.mp4" -f lavfi -i testsrc=size=1280x720:rate=30:duration=2 \
-#   -pix_fmt yuv420p -c:v libaom-av1 -cpu-used 8 -crf 32 -b:v 0 -g 30 -usage realtime
-# enc "$CLIP/av1_svt.mp4" -f lavfi -i testsrc=size=1280x720:rate=30:duration=2 \
-#   -pix_fmt yuv420p -c:v libsvtav1 -preset 10 -g 32 -b:v 1M
-# enc "$CLIP/av1_4k.mp4" -f lavfi -i testsrc=size=3840x2160:rate=30:duration=1 \
-#   -pix_fmt yuv420p -c:v libaom-av1 -cpu-used 8 -crf 36 -b:v 0 -g 8 -usage realtime -frames:v 8
-# enc "$CLIP/av1_default.mp4" -f lavfi -i testsrc=size=640x360:rate=30:duration=1 \
-#   -pix_fmt yuv420p -c:v libaom-av1 -cpu-used 8 -crf 36 -b:v 0 -g 30
+enc "$CLIP/av1_aom.mp4" -f lavfi -i testsrc=size=1280x720:rate=30:duration=2 \
+  -pix_fmt yuv420p -c:v libaom-av1 -cpu-used 8 -crf 32 -b:v 0 -g 30 -usage realtime
+enc "$CLIP/av1_svt.mp4" -f lavfi -i testsrc=size=1280x720:rate=30:duration=2 \
+  -pix_fmt yuv420p -c:v libsvtav1 -preset 10 -g 32 -b:v 1M
+enc "$CLIP/av1_4k.mp4" -f lavfi -i testsrc=size=3840x2160:rate=30:duration=1 \
+  -pix_fmt yuv420p -c:v libaom-av1 -cpu-used 8 -crf 36 -b:v 0 -g 8 -usage realtime -frames:v 8
+enc "$CLIP/av1_default.mp4" -f lavfi -i testsrc=size=640x360:rate=30:duration=1 \
+  -pix_fmt yuv420p -c:v libaom-av1 -cpu-used 8 -crf 36 -b:v 0 -g 30
 
 # VP8
 enc "$CLIP/vp8_480.webm" -f lavfi -i testsrc=size=640x480:rate=25:duration=2 \
@@ -345,11 +345,11 @@ else echo "MD5_DIFF hevc10"; fail=$((fail+1)); fi
 # AV1 VA-API decode pairs disabled with the AV1 un-advertising: ffmpeg's
 # vaapi hwaccel can no longer pick VAProfileAV1Profile0, so these would
 # only measure the software fallback. Re-enable when AV1 returns.
-# pair_sw "$CLIP/av1_aom.mp4" 8 av1-aom-8
-# pair_sw "$CLIP/av1_aom.mp4" 49 av1-aom-49
-# pair_sw "$CLIP/av1_svt.mp4" 32 av1-svt-32
-# pair_sw "$CLIP/av1_4k.mp4" 8 av1-4k
-# pair_sw "$CLIP/av1_default.mp4" 16 av1-default-16
+pair_sw "$CLIP/av1_aom.mp4" 8 av1-aom-8
+pair_sw "$CLIP/av1_aom.mp4" 49 av1-aom-49
+pair_sw "$CLIP/av1_svt.mp4" 32 av1-svt-32
+pair_sw "$CLIP/av1_4k.mp4" 8 av1-4k
+pair_sw "$CLIP/av1_default.mp4" 16 av1-default-16
 
 pair_sw "$CLIP/vp8_480.webm" 40 vp8-480
 pair_sw "$CLIP/vp8_720.webm" 50 vp8-720
