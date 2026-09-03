@@ -112,12 +112,20 @@ void v4l2sl_mpeg2_fill_quant(struct v4l2_ctrl_mpeg2_quantisation *q,
     else
         memset(q->non_intra_quantiser_matrix, 16, 64);
 
+    /* H.262 6.3.7: untransmitted chroma matrices inherit the luma values
+     * (or their defaults) — the kernel programs these tables verbatim, so
+     * the fallback is ours to apply. */
     if (iq && iq->load_chroma_intra_quantiser_matrix)
         memcpy(q->chroma_intra_quantiser_matrix,
                iq->chroma_intra_quantiser_matrix, 64);
+    else
+        memcpy(q->chroma_intra_quantiser_matrix, q->intra_quantiser_matrix, 64);
     if (iq && iq->load_chroma_non_intra_quantiser_matrix)
         memcpy(q->chroma_non_intra_quantiser_matrix,
                iq->chroma_non_intra_quantiser_matrix, 64);
+    else
+        memcpy(q->chroma_non_intra_quantiser_matrix,
+               q->non_intra_quantiser_matrix, 64);
 }
 
 VAStatus v4l2sl_mpeg2_translate(struct v4l2sl_context *ctx,
