@@ -127,6 +127,11 @@ static const char *cached_device(struct v4l2sl_driver_data *dd, enum v4l2sl_code
  * VA-API driver VTable implementations
  */
 
+/* rkvdec real per-dimension limit — every max-size advertisement must
+ * agree on this (config attrs AND surface attrs). */
+#define V4L2SL_MAX_PICTURE_DIM 4096
+
+
 static void destroy_surface_locked(struct v4l2sl_driver_data *dd,
                                    struct v4l2sl_surface *s, VASurfaceID id);
 
@@ -291,10 +296,10 @@ v4l2sl_get_config_attributes(VADriverContextP ctx,
             attrib_list[i].value = 100;
             break;
         case VAConfigAttribMaxPictureWidth:
-            attrib_list[i].value = 8192;
+            attrib_list[i].value = V4L2SL_MAX_PICTURE_DIM;
             break;
         case VAConfigAttribMaxPictureHeight:
-            attrib_list[i].value = 8192;
+            attrib_list[i].value = V4L2SL_MAX_PICTURE_DIM;
             break;
         default:
             attrib_list[i].value = VA_ATTRIB_NOT_SUPPORTED;
@@ -447,10 +452,10 @@ v4l2sl_query_config_attributes(VADriverContextP ctx,
     attribs[count].value = VA_DEC_SLICE_MODE_NORMAL;
     count++;
     attribs[count].type = VAConfigAttribMaxPictureWidth;
-    attribs[count].value = 8192;
+    attribs[count].value = V4L2SL_MAX_PICTURE_DIM;
     count++;
     attribs[count].type = VAConfigAttribMaxPictureHeight;
-    attribs[count].value = 8192;
+    attribs[count].value = V4L2SL_MAX_PICTURE_DIM;
     count++;
     attribs[count].type = VAConfigAttribEncPackedHeaders;
     attribs[count].value = 0;
@@ -527,13 +532,13 @@ v4l2sl_query_surface_attributes(VADriverContextP ctx,
     attribs[count].type          = VASurfaceAttribMaxWidth;
     attribs[count].flags         = VA_SURFACE_ATTRIB_GETTABLE;
     attribs[count].value.type    = VAGenericValueTypeInteger;
-    attribs[count].value.value.i = 4096;
+    attribs[count].value.value.i = V4L2SL_MAX_PICTURE_DIM;
     count++;
 
     attribs[count].type          = VASurfaceAttribMaxHeight;
     attribs[count].flags         = VA_SURFACE_ATTRIB_GETTABLE;
     attribs[count].value.type    = VAGenericValueTypeInteger;
-    attribs[count].value.value.i = 4096;
+    attribs[count].value.value.i = V4L2SL_MAX_PICTURE_DIM;
     count++;
 
     attribs[count].type          = VASurfaceAttribMemoryType;
