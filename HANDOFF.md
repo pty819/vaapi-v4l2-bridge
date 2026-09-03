@@ -1,8 +1,8 @@
 # HANDOFF — VA-API → V4L2-stateless 桥接层
 
-写于 **2026-08-27**，刷新 **2026-09-03**。机器：Orange Pi 5 NAS `192.168.1.21`，Armbian 26.8.3 resolute，kernel **7.1.8-edge-rockchip64**。
+写于 **2026-08-27**，刷新 **2026-09-04**。机器：Orange Pi 5 NAS `192.168.1.21`，Armbian 26.8.3 resolute，kernel **7.1.8-edge-rockchip64**。
 
-全量矩阵 `tests/run_full_matrix.sh`：**PASS=27 FAIL=0**（h26410 + h264422×4 + gbm-probe + va-export）。Git 仓库在 NAS：`https://github.com/pty819/vaapi-v4l2-bridge.git`。
+全量矩阵 `tests/run_full_matrix.sh`：**PASS=32 FAIL=0**（h26410 + h264422 + gbm-probe + va-export + AV1 五腿已恢复）。Git 仓库在 NAS：`https://github.com/pty819/vaapi-v4l2-bridge.git`。
 
 安装 `.so`：`/usr/lib/aarch64-linux-gnu/dri/v4l2stateless_drv_video.so`。
 
@@ -18,7 +18,7 @@ C 驱动 `v4l2stateless_drv_video.so` 把 ffmpeg VA-API 硬解接到主线 V4L2-
 | H.264 High10 | 同上，capture NV15 | **完成**：hw==sw framemd5；根因=ffmpeg VA 的 pic_init_qp_minus26 含 10bit QpBdOffsetY(+12)，内核要裸值，剥掉即好 |
 | HEVC 8-bit Main | 同上 | **完成**：Main + WPP + 4K |
 | HEVC Main10 | 同上，NV15 → P010 | **完成**：`hwdownload,format=p010le` 对软解 |
-| AV1 8-bit Profile0 | hantro `/dev/video4` + `/dev/media3` | 翻译路径保留但**不广播**（短 VA 会话反复开节点会挂 SoC）；矩阵跳过 AV1 |
+| AV1 8-bit Profile0 | hantro `/dev/video4` + `/dev/media3` | **完成 + 重新广播（09-03）**：libaom、realtime、SVT-AV1 RA、4K 全 bit-exact；Chrome 本地片 + YouTube 段验证。旧"反复开节点挂 SoC"实为电源功率不足（已换电源），压测 15×vainfo + 5 连解码 + 两轮矩阵零错误 |
 | VP8 | hantro `/dev/video2` | **完成**：480p / 720p vs ffmpeg SW |
 | MPEG-2 Simple / Main | 同上 `/dev/video2` | **完成**：vs GStreamer `v4l2slmpeg2dec`（hantro IDCT ≠ ffmpeg SW） |
 | JPEG Baseline encode | VEPU121 `/dev/video3` | **完成**：`mjpeg_vaapi`（stateful M2M） |
@@ -120,6 +120,7 @@ VA **不暴露** `refresh_frame_flags`。驱动按第一帧 INTER 锁风格，�
 
 `order_hints[]` 按 **ref type**（LAST=1…ALTREF=7）填。`skip_mode_frame[]` 按 spec 5.9.22 / ffmpeg `skip_mode_params()` 推。
 
+内核 OUTPUT 要 **RAW tile 数据**（无 OBU 框架）。ffmpeg 提交的就是裸 tile；Chrome 提交整段 OBU span（sequence+frame OBU）且每 tile 偏移指向 span 内部——驱动按 slice 参数抽取各 tile 载荷拼接、TILE_GROUP_ENTRY 偏移重定基到拼接流。`uniform_tile_spacing` 时 `width/height_in_sbs_minus_1` 是**推导量**（VA 客户端在该分支不填、Chrome 全零），必须从自建的 mi_col/row_starts 网格推导，不能照抄 VA 数组——否则内核逐帧拒绝（表象：绿屏→白屏）。
 不要再为 ffmpeg 裸 tile 包 TILE_GROUP OBU。`tx_mode` 必须来自 VA `mode_control_fields`（留 0 = ONLY_4X4，关键帧也灰）。AV1 media 节点从 sysfs 解，**不是** `/dev/media0`：
 
 ```
@@ -207,6 +208,8 @@ Debian/XtraDeb 的 arm64 Chromium 编的是 `use_v4l2_codec`，直连 `/dev/vide
 - HEVC SPS 放进 request → ioctl OK、设备没配置、随后 QBUF EINVAL
 - AV1 request 建在 `/dev/media0` → 应为 `/dev/media3`
 - 给 ffmpeg 的裸 AV1 tile 再包一层自制 OBU → 更灰
+- AV1 OUTPUT 塞 OBU span 而不抽 tile 载荷 → Chrome 逐帧 DQBUF ERROR
+- AV1 uniform tile 时照抄 VA 的 in_sbs_minus_1（全零）→ 内核拒绝每帧，画面绿转白
 - `tx_mode` 留 0 → 关键帧也灰
 - AV1 P 帧 `refresh_frame_flags=0` → CDF 永不更新
 - libaom realtime 用 8 槽 first_dup → 第 7 帧错；应锁 RTC `order_hint % 6`

@@ -43,9 +43,11 @@ static const VAProfile v4l2sl_profiles[] = {
     VAProfileH264High422,
     VAProfileHEVCMain,
     VAProfileHEVCMain10,
-    /* AV1 (VPU981) is not advertised: short VA-API sessions reopen
-     * /dev/video4 and can hang the SoC. Desktop AV1 stays on
-     * Chromium/GStreamer native V4L2. */
+    /* AV1 re-advertised 2026-09-03: the original hang suspects are both
+     * gone — the per-vaInitialize reopen storm was killed by the boot
+     * probe cache (27e8b7a), and the PSU that hard-hung the box under
+     * load was replaced. Translate path retained bit-exact history. */
+    VAProfileAV1Profile0,
     VAProfileVP8Version0_3,
     VAProfileMPEG2Simple,
     VAProfileMPEG2Main,
@@ -67,6 +69,7 @@ static const struct {
     { VAProfileH264High422,    VA_RT_FORMAT_YUV422 | VA_RT_FORMAT_YUV422_10 },
     { VAProfileHEVCMain,       VA_RT_FORMAT_YUV420 },
     { VAProfileHEVCMain10,     VA_RT_FORMAT_YUV420_10 },
+    { VAProfileAV1Profile0,    VA_RT_FORMAT_YUV420 },
     { VAProfileVP8Version0_3,  VA_RT_FORMAT_YUV420 },
     { VAProfileMPEG2Simple,    VA_RT_FORMAT_YUV420 },
     { VAProfileMPEG2Main,      VA_RT_FORMAT_YUV420 },
@@ -86,6 +89,7 @@ static const struct {
     { VAProfileH264High422, V4L2SL_CODEC_H264 },
     { VAProfileHEVCMain,    V4L2SL_CODEC_HEVC },
     { VAProfileHEVCMain10,  V4L2SL_CODEC_HEVC },
+    { VAProfileAV1Profile0, V4L2SL_CODEC_AV1 },
     { VAProfileVP8Version0_3, V4L2SL_CODEC_VP8 },
     { VAProfileMPEG2Simple, V4L2SL_CODEC_MPEG2 },
     { VAProfileMPEG2Main,   V4L2SL_CODEC_MPEG2 },
@@ -2069,9 +2073,8 @@ v4l2sl_init(VADriverContextP ctx)
             driver_data->dev_h264[0] ? driver_data->dev_h264 : "(none)");
     fprintf(stderr, "v4l2stateless: probe HEVC   -> %s\n",
             driver_data->dev_hevc[0] ? driver_data->dev_hevc : "(none)");
-    /* Do not publish AV1 to libva clients. Probe still sees the node. */
-    driver_data->dev_av1[0] = 0;
-    fprintf(stderr, "v4l2stateless: probe AV1    -> (not advertised)\n");
+    fprintf(stderr, "v4l2stateless: probe AV1    -> %s\n",
+            driver_data->dev_av1[0] ? driver_data->dev_av1 : "(none)");
     fprintf(stderr, "v4l2stateless: probe VP8    -> %s\n",
             driver_data->dev_vp8[0] ? driver_data->dev_vp8 : "(none)");
     fprintf(stderr, "v4l2stateless: probe MPEG-2 -> %s\n",
