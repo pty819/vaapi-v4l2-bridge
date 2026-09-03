@@ -898,8 +898,6 @@ VAStatus v4l2sl_av1_translate(struct v4l2sl_context *ctx,
         const VAFilmGrainStructAV1 *fg = &pic_param->film_grain_info;
         if (fg->film_grain_info_fields.bits.apply_grain)
             grain.flags |= V4L2_AV1_FILM_GRAIN_FLAG_APPLY_GRAIN;
-        if (fg->film_grain_info_fields.bits.update_grain)
-            grain.flags |= V4L2_AV1_FILM_GRAIN_FLAG_UPDATE_GRAIN;
         if (fg->film_grain_info_fields.bits.chroma_scaling_from_luma)
             grain.flags |= V4L2_AV1_FILM_GRAIN_FLAG_CHROMA_SCALING_FROM_LUMA;
         if (fg->film_grain_info_fields.bits.overlap_flag)
