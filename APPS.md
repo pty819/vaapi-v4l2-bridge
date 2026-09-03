@@ -6,7 +6,7 @@ instead of a real i915/AMD VA driver or a vendor MPP stack.
 This is the RK3588 / Orange Pi 5 setup used on the development NAS. Codec
 support and the `hwdownload` success rule are in [README.md](README.md).
 
-Last verified **2026-09-03** on the development NAS (Chrome live hw decode + visible picture on bilibili 1080p): `LIBVA_DRIVER_NAME=v4l2stateless` is in `~/.config/environment.d/90-libva.conf`; Chrome menu uses `/usr/local/bin/google-chrome-vaapi`; Firefox is Mozilla `.deb` 154.0.1 with `user.js` in both profiles; VLC `avcodec-hw=vaapi`.
+Last verified **2026-09-03** on the development NAS (Chrome live hw decode + visible picture on bilibili 1080p): `LIBVA_DRIVER_NAME=v4l2stateless` is in `~/.config/environment.d/90-libva.conf`; Chrome menu uses `/usr/local/bin/google-chrome-stable` (a copy of the wrapper); Firefox is Mozilla `.deb` 154.0.1 with `user.js` in both profiles; VLC `avcodec-hw=vaapi`.
 
 
 ## One environment variable for everyone
@@ -83,10 +83,14 @@ is already handled in `src/v4l2stateless.c`.
 and sets `LIBVA_DRIVER_NAME`. Install:
 
 ```bash
-sudo install -m 0755 scripts/google-chrome-vaapi /usr/local/bin/google-chrome-vaapi
-sudo ln -sfn google-chrome-vaapi /usr/local/bin/google-chrome-stable
-sudo ln -sfn google-chrome-vaapi /usr/local/bin/google-chrome
+sudo install -m 0755 scripts/google-chrome-vaapi /usr/local/bin/google-chrome-stable
 ```
+
+Single-file install (no symlinks). The former `google-chrome-vaapi` +
+`google-chrome` symlink pair was removed 2026-09-03: a stale copy had been
+shadowing `google-chrome` with the ZeroCopyGL-disabling flag, which silently
+drops Chrome to FFmpeg software. Re-run the install line after editing the
+wrapper.
 
 `/usr/local/bin` is ahead of `/usr/bin` on PATH, so a terminal
 `google-chrome-stable` also hits the wrapper. Menu launchers often hardcode
@@ -106,15 +110,16 @@ xdg-settings set default-web-browser google-chrome.desktop
 
 An apt upgrade of `google-chrome-stable` overwrites
 `/usr/share/applications/google-chrome.desktop` and `/usr/bin/google-chrome-stable`.
-It does **not** touch `/usr/local/bin/google-chrome-vaapi` or the user `.desktop`.
+It does **not** touch `/usr/local/bin/google-chrome-stable` or the user `.desktop`.
 
 Do **not** start `/usr/bin/google-chrome-stable` or `/opt/google/chrome/google-chrome`
 by full path if you want hardware decode.
 
 ### Check
 
-Open `chrome://gpu` → **Video Acceleration Information**. H.264 / HEVC / AV1
-should list Hardware. Start with 1080p; 4K HDR / VP9 will not use this bridge.
+Open `chrome://gpu` → **Video Acceleration Information**. H.264 / HEVC
+should list Hardware (AV1 is not advertised by the bridge). Start with 1080p;
+4K HDR / VP9 will not use this bridge.
 
 Hardware decode is a resolution-dependent choice: a 320x240 QCIF clip decodes
 with `FFmpegVideoDecoder` (software) even when everything works. Use a 1080p

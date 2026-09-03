@@ -1,22 +1,22 @@
 # vaapi-v4l2-bridge
 
-Last verified **2026-08-29** on Orange Pi 5 (Armbian 26.8.3, kernel 7.1.8-edge-rockchip64). Ops notes: [HANDOFF.md](HANDOFF.md). Snapshot: [STATE.md](STATE.md).
+Last verified **2026-09-03** on Orange Pi 5 (Armbian 26.8.3 resolute, kernel 7.1.8-edge-rockchip64). Ops notes: [HANDOFF.md](HANDOFF.md). Snapshot: [STATE.md](STATE.md).
 
 libva backend that translates VA-API decode to the Linux V4L2 Request API (stateless).
 Target: Rockchip RK3588 / Orange Pi 5 on **mainline** Armbian (no vendor BSP, no MPP).
 
-Applications that only speak VA-API (`ffmpeg -hwaccel vaapi`, VLC, Firefox, official Linux Chrome) can then use the VPU. Desktop wiring (Chrome wrapper, Firefox `user.js`, VLC `avcodec-hw`) is in [APPS.md](APPS.md).
+Applications that only speak VA-API (`ffmpeg -hwaccel vaapi`, VLC, Firefox, official Linux Chrome) can then use the VPU. Desktop wiring (Chrome wrapper, Firefox `user.js`, VLC `avcodec-hw`) is in [APPS.md](APPS.md). Since 2026-09-03 official Chrome hardware-decodes **and shows the picture** — zero-copy GL path over GBM-backed export surfaces.
 
 Codecs:
 
 | Codec | Device (this RK3588) | Status |
 |---|---|---|
 | H.264 Constrained Baseline / Main / High | rkvdec `/dev/video1` | bit-exact vs ffmpeg software (`hwdownload` framemd5) |
-| H.264 High10 | same, capture NV15 | advertised; capture renegotiates to NV15 (`vaExportSurfaceHandle` PRIME) |
-| H.264 High422 | same, capture NV16 | advertised (ffmpeg's vaapi hwaccel often still picks software for 4:2:2) |
+| H.264 High10 | same, capture NV15 | bit-exact vs ffmpeg software (`hwdownload,format=p010le`) — driver strips the QpBdOffsetY depth offset ffmpeg bakes into `pic_init_qp` (VA carries it, V4L2 wants the raw bitstream value) |
+| H.264 High422 8/10-bit | same, capture NV16/NV20 | bit-exact; VA path exercised by `tests/va_h264422_client.c` (stock ffmpeg never offers VAAPI for 4:2:2 — decoder pix_fmt list + profile map), kernel path GStreamer `v4l2slh264dec` vs `avdec_h264` |
 | HEVC 8-bit Main (incl. WPP) | same | bit-exact |
 | HEVC Main10 | same, capture NV15 → P010 | bit-exact vs ffmpeg software (`hwdownload,format=p010le`) |
-| AV1 Profile0 8-bit | hantro `/dev/video4` + matching media node | bit-exact vs ffmpeg software (libaom, libaom realtime, SVT-AV1 RA) |
+| AV1 Profile0 8-bit | hantro `/dev/video4` + matching media node | **not advertised** — short VA-API sessions reopening the node could hang the SoC; translate path retained, matrix skips AV1 |
 | VP8 | hantro `/dev/video2` | bit-exact vs ffmpeg software |
 | MPEG-2 Simple / Main | same `/dev/video2` | bit-exact vs GStreamer `v4l2slmpeg2dec` (hantro IDCT ≠ ffmpeg SW) |
 | JPEG Baseline encode | VEPU121 `/dev/video3` | `mjpeg_vaapi` (stateful M2M) |
@@ -48,7 +48,7 @@ ffmpeg -hwaccel vaapi -hwaccel_output_format vaapi \
   -vf "hwdownload,format=nv12" -pix_fmt yuv420p -f framemd5 -
 ```
 
-Mid-stream resolution / bit-depth / chroma changes renegotiate capture (`STREAMOFF` / `S_FMT` / `REQBUFS`). Zero-copy: `vaExportSurfaceHandle` DRM PRIME 2.
+Mid-stream resolution / bit-depth / chroma changes renegotiate capture (`STREAMOFF` / `S_FMT` / `REQBUFS`). Export: `vaExportSurfaceHandle` returns a single-object NV12 dmabuf backed by a driver-owned linear GBM bo (`src/v4l2stateless_gbm.c`) — the descriptor shape Chromium requires; VPU capture buffers never leave the kernel via `EXPBUF` (banned on this SoC).
 
 Full host matrix (needs `/dev/video*` and writes clips under `verify/`, gitignored):
 
@@ -56,8 +56,7 @@ Full host matrix (needs `/dev/video*` and writes clips under `verify/`, gitignor
 bash tests/run_full_matrix.sh
 ```
 
-Last recorded host run: **PASS=22 FAIL=0**. The script covers H.264 (CB/Main/High/B/all-P/slices/4K/QCIF), HEVC (Main/WPP/4K/Main10 p010le), AV1 (libaom 8+49, SVT 32, 4K, default 16), VP8 (480+720), MPEG-2 vs GST (IP/B/1080), JPEG `mjpeg_vaapi`, RGA `scale_vaapi`, plus unit probe/fill and `vainfo`.
-
+Last recorded host run: **PASS=27 FAIL=0** (2026-09-03, after the audit-refactor merge). The script covers H.264 (CB/Main/High/B/all-P/slices/4K/QCIF/High10 p010le/High422 8+10-bit), HEVC (Main/WPP/4K/Main10 p010le), VP8 (480+720), MPEG-2 vs GST (IP/B/1080), JPEG `mjpeg_vaapi`, RGA `scale_vaapi`, unit probe/fill, the `gbm-probe` and `va-export` clients, and `vainfo`. AV1 entries are commented out while AV1 stays un-advertised.
 
 ## Desktop apps (Chrome / Firefox / VLC)
 
@@ -66,11 +65,17 @@ All of them need `LIBVA_DRIVER_NAME=v4l2stateless` in the **graphical** environm
 
 | App | Extra |
 |---|---|
-| Official Chrome arm64 | Wrapper [`scripts/google-chrome-vaapi`](scripts/google-chrome-vaapi): render-node override, GPU-sandbox off, pure Wayland + ANGLE/GLES, Vulkan off (details in [APPS.md](APPS.md)); hw decode + zero-copy picture verified 2026-09-03. Distro Chromium arm64 does **not** use this `.so`. |
+| Official Chrome arm64 | Wrapper [`scripts/google-chrome-vaapi`](scripts/google-chrome-vaapi): render-node override, GPU-sandbox off, pure Wayland + ANGLE/GLES, Vulkan off, big-core pinning (`taskset 4-7` by default, `CHROME_PIN_CPUS` overrides); ZeroCopyGL must stay **enabled** — disabling it pushes VaapiVideoDecoder into the nonexistent ImageProcessor path and Chrome silently drops to FFmpeg software (details in [APPS.md](APPS.md)); hw decode + zero-copy picture verified 2026-09-03. Distro Chromium arm64 does **not** use this `.so`. |
 | Firefox | [`scripts/firefox-vaapi-user.js`](scripts/firefox-vaapi-user.js) into the active profile. Use Mozilla's `.deb` repo, not Ubuntu's snap stub. |
 | VLC | `avcodec-hw=vaapi` in `vlcrc`. |
 
 Full steps, checks, and caveats: **[APPS.md](APPS.md)**.
+
+## Status highlights (2026-09-03)
+
+- **Stability round `27e8b7a` (2026-09-02)**: decode timeouts now `STREAMOFF` + rebuild both queues (a wedged job is never left in the kernel), every stateful vtable entry takes the driver lock, surface IDs recycled with bounds checks, probe results cached per boot (`v4l2stateless-probe.cache`, `V4L2SL_PROBE_NOCACHE=1` bypasses), capture `REQBUFS` degrades 24→8→4 under CMA pressure.
+- **GBM display surfaces `f53f3f1..452de04`**: Chrome `VaapiVideoDecoder` hardware-decodes with a visible picture (bilibili 1080p live; canvas non-black, zero `eglCreateImage` errors, GPU process holds rkvdec). Platform constraints and the VPP-output-surface export model are documented in [STATE.md](STATE.md).
+- **Audit-driven refactor merged `c359f91`** (full audit: [docs/refactor-audit-2026-09-03.md](docs/refactor-audit-2026-09-03.md)): P0–P2 done (terminate leak 11MB/session → 0, `create_surfaces` failure path, VPP region clamp), P3 clusters 1-6 and P4 items 1-5 landed — decode-path driver ioctls measured ~12 → ~7 per frame ([docs/perf-baseline-2026-09.md](docs/perf-baseline-2026-09.md)), lazy `cpu_ptr` saves 60–240MB per pool. Deferred tail: P3 clusters 7-11, P4 items 6-8 (plans in [docs/superpowers/plans/](docs/superpowers/plans/)); C12 (AV1 `update_grain`) not actionable until libva grows the field.
 
 ## License
 
