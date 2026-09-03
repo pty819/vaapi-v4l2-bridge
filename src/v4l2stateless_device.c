@@ -285,12 +285,38 @@ static int reqbufs_zero(int fd, enum v4l2_buf_type type)
     return 0;
 }
 
+void v4l2sl_m2m_teardown(struct v4l2sl_context *ctx, struct v4l2sl_m2m_state *q)
+{
+    int i;
+
+    if (!ctx || !q || !q->valid)
+        return;
+    if (ctx->v4l2_fd >= 0) {
+        v4l2sl_streamoff(ctx->v4l2_fd, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE);
+        v4l2sl_streamoff(ctx->v4l2_fd, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE);
+        reqbufs_zero(ctx->v4l2_fd, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE);
+        reqbufs_zero(ctx->v4l2_fd, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE);
+    }
+    for (i = 0; i < 3; i++) {
+        if (q->out_map[i] && q->out_map[i] != MAP_FAILED)
+            munmap(q->out_map[i], q->out_len[i]);
+    }
+    if (q->cap_map && q->cap_map != MAP_FAILED)
+        munmap(q->cap_map, q->cap_len);
+    memset(q, 0, sizeof(*q));
+}
+
 void v4l2sl_release_context_device(struct v4l2sl_context *ctx)
 {
     int i;
 
     if (!ctx)
         return;
+
+    /* Persistent M2M queues hold V4L2 MMAP mappings — release them while
+     * the device fd is still open. */
+    v4l2sl_m2m_teardown(ctx, &ctx->vpp_q);
+    v4l2sl_m2m_teardown(ctx, &ctx->jpeg_q);
 
     if (ctx->v4l2_fd >= 0 && ctx->streamed) {
         v4l2sl_streamoff(ctx->v4l2_fd, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE);

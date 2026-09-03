@@ -109,6 +109,23 @@ struct v4l2sl_buffer {
  * process can never index past the table. */
 #define V4L2SL_MAX_SURFACES 4096
 
+/* Persistent M2M queue state (VPP / JPEG encode): when the negotiated
+ * setup is unchanged across pictures, S_FMT / S_CTRL / REQBUFS / QUERYBUF
+ * and the plane mappings are skipped — steady state is STREAMON + QBUF +
+ * DQBUF + STREAMOFF only (~18 -> ~7 ioctls, 4 mmap -> 0 per frame). A
+ * setup change or any steady-state failure triggers a full teardown and
+ * renegotiation on the next picture. */
+struct v4l2sl_m2m_state {
+    uint8_t  valid;
+    uint32_t key[8];         /* codec-specific setup key */
+    void    *out_map[3];     /* mapped OUTPUT planes (JPEG: Y, UV[, pad]) */
+    size_t   out_len[3];
+    int      out_planes;     /* negotiated OUTPUT plane count */
+    void    *cap_map;        /* mapped CAPTURE plane */
+    size_t   cap_len;
+    struct v4l2_format ofmt; /* negotiated OUTPUT format (plane layout) */
+};
+
 /* Per-context state (one decode session) */
 struct v4l2sl_context {
     VAContextID context_id;
@@ -184,6 +201,10 @@ struct v4l2sl_context {
     uint8_t av1_have_first_arf;
     uint32_t av1_l0_oh;        /* last SVT L0 ARF order_hint */
     uint32_t av1_prev_l0_oh;   /* previous L0 ARF (mini-GOP length) */
+
+    /* Persistent M2M queues (stateful devices: RGA VPP / VEPU JPEG) */
+    struct v4l2sl_m2m_state vpp_q;
+    struct v4l2sl_m2m_state jpeg_q;
 };
 
 /* Driver global state */
@@ -346,6 +367,10 @@ int v4l2sl_mmap_output_buffers(int fd, int count, void **ptrs, uint32_t *size_ou
 int v4l2sl_set_request_controls(int request_fd, int v4l2_fd, struct v4l2_ext_controls *ctrls);
 int v4l2sl_set_global_controls(int v4l2_fd, struct v4l2_ext_controls *ctrls);
 int v4l2sl_submit_request(int request_fd);
+/* Full teardown of a persistent M2M queue (STREAMOFF + REQBUFS(0) both
+ * directions + drop the plane mappings). Safe no-op on an unused queue;
+ * call before the context's device fd goes away. */
+void v4l2sl_m2m_teardown(struct v4l2sl_context *ctx, struct v4l2sl_m2m_state *q);
 /* poll() wrapper that retries EINTR (device.c) */
 int v4l2sl_poll_intr(struct pollfd *fds, nfds_t n, int timeout);
 /* EINTR-retrying ioctl (device.c); VPP/JPEG route through it so the test
