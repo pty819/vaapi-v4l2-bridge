@@ -123,3 +123,9 @@ putImage fourcc, HEVC IQ, MPEG-2 chroma fallback, AV1 flags; C12 not
 actionable - libva header lacks update_grain). Gates: matrix 27/27,
 ASan va_leak_client 0 leaks, chrome smoke via scripts/chrome_smoke.sh
 (live room OR local 8931 clip fallback). P3/P4 pending.
+
+P3 partial (clusters 1-6 done: last_writer enum, memfd_fd rename, shared
+xioctl, surface_by_id everywhere, context_for_surface, 4096 attr unify;
+7-11 deferred). P4 items 1-5 done with measured -5..6 ioctls/frame
+(docs/perf-baseline-2026-09.md); items 6-8 deferred. Merged to master
+2026-09-03; follow-ups live in the audit + P3/P4 plan files.
