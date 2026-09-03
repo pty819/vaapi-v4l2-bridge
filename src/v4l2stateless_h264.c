@@ -441,48 +441,24 @@ VAStatus v4l2sl_h264_translate(struct v4l2sl_context *ctx,
         }
     }
 
-    /* Set H.264 SPS */
-    struct v4l2_ext_control sps_ctrl = { 0 };
-    sps_ctrl.id = V4L2_CID_STATELESS_H264_SPS;
-    sps_ctrl.p_h264_sps = &sps;
-    sps_ctrl.size = sizeof(sps);
+    /* Request-scoped picture controls in ONE ioctl. */
+    struct v4l2_ext_control pic_ctrls[3] = { { 0 }, { 0 }, { 0 } };
+    struct v4l2_ext_controls batch = { 0 };
 
-    struct v4l2_ext_controls sps_ctrls = { 0 };
-    sps_ctrls.controls = &sps_ctrl;
-    sps_ctrls.count = 1;
+    pic_ctrls[0].id = V4L2_CID_STATELESS_H264_SPS;
+    pic_ctrls[0].p_h264_sps = &sps;
+    pic_ctrls[0].size = sizeof(sps);
+    pic_ctrls[1].id = V4L2_CID_STATELESS_H264_PPS;
+    pic_ctrls[1].p_h264_pps = &pps;
+    pic_ctrls[1].size = sizeof(pps);
+    pic_ctrls[2].id = V4L2_CID_STATELESS_H264_DECODE_PARAMS;
+    pic_ctrls[2].p_h264_decode_params = &dec;
+    pic_ctrls[2].size = sizeof(dec);
+    batch.controls = pic_ctrls;
+    batch.count = 3;
 
-    if (v4l2sl_set_request_controls(request_fd, v4l2_fd, &sps_ctrls) < 0) {
-        fprintf(stderr, "v4l2stateless: failed to set H.264 SPS\n");
-        return VA_STATUS_ERROR_OPERATION_FAILED;
-    }
-
-    /* Set H.264 PPS */
-    struct v4l2_ext_control pps_ctrl = { 0 };
-    pps_ctrl.id = V4L2_CID_STATELESS_H264_PPS;
-    pps_ctrl.p_h264_pps = &pps;
-    pps_ctrl.size = sizeof(pps);
-
-    struct v4l2_ext_controls pps_ctrls = { 0 };
-    pps_ctrls.controls = &pps_ctrl;
-    pps_ctrls.count = 1;
-
-    if (v4l2sl_set_request_controls(request_fd, v4l2_fd, &pps_ctrls) < 0) {
-        fprintf(stderr, "v4l2stateless: failed to set H.264 PPS\n");
-        return VA_STATUS_ERROR_OPERATION_FAILED;
-    }
-
-    /* Set H.264 decode params */
-    struct v4l2_ext_control dec_ctrl = { 0 };
-    dec_ctrl.id = V4L2_CID_STATELESS_H264_DECODE_PARAMS;
-    dec_ctrl.p_h264_decode_params = &dec;
-    dec_ctrl.size = sizeof(dec);
-
-    struct v4l2_ext_controls dec_ctrls = { 0 };
-    dec_ctrls.controls = &dec_ctrl;
-    dec_ctrls.count = 1;
-
-    if (v4l2sl_set_request_controls(request_fd, v4l2_fd, &dec_ctrls) < 0) {
-        fprintf(stderr, "v4l2stateless: failed to set H.264 decode params\n");
+    if (v4l2sl_set_request_controls(request_fd, v4l2_fd, &batch) < 0) {
+        fprintf(stderr, "v4l2stateless: failed to set H.264 picture controls\n");
         return VA_STATUS_ERROR_OPERATION_FAILED;
     }
 
