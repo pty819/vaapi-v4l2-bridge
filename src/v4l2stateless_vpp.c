@@ -386,7 +386,7 @@ VAStatus v4l2sl_vpp_run(struct v4l2sl_context *ctx,
     }
 
     st = VA_STATUS_SUCCESS;
-    dst->gbm_src = 1;
+    dst->last_writer = V4L2SL_WRITER_CPU;
     if (dst->gbm_bo && dst_fcc == VA_FOURCC_NV12)
         v4l2sl_gbm_surface_upload(dst, dst->cpu_ptr, dst->cpu_stride,
                                   dst->height);

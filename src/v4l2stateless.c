@@ -1872,8 +1872,7 @@ v4l2sl_put_image(VADriverContextP ctx,
     v4l2sl_copy_nv12(surf->cpu_ptr, surf->cpu_stride, src,
                      ib->pitch ? ib->pitch : (uint32_t)copy_w,
                      copy_h, copy_w, copy_h);
-    surf->gbm_src = 1;
-    surf->memfd_stale = 1;
+    surf->last_writer = V4L2SL_WRITER_CPU;
     if (surf->gbm_bo)
         v4l2sl_gbm_surface_upload(surf, surf->cpu_ptr, surf->cpu_stride,
                                   surf->height);

@@ -106,7 +106,7 @@ int v4l2sl_surface_ensure_memfd(struct v4l2sl_surface *s)
     uint8_t *bo_data = NULL, *dst;
     uint32_t bo_stride = 0;
 
-    if (!s || !s->memfd_stale || !s->gbm_bo)
+    if (!s || !v4l2sl_memfd_stale(s) || !s->gbm_bo)
         return 0;
     if (s->dma_buf_fd < 0 || !s->stride || !s->aligned_h)
         return -1;
@@ -135,7 +135,7 @@ int v4l2sl_surface_ensure_memfd(struct v4l2sl_surface *s)
                bo_data + (size_t)bo_stride * (h + y), uvw);
     munmap(m, sz);
     gbm_bo_unmap(s->gbm_bo, bo_map);
-    s->memfd_stale = 0;
+    s->last_writer = V4L2SL_WRITER_MEMFD;
     return 0;
 }
 
@@ -173,24 +173,29 @@ int v4l2sl_gbm_surface_ensure(struct v4l2sl_surface *s)
 /* Upload the surface's current pixel data into its bo. The pixels live in
  * either cpu_ptr (VPP output, vaPutImage uploads; image layout: Y@0,
  * UV@cpu_stride*h) or the memfd (decode pull_capture; capture layout).
- * The gbm_src marker says which writer touched it last. */
+ * The last_writer marker says which backing was written last. */
 int v4l2sl_gbm_surface_sync(struct v4l2sl_surface *s)
 {
     if (!s || !s->gbm_bo)
         return -1;
-    if (s->gbm_src == 3)
+    if (s->last_writer == V4L2SL_WRITER_BO)
         return 0; /* bo already holds the latest frame (lazy memfd) */
-    if (s->gbm_src == 1 && s->cpu_ptr && s->cpu_stride)
+    if (s->last_writer == V4L2SL_WRITER_CPU && s->cpu_ptr && s->cpu_stride)
         return v4l2sl_gbm_surface_upload(s, s->cpu_ptr, s->cpu_stride,
                                          s->height);
-    if (s->gbm_src == 2 && s->dma_buf_fd >= 0 && s->stride && s->aligned_h) {
+    if (s->last_writer == V4L2SL_WRITER_MEMFD && s->dma_buf_fd >= 0 &&
+        s->stride && s->aligned_h) {
         uint32_t sz = v4l2sl_capture_plane_size(V4L2_PIX_FMT_NV12,
                                                 s->stride, s->aligned_h);
         void *m = mmap(NULL, sz, PROT_READ, MAP_SHARED, s->dma_buf_fd, 0);
+        int r;
+
         if (m == MAP_FAILED)
             return -1;
-        int r = v4l2sl_gbm_surface_upload(s, m, s->stride, s->aligned_h);
+        r = v4l2sl_gbm_surface_upload(s, m, s->stride, s->aligned_h);
         munmap(m, sz);
+        if (r == 0)
+            s->last_writer = V4L2SL_WRITER_BO; /* bo now holds the frame */
         return r;
     }
     return -1;

@@ -957,8 +957,7 @@ int v4l2sl_surface_pull_capture(struct v4l2sl_context *ctx,
             surf->stride = stride;
             surf->aligned_h = alh;
             surf->cap_fourcc = fcc;
-            surf->gbm_src = 3;
-            surf->memfd_stale = 1;
+            surf->last_writer = V4L2SL_WRITER_BO;
             return 0;
         }
         fprintf(stderr,
@@ -977,8 +976,7 @@ int v4l2sl_surface_pull_capture(struct v4l2sl_context *ctx,
     surf->stride = stride;
     surf->aligned_h = alh;
     surf->cap_fourcc = fcc;
-    surf->gbm_src = 2;
-    surf->memfd_stale = 0;
+    surf->last_writer = V4L2SL_WRITER_MEMFD;
     return 0;
 }
 

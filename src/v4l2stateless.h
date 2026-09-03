@@ -40,6 +40,17 @@ struct v4l2sl_config {
     struct v4l2sl_config *next;
 };
 
+/* Single source of truth for which backing holds the freshest pixels:
+ * CPU = cpu_ptr (VPP dst, vaPutImage), MEMFD = memfd snapshot,
+ * BO = gbm bo (lazy path: memfd is stale until ensure_memfd refills it). */
+enum v4l2sl_last_writer {
+    V4L2SL_WRITER_NONE = 0,
+    V4L2SL_WRITER_CPU = 1,
+    V4L2SL_WRITER_MEMFD = 2,
+    V4L2SL_WRITER_BO = 3,
+};
+#define v4l2sl_memfd_stale(s_) ((s_)->last_writer == V4L2SL_WRITER_BO)
+
 /* Per-surface state */
 struct v4l2sl_surface {
     VASurfaceID surface_id;
@@ -62,10 +73,8 @@ struct v4l2sl_surface {
     uint32_t cpu_stride;
     struct gbm_bo *gbm_bo;   /* driver-owned display copy (linear, R8) */
     uint32_t gbm_stride;
-    uint8_t gbm_src;         /* last writer of pixel data: 1=cpu_ptr,
-                              * 2=memfd, 3=gbm bo (memfd skipped/stale) */
-    uint8_t memfd_stale;     /* 1 = memfd does not hold the latest frame
-                              * (the gbm bo does); refilled on CPU readback */
+    uint8_t last_writer;     /* v4l2sl_last_writer: who wrote pixels last.
+                              * memfd staleness is derived: writer == BO. */
 };
 
 /* Parameter buffer */
