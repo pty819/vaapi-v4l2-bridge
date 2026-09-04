@@ -37,6 +37,7 @@ exclude_patterns = [
     "**/specs/**",
     # Pre-existing markdown in docs/ that is not part of the Sphinx tree
     "ARCHITECTURE.md",
+    "EXPBUF-RETRY.md",
     "asan-baseline-2026-09.md",
     "perf-baseline-2026-09.md",
     "refactor-audit-2026-09-03.md",

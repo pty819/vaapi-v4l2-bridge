@@ -13,8 +13,8 @@ flowchart TB
   FX --> SO
   VLC --> SO
   FF --> SO
-  SO -->|Export GBM| GPU[panthor GLES]
-  SO -->|GetImage| CPU[ffmpeg hwdownload]
+  SO -->|Export EXPBUF dma-buf| GPU[panthor GLES]
+  SO -->|GetImage cap_view| CPU[ffmpeg hwdownload]
 ```
 
 图形会话必须能看见那条环境变量；只在 ssh 的 shell 里 export 对
@@ -22,3 +22,5 @@ flowchart TB
 
 Chrome 包装脚本还负责：render-node、关 GPU sandbox、纯 Wayland GLES、
 关 Vulkan、大核 pin。不要直接跑 `/usr/bin/google-chrome-stable`。
+
+零拷贝路径见 {doc}`/pipeline/expbuf`。回退 GBM：`V4L2SL_EXPBUF_EXPORT=0`。

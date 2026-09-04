@@ -2,6 +2,9 @@
 
 libva DRM 后端：把 VA-API 译成 RK3588 **主线** 上的 V4L2 Request API（无状态解码）以及两路有状态 M2M（RGA VPP、VEPU JPEG 编码）。产物是 `v4l2stateless_drv_video.so`。
 
+Chrome 出画默认 `VIDIOC_EXPBUF` VPU capture（无 capture→GBM memcpy）。
+`V4L2SL_EXPBUF_EXPORT=0` 回退 GBM 拷贝。见 [EXPBUF 零拷贝](pipeline/expbuf.md)。
+
 ```{toctree}
 :maxdepth: 2
 :caption: 从这座桥学习 VA-API 与 V4L2
@@ -23,6 +26,7 @@ overview
 objects
 pipeline/decode
 pipeline/pixels
+pipeline/expbuf
 pipeline/clients
 ```
 

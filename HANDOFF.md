@@ -132,8 +132,8 @@ VA **不暴露** `refresh_frame_flags`。两级策略：
 | `SVT` | 第一帧 INTER hidden + `showable` + `primary_ref_frame != 7` | shown 叶 = 0；第一个 hidden ARF 记下 GOP（**距 KEY 的距离**，KEY 的 oh 存 `key_oh`——存绝对 oh 是 09-04 修掉的 bug，首 GOP 恰好相等、48+ 全错）/L0；之后 `cur > av1_l0_oh` 为 L0；其余 hidden 用 `g = l0_oh - prev_l0_oh` 的层图 |
 | `LIBAOM` | 其它（filtered ARF：not showable，`primary_ref=7`） | DPB 占用 + `get_free_ref_map_index` / `get_refresh_idx`（8 槽 first_dup） |
 
-**copy-out 释放（09-04，`8b5ea0c`）**：pull_capture 本就逐帧快照（GBM bo /
-memfd），capture buffer 剩唯一职责=内核 DPB 参考。上下文用提交给内核的
+**copy-out 释放（09-04，`8b5ea0c`）**：pull_capture 本就逐帧快照（EXPBUF
+下是 cap_view；opt-out 才是 GBM bo / memfd），capture buffer 剩唯一职责=内核 DPB 参考。上下文用提交给内核的
 同一份 refresh 跟踪 slot→buffer，槽位覆写即归还（refresh==0 立即归还），
 活 buffer 被内核 DPB（~10）而非播放器队列深度约束——WebCodecs/MSE 深度
 预解码队列不再抽干池子。**信任门是承重墙**：slot 模型只由解析真值激活；
@@ -270,7 +270,7 @@ Debian/XtraDeb 的 arm64 Chromium 编的是 `use_v4l2_codec`，直连 `/dev/vide
 | `src/v4l2stateless_jpeg.c` | JPEG Baseline 编码（stateful M2M） |
 | `src/v4l2stateless_vpp.c` | RGA VPP |
 | `src/v4l2stateless_format.c` | NV12/NV15/P010/YUY2 转换、Annex-B 拼接、PRIME fourcc |
-| `src/v4l2stateless_gbm.c` | GBM 显示 surface（Chrome 零拷贝导出车辆） |
+| `src/v4l2stateless_gbm.c` | GBM 显示 surface（`V4L2SL_EXPBUF_EXPORT=0` / EXPBUF 失败时的回退） |
 | `scripts/google-chrome-vaapi` | 官方 Chrome 包装（render-node + 关 GPU sandbox） |
 | `scripts/firefox-vaapi-user.js` | Firefox VA-API prefs |
 | `APPS.md` | Chrome / Firefox / VLC 接法 |
@@ -280,6 +280,15 @@ Debian/XtraDeb 的 arm64 Chromium 编的是 `use_v4l2_codec`，直连 `/dev/vide
 
 GStreamer AV1 对照：`gstv4l2codecav1dec.c`。内核：`drivers/media/platform/verisilicon/rockchip_vpu981_hw_av1_dec.c`。
 - **7ec4e39 的 ZeroCopyGL disable 曾把 Chrome 硬解修坏（09-02 深夜定位并已修复）**：真实根因不是流——包装脚本  把 VaapiVideoDecoder 逼进 ImageProcessor 输出路径，本平台没有 ImageProcessor（vmodule 实锤："Unable to find ImageProcessor to convert format" + CroStatus 6 → PIPELINE_ERROR_DECODE），Chrome 静默降级 FFmpeg 软解且整个会话不再重试。ZeroCopyGL 保持默认开。（**此句 09-03 起过时**：GBM 显示 surface 落地后零拷贝导入每帧成功、零 eglCreateImage 错误，见下方 09-03 段；当时的“失败刷噪音+回退 CPU 拷贝”描述作废。）包装脚本已改回只禁 Vulkan 并写了长注释防再犯；bilibili 直播实测 VaapiVideoDecoder 稳定、GPU 进程 61 个解码 surface。更早的 mid-GDP 首帧理论作废
+
+## 2026-09-04 — EXPBUF 默认零拷贝
+
+- 换电源后重测：旧「EXPBUF+GPU import 挂 CMA/IOMMU」与欠功率电源同期。
+- 量产默认 `VIDIOC_EXPBUF` VPU capture；`V4L2SL_EXPBUF_EXPORT=0` 回退 GBM。
+- Chrome 先 Export 再解码 → claim-at-export + decode_submit 复用同一 index。
+- 系统 dri md5 `2f378b1a1d3391f5fe231e021f77be1e`；矩阵 PASS=32 FAIL=0。
+- 显示热路径不再 memcpy。码流 OUTPUT 拷和 GetImage CPU 读回仍在。
+- 明细：docs/EXPBUF-RETRY.md、docs/pipeline/expbuf.md。
 
 ## 2026-09-03 — GBM display surfaces (Chrome hw decode + visible picture)
 

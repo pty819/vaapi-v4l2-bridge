@@ -1,6 +1,6 @@
 # STATE.md — Project State
 
-Last verified: **2026-09-03** (matrix PASS=27 FAIL=0 incl. High10 + High422 + GBM display surfaces). Host: Orange Pi 5 NAS `192.168.1.21`, Armbian 26.8.3 resolute, kernel **7.1.8-edge-rockchip64**.
+Last verified: **2026-09-04** (matrix PASS=32 FAIL=0; EXPBUF default zero-copy on system dri, VPP 8 unique scale hashes). Host: Orange Pi 5 NAS `192.168.1.21`, Armbian 26.8.3 resolute, kernel **7.1.8-edge-rockchip64**.
 
 Living ops notes: [HANDOFF.md](HANDOFF.md). Desktop apps: [APPS.md](APPS.md). Codec table: [README.md](README.md).
 
@@ -38,6 +38,36 @@ Chrome `FillProfileInfo_Locked` attrib query is implemented (`vaQueryConfigAttri
 - **AV1 aomenc 2-pass lossless+intrabc clip (ffmpeg VA)** — not bit-exact. Kernel accepts the fill (0 DQBUF errors); 30/60 framemd5 mismatch from shown frame 29. The clip never sets `allow_intrabc` (IntraBC is KEY/INTRA_ONLY-only; `--enable-intrabc` was accepted). Same class as other ffmpeg raw-tile refresh-heuristic edges. A 10-frame all-intra IntraBC probe was 10/10. See verification coverage 2026-09-04.
 - **Vendor BSP / MPP** — out of scope (mainline only)
 
+
+## 2026-09-04 — EXPBUF default zero-copy (dc55d4d, shipped)
+
+The 09-02 “EXPBUF + panthor import hangs CMA/IOMMU” ban coincided with an
+undersized PSU (since replaced). After the swap, EXPBUF of a decoded VPU
+capture buffer is the **shipping default**.
+
+- `v4l2sl_expbuf_export_wanted()` returns 1 unless `V4L2SL_EXPBUF_EXPORT=0`.
+- `pull_capture` sets `has_pic` / `buf_index` / `cap_view` and does **not**
+  `gbm_surface_upload`.
+- Chrome exports the VA pool **before** the first decode (`buf_index=-1`):
+  claim a capture slot at first Export; `decode_submit` reuses that index;
+  `begin_picture` does not recycle the slot while EXPBUF is on.
+- GetImage reads `surf->cap_view` (ffmpeg surfaces are not in
+  `render_targets`). VPP GetImage prefers `cpu_ptr` over the empty
+  create-time memfd (`be1589c`) — matrix VPP_OK used to grep the log only.
+- System dri `/usr/lib/aarch64-linux-gnu/dri/v4l2stateless_drv_video.so`
+  md5 `2f378b1a1d3391f5fe231e021f77be1e` (HEAD `cbcead7`). GBM backup
+  `v4l2stateless_drv_video.so.gbm-20260904-1713`.
+- Verified: lab 8× EXPBUF exact + HOLD_EXACT; ffmpeg H.264/HEVC/AV1 MATCH;
+  Chrome local 1080p 22× EXPBUF, 0 GBM upload, VaapiVideoDecoder, canvas
+  avg=123; Bilibili live 60s 23× EXPBUF, canvas 58–90; matrix
+  **PASS=32 FAIL=0**, VPP 8 unique hashes. Host stayed up.
+
+Still copied: compressed bitstream into OUTPUT slots; vaGetImage / VPP
+CPU readback (VA-API contract). Display-path capture→GBM memcpy is gone.
+
+Narrative ladder: [docs/EXPBUF-RETRY.md](docs/EXPBUF-RETRY.md). Sphinx:
+pipeline/expbuf.
+
 ## 2026-09-03 GBM display surfaces — Chrome hardware decode WITH picture (f53f3f1..452de04)
 
 Chrome `VaapiVideoDecoder` (GL backend, zero-copy) now hardware-decodes AND
@@ -45,11 +75,13 @@ shows the picture on live.bilibili.com 1080p (verified: `VaapiVideoDecoder`
 in media-internals, canvas drawImage avg ~74/255 non-black, zero
 eglCreateImage errors, GPU process holds rkvdec).
 
-How it works (`src/v4l2stateless_gbm.c`):
+How it worked (`src/v4l2stateless_gbm.c`) — **this memcpy path is the
+2026-09-04 opt-out**, not the shipping default:
 
-- Every exportable surface gets a driver-owned **linear GBM bo** on
-  `/dev/dri/renderD128` (panthor shmem — ordinary system memory; the VPU/CMA
-  buffers are still never exported, the EXPBUF chip-bug ban is untouched).
+- Every exportable surface got a driver-owned **linear GBM bo** on
+  `/dev/dri/renderD128` (panthor shmem). Shipping default is now
+  `VIDIOC_EXPBUF` of the VPU capture buffer; `V4L2SL_EXPBUF_EXPORT=0`
+  restores this GBM copy.
 - `vaExportSurfaceHandle` returns the classic **single-object NV12 dmabuf**
   descriptor (Y@0, UV@stride*h) that Chromium requires
   (`num_objects != 1` is rejected upstream, TODO crbug.com/974438).
@@ -76,7 +108,9 @@ How it works (`src/v4l2stateless_gbm.c`):
   CMA!92memfd copy (the bo is the snapshot); vaGetImage / vaDeriveImage /
   VPP source refill the memfd from the bo on demand
   (`v4l2sl_surface_ensure_memfd`). Chrome's per-frame copy count: 2 !92 1
-  (the EXPBUF-ban floor). Guarded by the client's LAZY_EXACT second pass.
+  (one copy was the EXPBUF-ban floor at the time). Guarded by the client's
+  LAZY_EXACT second pass. **2026-09-04: that floor is gone** — default
+  EXPBUF has no capture→GBM memcpy.
 
 Out of scope (falls back to software, unchanged): 10-bit (NV15) would need
 an R16-bo P010 layout; Y210 unreachable (GR88 broken).

@@ -1,8 +1,11 @@
 # EXPBUF retry after PSU swap (2026-09-04)
 
-Isolated worktree: `.worktrees/expbuf-retry` on `experiment/expbuf-retry`.
-**Does not change the shipping driver.** Shipping path still copies
-CAPTURE → GBM and never `VIDIOC_EXPBUF`s VPU buffers.
+Isolated worktree was `.worktrees/expbuf-retry` on `experiment/expbuf-retry`.
+**Shipped as default** (`dc55d4d`, HEAD `cbcead7`). Opt out with
+`V4L2SL_EXPBUF_EXPORT=0`. GBM copy remains the ioctl-fail fallback.
+The sections below are the experiment log; they still say “not shipped”
+where that was true *that hour*. Phase 5 and the post-review e2e are the
+current state.
 
 ## Why retry
 
@@ -140,7 +143,7 @@ Bilibili live `https://live.bilibili.com/22957791` ~75s:
 - canvas avg 63–140, 1920×1080, currentTime 20→78, paused=false
 - host alive (~5:45). dri `.so` still 2026-09-04 17:13 (GBM shipping).
 
-**Not shipped.** Do not `sudo cp` dri or merge master until asked.
+**Then not shipped** (Phase 4 hour). Phase 5 merged and installed.
 
 
 ## Phase 5 — shipping default (2026-09-04)

@@ -6,7 +6,7 @@ flowchart LR
   S --> E[vaExportSurfaceHandle]
   S --> D[vaDeriveImage]
   S --> G[vaGetImage]
-  E --> C[Chrome GLES 零拷贝]
+  E --> C[Chrome GLES EXPBUF 零拷贝]
   D --> F[Firefox / 部分 VA 客户端]
   G --> FF[ffmpeg hwdownload]
 ```
@@ -22,6 +22,8 @@ flowchart LR
 - 第一次 VA 失败会缓存到进程退出。换 `.so` 后要重启实例
 - 杀进程只用 SIGTERM。`gc-dbg` 是主 profile 的 bind mount，先 `mount | grep`
   再声称丢失
+- 默认 Export = VPU `VIDIOC_EXPBUF`。ioctl_interpose 应看到
+  `PRIME_FD_TO_HANDLE target=/dmabuf:`，不是 `memfd:v4l2sl-surf`
 
 发行版 Chromium 走原生 V4L2，**不会**加载本 `.so`。看 gpu-process 的
 maps：出现 `v4l2stateless_drv_video.so` 才是这条桥。
@@ -36,6 +38,7 @@ ffmpeg -hwaccel vaapi -hwaccel_output_format vaapi \
 ```
 
 没有 `hwdownload` 的 framemd5 可能是软解。High10 用 `format=p010le`。
+GetImage 读 capture mmap（`cap_view`），不是空的 create-time memfd。
 
 B 站下载的 BILIAV1 文件走这条会花：ffmpeg 只交裸 tile，VA 没有
 `refresh_frame_flags`。网页 Chrome 交 OBU span，不受影响。详见 README。

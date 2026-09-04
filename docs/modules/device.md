@@ -37,21 +37,35 @@ HEVC/H.264 High10 常见：先按 NV12 建队列，SPS 来了再 NV15。
 
 见 {doc}`/pipeline/decode`。CAPTURE **禁止**放进 request。
 
+EXPBUF 模式下若 `current_surface->buf_index >= 0`（Chrome 已经
+claim-at-export），**复用该 index**，不再从 free 池 pop 新槽。
+
 超时或 QUEUE 失败必须 `v4l2sl_decode_reset`，不能只把 index push
 回去——内核还握着那些 buffer，再 QBUF 会 EBUSY 或用错槽。
 
 ## pull_capture
 
-1. mmap 该 CAPTURE index
-2. 若 `surf->gbm_bo`：`v4l2sl_gbm_surface_upload`，`last_writer = BO`，
-   `has_pic = 1`
-3. 否则 grow memfd + memcpy，`last_writer = MEMFD`，`has_pic = 1`
-4. 记下 `stride` / `aligned_h` / `cap_fourcc`
+默认（EXPBUF）：
 
-GBM 上传失败会打日志并回退 memfd，帧不能丢（capture 马上要回收）。
+1. mmap 该 CAPTURE index
+2. 置 `has_pic` / `buf_index` / 几何 / `cap_view = src`
+3. **不** `gbm_surface_upload`，**不** memfd memcpy
+4. `last_writer = MEMFD`（GetImage 走 cap_view，不是空 memfd）
+
+`V4L2SL_EXPBUF_EXPORT=0` 或 EXPBUF 失败才：
+
+1. 若 `surf->gbm_bo`：`v4l2sl_gbm_surface_upload`，`last_writer = BO`
+2. 否则 grow memfd + memcpy，`last_writer = MEMFD`
+
+GBM 上传失败会打日志并回退 memfd，帧不能丢。
 
 ## 导出
 
-`v4l2sl_surface_fill_prime`：memfd 的单 object 描述符（软路径）。
-GBM 版在 gbm.c。`v4l2sl_fill_prime_layers` 是两者共用的填表函数
-（SEPARATE_LAYERS vs 合并层）。
+`v4l2sl_claim_capture_for_export`：Chrome 在解码前 Export 时，
+ensure_capture + pop 空闲槽绑到 surface。不要把整个 Chrome 池
+（~75MB）一次性 mmap。
+
+`vaExportSurfaceHandle`：已 claim 则 `VIDIOC_EXPBUF` 填 PRIME NV12；
+ioctl 失败回退 `v4l2sl_surface_fill_prime_gbm`。
+
+`v4l2sl_fill_prime_layers` 是 EXPBUF / GBM / memfd 共用的填表函数。

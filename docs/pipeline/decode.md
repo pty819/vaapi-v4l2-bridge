@@ -7,22 +7,25 @@
 sequenceDiagram
   participant App
   participant Front as v4l2stateless.c
-  participant Tx as *_translate
+  participant Tx as translate
   participant Dev as device.c
-  participant VPU as /dev/videoN
+  participant VPU as videoN
   App->>Front: vaBeginPicture(surface)
+  Note over Front: EXPBUF 开启时不把已 claim 的 capture index 还池
   Front->>Front: current_surface, timestamp
   App->>Front: vaRenderPicture(params)
-  Front->>Front: pending_buffers[]
+  Front->>Front: pending_buffers
   App->>Front: vaEndPicture
-  Front->>Tx: h264/hevc/av1/vp8/mpeg2_translate
-  Tx->>Tx: collect + fill v4l2_ctrl_*
+  Front->>Tx: codec_translate
+  Tx->>Tx: collect + fill v4l2_ctrl
   Tx->>Dev: ensure_capture + STREAMON
   Tx->>Dev: memcpy OUTPUT + S_EXT_CTRLS
   Tx->>Dev: decode_submit
+  Note over Dev: EXPBUF 复用已 claim 的 capture index
   Dev->>VPU: QBUF OUT+CAP, QUEUE, poll, DQBUF
   Dev-->>Tx: done_cap index
-  Tx->>Dev: pull_capture snapshot
+  Tx->>Dev: pull_capture
+  Note over Dev: EXPBUF 只记账 cap_view，不 memcpy GBM
   Tx-->>Front: VA_STATUS_SUCCESS
   App->>Front: vaSyncSurface (Ready)
   App->>Front: Export 或 GetImage
@@ -32,7 +35,8 @@ sequenceDiagram
 
 - 找不到 surface → `INVALID_SURFACE`
 - 该 surface 仍挂着 `buf_index`：
-  - 非 AV1 模型：push 回 capture 池，然后 `buf_index = -1`
+  - **EXPBUF 开启**：留下 index（Chrome 还握着该槽的 dma-buf），不清
+  - 非 AV1 模型且 EXPBUF 关闭：push 回 capture 池，然后 `buf_index = -1`
   - AV1 `model_active`：只清 `buf_index`，**不** push（内核 DPB 还指着它）
 - memfd 保留（DRM-PRIME 客户端要稳定 fd）
 - 没有 `request_fd` 就 `MEDIA_IOC_REQUEST_ALLOC` 一次，之后每帧 REINIT
@@ -59,8 +63,9 @@ fd < 0    → stub：标 Ready 返回成功（无设备时的测试路径）
    STREAMOFF + S_FMT + REQBUFS，并 `v4l2sl_av1_dpb_model_reset`
 5. 尚未 STREAMON 则两边 STREAMON
 6. pop OUTPUT 槽，memcpy 载荷
-7. `v4l2sl_decode_submit`
-8. `v4l2sl_surface_pull_capture`
+7. `v4l2sl_decode_submit`（EXPBUF 且 `current_surface->buf_index >= 0`
+   时复用该 capture 槽，不 pop 新的）
+8. `v4l2sl_surface_pull_capture`（EXPBUF：记账 `cap_view`；opt-out：GBM/memfd 拷）
 9. AV1：`av1_release_unrefd`（仅 `model_active`）
 
 AV1 的 grain+frame+tile-group 是 **一次** `S_EXT_CTRLS`，且发生在

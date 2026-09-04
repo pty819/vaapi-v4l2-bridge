@@ -43,8 +43,8 @@ flowchart LR
 
 - `VADecPictureParameterBuffer*` → `v4l2_ctrl_*`
 - slice / tile payload → OUTPUT 平面
-- 解码完成的 CAPTURE → surface 快照（GBM 或 memfd）
-- `vaExportSurfaceHandle` → 单 object NV12 dma-buf（**不是** VPU EXPBUF）
+- 解码完成的 CAPTURE → `cap_view`（EXPBUF 模式）或 GBM/memfd 快照
+- `vaExportSurfaceHandle` → 单 object NV12 dma-buf（**默认就是** VPU EXPBUF）
 
 ## 明确不是
 

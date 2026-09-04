@@ -66,7 +66,7 @@ AV1 同样：`VADecPictureParameterBufferAV1` + 每 tile 一条 slice param + �
 | API | 语义 | 谁用 | 本仓库 |
 |---|---|---|---|
 | `vaGetImage` / `vaDeriveImage` | CPU 可读的字节（可转换 fourcc） | ffmpeg `hwdownload`、Firefox 部分路径 | memfd + `format.c`（NV15→P010 等） |
-| `vaExportSurfaceHandle` | dma-buf 描述符给 GPU import | Chrome 零拷贝 GL | GBM bo，**仅 NV12**，`num_objects==1` |
+| `vaExportSurfaceHandle` | dma-buf 描述符给 GPU import | Chrome 零拷贝 GL | 默认 VPU EXPBUF，**仅 NV12**，`num_objects==1`；GBM 是 `=0` 回退 |
 
 Chrome 几乎不 GetImage。导出失败 → 整段会话改走软解（它会缓存第一次 VA 失败）。
 

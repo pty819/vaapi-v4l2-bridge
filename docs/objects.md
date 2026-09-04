@@ -30,6 +30,7 @@ classDiagram
   class v4l2sl_surface {
     has_pic
     buf_index
+    cap_view
     memfd / gbm_bo / cpu_ptr
     last_writer
   }
@@ -63,9 +64,9 @@ config **不打开**设备。打开发生在 `vaCreateContext`。
 - ID：空闲栈弹出，否则 `++next_surface_id`，永不越过 `V4L2SL_MAX_SURFACES`
 - **必须**写 `surface->surface_id = id`（calloc 零曾让 AV1
   `buf_owner[]` 全指向 surface 0）
-- `buf_index = -1`，`memfd_fd = -1`，`cpu_ptr` 懒分配
+- `buf_index = -1`，`memfd_fd = -1`，`cpu_ptr` 懒分配，`cap_view = NULL`
 - 立刻 `v4l2sl_surface_alloc_export_fd` 做 memfd，让 DRM-PRIME 客户端在
-  第一帧之前就有稳定 fd
+  第一帧之前就有稳定 fd（GBM 回退 / Derive 用；EXPBUF 热路径另 claim capture）
 
 销毁：从所有 context 的 `render_targets[]` 摘掉；非 AV1 模型把仍持有的
 capture index 还池；AV1 `model_active` 只清 `buf_owner`，不双释放。
@@ -86,6 +87,7 @@ capture index 还池；AV1 `model_active` 只清 `buf_owner`，不双释放。
 
 `vaBeginPicture` 把 `current_surface` 指到目标 surface，打时间戳
 `frame_count++ * 1000`（微秒，对齐 vb2 从 timeval 存的单位）。
+EXPBUF 开启时 **不** 把旧 capture index 还池——Chrome 还握着该槽的 fd。
 
 ## buffer
 

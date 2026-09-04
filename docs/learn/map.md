@@ -43,7 +43,7 @@ flowchart TB
 - **V4L2**：内核 *设备* API。头文件 `<linux/videodev2.h>`。摄像头、编解码器、scaler 都用它。
 - **Media controller**：V4L2 旁边的图 API（`/dev/media*`），描述 SoC 内部 pipeline；无状态解码的 **request fd** 从这里分配。
 - **DRM/KMS**：显示。GPU 提交、连接器、framebuffer。dma-buf 是它和 V4L2 交换内存的通行证。
-- **GBM**：DRM 上分配 buffer 的用户态库。Chrome 要的「能 import 的 NV12」就是一座 GBM bo。
+- **GBM**：DRM 上分配 buffer 的用户态库。本仓库的 GBM 路径是 EXPBUF 失败或 `V4L2SL_EXPBUF_EXPORT=0` 时的 R8 假 NV12 回退。Chrome 默认 import 的是 VPU `VIDIOC_EXPBUF` 的 dma-buf。
 
 这座桥站在 **L3**：对上假装是 Mesa 那种 `*_drv_video.so`，对下当一个守规矩的 V4L2 Request 客户端。
 
@@ -71,18 +71,24 @@ flowchart TB
 | `/dev/video2` | hantro VP8 / MPEG-2 | vp8.c / mpeg2.c |
 | `/dev/video3` | VEPU JPEG 编码 | jpeg.c |
 | `/dev/video0` | RGA scaler | vpp.c |
-| `/dev/dri/renderD128` | panthor GPU（GBM、libva DRM 显示） | gbm.c、vaInitialize |
+| `/dev/dri/renderD128` | panthor GPU（GBM 回退、libva DRM 显示） | gbm.c、vaInitialize |
 
 **探测**在 `v4l2stateless_probe.c`：扫 `/dev/video0..63` 的 OUTPUT fourcc，而不是写死 video 号。这是学 V4L2 的第一课——节点号不稳定，fourcc 才稳定。
 
-## 内存不能想当然
+## 内存：默认 EXPBUF，GBM 是回退
 
-RK3588 上 VPU 的 CAPTURE 往往在 **CMA**。把这块 buffer `EXPBUF` 给 GPU import，这颗芯片会 IOMMU 卡死。所以桥的合同是：
+RK3588 上 VPU 的 CAPTURE 往往在 **CMA**。2026-09-02 曾经认为把这块
+buffer `EXPBUF` 给 GPU import 会 IOMMU 卡死，量产改走 memcpy。
+那次挂机与欠功率电源同期。换电源后（2026-09-04）EXPBUF 是
+**默认** 显示路径：
 
-- VPU 解完 → 用户态 **memcpy 一份** 到 GBM（给 Chrome）或 memfd（给 ffmpeg）
-- 永远不把 VPU 的 dma-buf 交给 EGL
+- VPU 解完 → `VIDIOC_EXPBUF` → Chrome EGL import 同一块 CMA
+- ffmpeg GetImage 读 capture mmap（`cap_view`），不经过 GBM
+- `V4L2SL_EXPBUF_EXPORT=0` 才 memcpy 进 GBM / memfd
 
-学 dma-buf 零拷贝时，记住：**零拷贝是优化，不是义务**；有的 SoC 上拷一次才是正确。
+学 dma-buf 零拷贝时，记住：**零拷贝是优化，不是义务**；这条路在这颗
+板、这个电源上验证过。挂了先查电源，再用 env 回退。详见 {doc}`memory`
+和 {doc}`/pipeline/expbuf`。
 
 ## 接下来读哪
 

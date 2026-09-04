@@ -5,7 +5,7 @@ Last verified **2026-09-04** on Orange Pi 5 (Armbian 26.8.3 resolute, kernel 7.1
 libva backend that translates VA-API decode to the Linux V4L2 Request API (stateless).
 Target: Rockchip RK3588 / Orange Pi 5 on **mainline** Armbian (no vendor BSP, no MPP).
 
-Applications that only speak VA-API (`ffmpeg -hwaccel vaapi`, VLC, Firefox, official Linux Chrome) can then use the VPU. Desktop wiring (Chrome wrapper, Firefox `user.js`, VLC `avcodec-hw`) is in [APPS.md](APPS.md). Since 2026-09-03 official Chrome hardware-decodes **and shows the picture** — zero-copy GL path over GBM-backed export surfaces.
+Applications that only speak VA-API (`ffmpeg -hwaccel vaapi`, VLC, Firefox, official Linux Chrome) can then use the VPU. Desktop wiring (Chrome wrapper, Firefox `user.js`, VLC `avcodec-hw`) is in [APPS.md](APPS.md). Official Chrome hardware-decodes **and shows the picture**. Since 2026-09-04 the zero-copy GL path is `VIDIOC_EXPBUF` of the VPU capture buffer (no capture→GBM memcpy). Opt out with `V4L2SL_EXPBUF_EXPORT=0`.
 
 Codecs:
 
@@ -132,7 +132,7 @@ All of them need `LIBVA_DRIVER_NAME=v4l2stateless` in the **graphical** environm
 
 | App | Extra |
 |---|---|
-| Official Chrome arm64 | Wrapper [`scripts/google-chrome-vaapi`](scripts/google-chrome-vaapi): render-node override, GPU-sandbox off, pure Wayland + ANGLE/GLES, Vulkan off, big-core pinning (`taskset 4-7` by default, `CHROME_PIN_CPUS` overrides); ZeroCopyGL must stay **enabled** — disabling it pushes VaapiVideoDecoder into the nonexistent ImageProcessor path and Chrome silently drops to FFmpeg software (details in [APPS.md](APPS.md)); hw decode + zero-copy picture verified 2026-09-03. Distro Chromium arm64 does **not** use this `.so`. |
+| Official Chrome arm64 | Wrapper [`scripts/google-chrome-vaapi`](scripts/google-chrome-vaapi): render-node override, GPU-sandbox off, pure Wayland + ANGLE/GLES, Vulkan off, big-core pinning (`taskset 4-7` by default, `CHROME_PIN_CPUS` overrides); ZeroCopyGL must stay **enabled** — disabling it pushes VaapiVideoDecoder into the nonexistent ImageProcessor path and Chrome silently drops to FFmpeg software (details in [APPS.md](APPS.md)); hw decode + EXPBUF zero-copy verified 2026-09-04. Distro Chromium arm64 does **not** use this `.so`. |
 | Firefox | [`scripts/firefox-vaapi-user.js`](scripts/firefox-vaapi-user.js) into the active profile. Use Mozilla's `.deb` repo, not Ubuntu's snap stub. |
 | VLC | `avcodec-hw=vaapi` in `vlcrc`. |
 
@@ -140,11 +140,19 @@ Full steps, checks, and caveats: **[APPS.md](APPS.md)**.
 
 ## Status highlights (2026-09-04)
 
+- **EXPBUF default zero-copy (`dc55d4d`, 2026-09-04)**: Chrome display path
+  `VIDIOC_EXPBUF`s the VPU capture buffer (single-object NV12). `pull_capture`
+  no longer memcpy's into a GBM bo. Chrome claims a capture slot at first
+  Export (pool export happens *before* decode) and `decode_submit` reuses that
+  index. Lab + ffmpeg MATCH + Chrome local 1080p (22× EXPBUF) + Bilibili live
+  (23× EXPBUF) + matrix **PASS=32 FAIL=0**. Opt out `V4L2SL_EXPBUF_EXPORT=0`.
+  GetImage prefers `cap_view` then VPP `cpu_ptr` over the empty create-time
+  memfd (`be1589c`). See [docs/EXPBUF-RETRY.md](docs/EXPBUF-RETRY.md).
 - **AV1 copy-out shipped (`8b5ea0c`)**: WebCodecs/MSE players queue one surface
   per buffered frame, which decoupled surface lifetime from capture-buffer usage
   and drained even the 40-slot pool in ~5s (silent HEVC fallback). Every decoded
-  frame is already snapshotted at `pull_capture` (GBM bo for display surfaces,
-  memfd otherwise), so the context now tracks slot→buffer with the same
+  frame is snapshotted at `pull_capture` (capture mmap / memfd; GBM only on
+  EXPBUF opt-out), so the context now tracks slot→buffer with the same
   `refresh_frame_flags` submitted to the kernel and returns a buffer the moment
   its slot is overwritten. The slot model is armed **only by the OBU-parse
   truth** — heuristic-flag streams keep the legacy release, because recycling
@@ -166,7 +174,7 @@ Full steps, checks, and caveats: **[APPS.md](APPS.md)**.
 
 - **AV1 re-advertised (branch `feat/av1-readvertise`)**: the profile is back in `vaQueryConfigProfiles`; the historical hang was PSU undersizing (since replaced), not kernel instability — 15x vainfo, 5 back-to-back decodes and two full matrices ran with zero runtime dmesg errors. Two Chrome-only incompatibilities fixed along the way: (1) the kernel wants **raw tile data** in the OUTPUT buffer while Chrome submits the whole OBU span with per-tile offsets — the driver now extracts tile payloads and rebases the offsets; (2) with `uniform_tile_spacing`, `width/height_in_sbs_minus_1` are **derived** from the mi-col/row grid (VA clients leave them zero there; the old unconditional copy contradicted the grid and the kernel rejected every frame). Chrome verified on a local AV1 file (zero DQBUF errors, correct picture) and on YouTube (AV1 segments during ABR adaptation decoded clean; 4500+ pictures, zero decode errors).
 - **Stability round `27e8b7a` (2026-09-02)**: decode timeouts now `STREAMOFF` + rebuild both queues (a wedged job is never left in the kernel), every stateful vtable entry takes the driver lock, surface IDs recycled with bounds checks, probe results cached per boot (`v4l2stateless-probe.cache`, `V4L2SL_PROBE_NOCACHE=1` bypasses), capture `REQBUFS` degrades 24→8→4 under CMA pressure.
-- **GBM display surfaces `f53f3f1..452de04`**: Chrome `VaapiVideoDecoder` hardware-decodes with a visible picture (bilibili 1080p live; canvas non-black, zero `eglCreateImage` errors, GPU process holds rkvdec). Platform constraints and the VPP-output-surface export model are documented in [STATE.md](STATE.md).
+- **GBM display surfaces `f53f3f1..452de04`**: the 2026-09-03 path that first made Chrome show a picture (memcpy capture→R8 GBM bo). **Superseded 2026-09-04** by default EXPBUF; GBM remains the opt-out / ioctl-fail fallback. See [STATE.md](STATE.md) and [docs/EXPBUF-RETRY.md](docs/EXPBUF-RETRY.md).
 - **Audit-driven refactor merged `c359f91`** (full audit: [docs/refactor-audit-2026-09-03.md](docs/refactor-audit-2026-09-03.md)): P0–P2 done (terminate leak 11MB/session → 0, `create_surfaces` failure path, VPP region clamp), P3 clusters 1-6 and P4 items 1-5 landed — decode-path driver ioctls measured ~12 → ~7 per frame ([docs/perf-baseline-2026-09.md](docs/perf-baseline-2026-09.md)), lazy `cpu_ptr` saves 60–240MB per pool. The deferred tail (P3 clusters 7-11 + P4 items 6-8: persistent per-surface memfd mappings, persistent VPP/JPEG M2M queues, 64-byte stride alignment, shared Annex-B / buffer-collection / PRIME-layer / probe-walk helpers) landed the same night — decode path holds at ~7 ioctls/frame; browser-verified 8-bit HEVC hw decode came out of the 10-bit investigation. C12 (AV1 `update_grain`) stays blocked: the field is absent from libva 2.23.0 **and** upstream master.
 
 ## License

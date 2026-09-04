@@ -28,13 +28,17 @@ meson configure builddir -Dbuildtype=release -Doptimization=3 -Db_ndebug=if-rele
 | `test_vp8_mpeg2_fill` | header 字段 vs 金样 |
 | `test_format` | NV15/NV20 转换 |
 | `test_export_recapture` | export 后池 index 不泄漏 |
-| `gbm_probe` | 本机是否允许 R8 假 NV12 那套 |
+| `gbm_probe` | 本机是否允许 R8 假 NV12 那套（GBM 回退） |
+| `va_export_client` | EXPBUF/GBM 导出 vs GetImage / EGL |
+| `va_expbuf_hold` | 持 EXPBUF fd 再解后续 H.264 图（DPB live） |
+| `expbuf_ladder` | 空闲 capture 的 PRIME / GBM / EGL 梯子 |
 
 ## 矩阵覆盖（主机）
 
 H.264（含 High10、High422 8/10）、HEVC Main/Main10/WPP/4K、AV1
 （aom-8、aom-49、svt-32、4K、default）、VP8、MPEG-2 vs GST、JPEG、
-VPP、vainfo。绿状态 **PASS=32 FAIL=0**。
+VPP、vainfo。绿状态 **PASS=32 FAIL=0**（2026-09-04，EXPBUF 默认，
+VPP 8 个不同 scale hash）。
 
 AV1 SVT 用例只解 **前 32 帧**。GOP2 的启发式 bug 它看不见——全片
 hw-vs-sw 才是完整验证器。

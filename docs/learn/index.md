@@ -34,7 +34,7 @@ flowchart TB
   APP --> LIBVA --> DRV
   DRV -->|Request API 或 M2M| V4L
   DRV -->|request fd| MC
-  DRV -->|GBM / dma-buf 显示| DRM
+  DRV -->|EXPBUF dma-buf 显示| DRM
   V4L --> VPU
   MC --> VPU
 ```
@@ -43,7 +43,7 @@ flowchart TB
 
 1. **VA-API** 是给「解码器用户」的稳定 C API：config / context / surface / buffer，一次 picture 三拍（Begin / Render / End）。
 2. **V4L2** 是给「视频设备」的 ioctl API：QUEUE 一块内存进去，DEQUEUE 一块出来；无状态解码还要 media request 把「这一帧的控制块」和「这一帧的码流」绑死。
-3. **这座桥** 把 1 的一次 `vaEndPicture` 变成 2 的一次 `QUEUE` + `poll` + `DQBUF`，再把像素拷到 VA surface 的 backing 上，好让 Chrome 用 GBM、ffmpeg 用 GetImage。
+3. **这座桥** 把 1 的一次 `vaEndPicture` 变成 2 的一次 `QUEUE` + `poll` + `DQBUF`。Chrome 用 `VIDIOC_EXPBUF` 拿走 VPU dma-buf；ffmpeg 用 GetImage 读 capture mmap。
 
 ## 和本站其它栏目的关系
 
@@ -51,5 +51,6 @@ flowchart TB
 |---|---|
 | 本学习路径 | 两套栈的概念 + 和代码的对照 |
 | [总览 / 流水线](../overview.md) | 这座桥自己怎么跑 |
+| [EXPBUF 零拷贝](../pipeline/expbuf.md) | 显示热路径（默认，无 capture→GBM memcpy） |
 | [源码模块](../modules/index.md) | 每个 `.c` 文件干什么 |
 | 仓库 README / STATE | 能力表、验证记录（会过时的数字以那里为准） |

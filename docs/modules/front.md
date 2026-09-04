@@ -31,13 +31,16 @@ open**，队列不共享。
 |---|---|
 | `vaQuerySurfaceAttributes` | ffmpeg 发现 NULL 会拒初始化。报告 NV12（及 P010 等） |
 | `vaCreateSurfaces2` | Chrome 走这条；必须在 decode 前给出 export fd |
-| `vaBeginPicture` | 见 {doc}`/pipeline/decode` |
+| `vaBeginPicture` | EXPBUF 开启时不回收已 claim 的 capture 槽；见 {doc}`/pipeline/decode` |
 | `vaEndPicture` | JPEG/VPP/video 三路 |
 | `vaSyncSurface` | 只查表，decode 已完成 |
-| `vaDeriveImage` | 映射 memfd；`has_pic` 门槛；borrow 计数 |
-| `vaGetImage` | 调用 format.c 转换 |
-| `vaExportSurfaceHandle` | 优先 GBM；失败则 memfd PRIME（Chrome 会当软路径） |
+| `vaDeriveImage` | 映射 memfd 或 cap_view；`has_pic` 门槛；borrow 计数 |
+| `vaGetImage` | 优先 `cap_view`，其次 VPP `cpu_ptr`，再 memfd；format.c 转换 |
+| `vaExportSurfaceHandle` | 默认 EXPBUF VPU capture；失败或 `=0` 才 GBM PRIME |
 | `vaTerminate` | 拆 context、surface、config；修过 11MB/会话泄漏 |
+
+`context_owning_capture`：先 `render_targets`，再 `cap_view`/`buf_index`，
+再第一个活着的 VLD context（Chrome 在解码前 Export）。
 
 ## 不要放进这个文件的东西
 

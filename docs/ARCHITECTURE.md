@@ -9,8 +9,9 @@ Read this when you need to know **which `.c` file owns which job**, how a
 VA-API call turns into a V4L2 request, and why Chrome and ffmpeg do not
 share a pixel path.
 
-Last aligned with the tree at `2d24a13` (2026-09-04). File names below are
-the source of truth — if a sentence and the file disagree, the file wins.
+Last aligned with the tree at `cbcead7` (2026-09-04, EXPBUF default).
+File names below are the source of truth — if a sentence and the file
+disagree, the file wins.
 
 ---
 
@@ -134,8 +135,10 @@ Also owns:
 - `v4l2sl_ensure_capture` — mid-stream renegotiate (`STREAMOFF` / `S_FMT`
   / `REQBUFS`) when resolution, bit-depth or chroma changes. Resets the
   AV1 DPB model because STREAMOFF drops kernel references.
-- `v4l2sl_surface_pull_capture` — mmap the finished CAPTURE buffer and
-  **snapshot** it (GBM bo if the surface is a display surface, else memfd).
+- `v4l2sl_surface_pull_capture` — mmap the finished CAPTURE buffer.
+  EXPBUF default: set `has_pic` / `buf_index` / `cap_view`, **no** GBM
+  or memfd memcpy. Opt-out (`V4L2SL_EXPBUF_EXPORT=0`): snapshot into a
+  GBM bo (display) or memfd.
 - Capture / output pool accounting.
 
 **Default:** `VIDIOC_EXPBUF` of the VPU capture buffer (Chrome zero-copy).
@@ -160,11 +163,12 @@ NV12 copies, NV15→P010, NV16→YUY2, NV20→YUY2/Y210, stride/sizeimage
 math, VA fourcc ↔ V4L2 fourcc. Used by `vaGetImage` / `vaDeriveImage`,
 not by the zero-copy GL path.
 
-### 4.5 Display copy (`src/v4l2stateless_gbm.c`)
+### 4.5 Display copy (`src/v4l2stateless_gbm.c`) — opt-out / fallback
 
-Chrome’s zero-copy path. Each exported surface gets a **linear GBM bo**
-on `/dev/dri/renderD128` (panthor shmem — ordinary system memory, not
-CMA).
+Chrome’s **default** zero-copy path is EXPBUF (section 7 / 9).
+This file is the GBM copy used when `V4L2SL_EXPBUF_EXPORT=0` or the
+EXPBUF ioctl fails. Each fallback surface gets a **linear GBM bo** on
+`/dev/dri/renderD128` (panthor shmem — ordinary system memory, not CMA).
 
 Constraints this file exists to satisfy:
 
@@ -178,8 +182,9 @@ Constraints this file exists to satisfy:
 **NV12 only.** Anything else (`NV15` / P010 / 4:2:2) returns failure and
 the client falls back; there is no R16/P010 bo path.
 
-`pull_capture` uploads VPU pixels into this bo. `vaExportSurfaceHandle`
-returns the bo’s fd via `v4l2sl_surface_fill_prime_gbm`.
+Opt-out `pull_capture` uploads VPU pixels into this bo.
+`vaExportSurfaceHandle` falls back to the bo’s fd via
+`v4l2sl_surface_fill_prime_gbm`.
 
 ### 4.6 Codec translators (one file per bitstream)
 
@@ -236,7 +241,7 @@ vaEndPicture
             QBUF OUTPUT (request) + QBUF CAPTURE (bare)
             QUEUE request, poll ≤ 3s, DQBUF both
             REINIT request (not close+realloc)
-        pull_capture → snapshot into GBM bo or memfd
+        pull_capture → cap_view (EXPBUF) or GBM/memfd snapshot (opt-out)
         AV1: maybe av1_release_unrefd (slot overwrite)
 
 vaSyncSurface
@@ -244,8 +249,8 @@ vaSyncSurface
     surface->status = Ready
 
 then the client either:
-    vaExportSurfaceHandle  → GBM dma-buf  (Chrome GL)
-    vaDeriveImage/GetImage → memfd map    (ffmpeg hwdownload)
+    vaExportSurfaceHandle  → EXPBUF dma-buf  (Chrome GL; GBM if =0)
+    vaDeriveImage/GetImage → cap_view / memfd (ffmpeg hwdownload)
 ```
 
 Failure policy that is easy to get wrong:
@@ -287,9 +292,9 @@ says which one has the freshest bytes:
 
 | Writer | Backing | Who produces it | Who consumes it |
 |---|---|---|---|
-| **BO** | GBM bo (R8, NV12 layout) | `pull_capture` upload, or `gbm_surface_sync` | Chrome `vaExportSurfaceHandle` |
-| **MEMFD** | grow-only memfd | `pull_capture` when there is no bo; or `ensure_memfd` refilling from the bo | `vaGetImage` / `vaDeriveImage` / VPP source |
-| **CPU** | `cpu_ptr` malloc | `vaPutImage`, VPP dest | JPEG encode source, VPP |
+| **BO** | GBM bo (R8, NV12 layout) | opt-out `pull_capture` upload, or `gbm_surface_sync` | Chrome Export when EXPBUF is off |
+| **MEMFD** | capture mmap (`cap_view`) or grow-only memfd | default `pull_capture`; or `ensure_memfd` | `vaGetImage` / `vaDeriveImage` / Chrome EXPBUF |
+| **CPU** | `cpu_ptr` malloc | `vaPutImage`, VPP dest | JPEG encode source, VPP, GetImage |
 
 `has_pic` means “a decoded snapshot exists”. After AV1 copy-out the
 capture **index** is released (`buf_index = -1`) but `has_pic` stays
@@ -366,9 +371,10 @@ Film grain + frame + tile-group go out in **one** request
           ┌────────────────┼────────────────┐
           ▼                ▼                ▼
  vaExportSurfaceHandle  vaDeriveImage   vaGetImage
-   GBM PRIME (NV12)     map memfd        convert + copy
+   EXPBUF PRIME (NV12)  cap_view/memfd   convert + copy
    Chrome zero-copy     Firefox          ffmpeg hwdownload
    num_objects == 1     native layout    NV15→P010 etc.
+   GBM only if =0
 ```
 
 Chrome: wrapper `scripts/google-chrome-vaapi` forces Wayland + ANGLE
@@ -449,11 +455,12 @@ until 2026-09-04.
                  request QUEUE / poll      S_FMT cached
                           │
                           ▼
-                 pull_capture snapshot
-                    ┌─────┴──────┐
-                    ▼            ▼
-              gbm.c (NV12)   memfd (any)
-              Chrome EGL     ffmpeg GetImage
+                 pull_capture
+                    ┌─────┴──────────────┐
+                    ▼                    ▼
+              EXPBUF dma-buf        cap_view / memfd
+              Chrome EGL            ffmpeg GetImage
+              (gbm.c if =0)
                     │
                     ▼
               format.c converters (P010 / YUY2) only on CPU path

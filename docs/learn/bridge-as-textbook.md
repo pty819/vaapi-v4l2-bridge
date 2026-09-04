@@ -19,7 +19,7 @@ ffmpeg -hwaccel vaapi -hwaccel_output_format vaapi \
 2. `vaCreateConfig(H264/HEVC/AV1)` → `cached_device()` 选出 `/dev/video*`
 3. `vaCreateContext` → `open` video+media，OUTPUT REQBUFS
 4. 每帧 Begin/Render/End → {doc}`vaapi` 三拍 + {doc}`request` QUEUE
-5. `hwdownload` → `vaGetImage` → {doc}`memory` 的 memfd 路径
+5. `hwdownload` → `vaGetImage` → {doc}`memory` 的 `cap_view` / memfd 路径
 
 把 `V4L2SL_DEBUG=1` 打开，日志里的 `opened /dev/video`、`renegotiate capture`、`AV1 frame` 就是这些步骤。
 
@@ -28,10 +28,12 @@ ffmpeg -hwaccel vaapi -hwaccel_output_format vaapi \
 同一座桥，`vaEndPicture` 之后走 `vaExportSurfaceHandle` 而不是 GetImage。读：
 
 - `v4l2sl_export_surface_handle`
-- `v4l2sl_surface_fill_prime_gbm`
-- `v4l2sl_gbm_surface_upload`（在 `pull_capture` 里）
+- `v4l2sl_claim_capture_for_export`（Chrome 在解码前 Export）
+- `v4l2sl_expbuf_export_wanted`（默认开，`=0` 回退 GBM）
+- `v4l2sl_surface_fill_prime_gbm`（回退路径）
 
-作业：用 `ioctl_interpose` 确认 fd 是 dmabuf 不是 memfd。再对比 {doc}`memory` 为什么不能 EXPBUF VPU。
+作业：用 `ioctl_interpose` 确认 fd 是 dmabuf 不是 memfd。对照
+{doc}`memory` 和 {doc}`/pipeline/expbuf`：默认 **就是** EXPBUF VPU。
 
 ## 作业 3 — 无状态控制块
 
@@ -50,6 +52,7 @@ AV1 更极端：`av1_fill_frame_params` + `av1_parse_hdr_refresh`。VA 缺
 - 哪个 fd 是 video，哪个是 request
 - CAPTURE QBUF 有没有 request_fd（应该没有）
 - FLAG_ERROR 时返回值如何变成 VA SUCCESS + Skipped
+- EXPBUF 模式下 `current_surface->buf_index >= 0` 时是否复用该槽
 
 对照内核文档 *stateless decoder*（`Documentation/userspace-api/media/v4l/dev-stateless-decoder.rst`）。
 
@@ -58,7 +61,8 @@ AV1 更极端：`av1_fill_frame_params` + `av1_parse_hdr_refresh`。VA 缺
 读 `av1_release_unrefd` 和 `vaBeginPicture` 里 `av1_model` 分支。画一张
 「CAPTURE index 的状态机」。然后解释：为什么 HEVC 24 槽够用、AV1
 WebCodecs 不够，却仍然不能把 HEVC 也改成 copy-out（证据：同负载 HEVC
-零错误，不必付 memcpy）。
+零错误，不必付 memcpy）。EXPBUF 热路径拿掉的是 **显示** memcpy，不是
+AV1 copy-out 那次快照。
 
 ## 作业 6 — 有状态对照
 
@@ -73,4 +77,4 @@ request、没有 S_EXT_CTRLS 每帧填 SPS。这就是同一颗 SoC 上第二套
 - UAPI：`include/uapi/linux/v4l2-controls.h` 搜 `STATELESS_AV1`、`STATELESS_H264`
 - media：`media-request-api.rst`
 
-本仓库不是这两套栈的规范实现，是 **RK3588 主线上能跑 Chrome 的那条接缝**。规范在上游文档；接缝上的谎言（R8 假 NV12、禁止 EXPBUF、AV1 sequence 必须全局）只在这座桥和 {doc}`../handbook/invariants` 里写全。
+本仓库不是这两套栈的规范实现，是 **RK3588 主线上能跑 Chrome 的那条接缝**。规范在上游文档；接缝上的产品约束（R8 假 NV12 回退、默认 EXPBUF、AV1 sequence 必须全局）只在这座桥和 {doc}`../handbook/invariants` 里写全。

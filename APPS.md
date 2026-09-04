@@ -139,16 +139,15 @@ frames + GPU process holds the rkvdec node + zero `eglCreateImage` errors.
 MSE-level codec shim (1080p60) both held `/dev/video4` with zero pool
 errors — the DPB-model copy-out release keeps the capture pool bounded.
 
-### Zero-copy display path (GBM surfaces, since 2026-09-03)
+### Zero-copy display path (EXPBUF, since 2026-09-04)
 
 Chrome's zero-copy GL path (default `AcceleratedVideoDecodeLinuxZeroCopyGL`)
-works end to end. The driver exports every Chrome-visible surface as a
-driver-owned **linear GBM bo** on `/dev/dri/renderD128` — a real
-single-object NV12 dma-buf (Y@0, UV@stride*h; Chromium rejects
-`num_objects != 1`) — while the VPU/CMA buffers are still never exported
-(the EXPBUF chip-bug ban is untouched). Verified live on bilibili 1080p:
-`VaapiVideoDecoder`, zero `eglCreateImage` errors, non-black frames,
-~44 `MEDIA_REQUEST_IOC_QUEUE`/s on rkvdec.
+works end to end. The driver `VIDIOC_EXPBUF`s the VPU capture buffer and
+returns a single-object NV12 dma-buf (Y@0, UV@stride*aligned_h; Chromium
+rejects `num_objects != 1`). There is **no** capture→GBM memcpy on this
+path. `V4L2SL_EXPBUF_EXPORT=0` restores the 2026-09-03 GBM R8 copy.
+Verified 2026-09-04: local 1080p 22× EXPBUF + bilibili live 23× EXPBUF,
+`VaapiVideoDecoder`, non-black canvas, 0 GBM upload.
 
 Do **not** disable `AcceleratedVideoDecodeLinuxZeroCopyGL`: that pushes
 VaapiVideoDecoder into the ImageProcessor output path, which does not exist
@@ -161,16 +160,19 @@ Operating notes:
 - **Restart Chrome after updating the driver `.so`.** Same failure cache as
   above: a session that saw a broken driver stays on software until
   relaunch, even after you fix and reinstall the driver.
-- **10-bit / 4:2:2 content decodes in software.** The GBM export is
-  NV12-only for now (10-bit would need an R16-bo P010 layout). 8-bit 4:2:0
-  H.264 / HEVC / VP8 goes through the VPU.
-- GBM allocation follows `V4L2SL_RENDER_NODE` (default
+- **10-bit / 4:2:2 content decodes in software in Chrome.** EXPBUF/GBM
+  export is NV12-only (10-bit would need a P010 layout Chrome's Linux VA
+  path does not consume). 8-bit 4:2:0 H.264 / HEVC / VP8 / AV1 goes
+  through the VPU. ffmpeg GetImage still bit-exacts High10/Main10.
+- GBM is the **fallback** (`V4L2SL_EXPBUF_EXPORT=0` or EXPBUF ioctl
+  fail). Allocation follows `V4L2SL_RENDER_NODE` (default
   `/dev/dri/renderD128`). A failed GBM init degrades export to
   `VA_STATUS_ERROR_UNIMPLEMENTED` (clean software fallback), never breaks
   the decode path.
 - Black-video triage: `LD_PRELOAD` `tests/ioctl_interpose.so` into Chrome
-  and read stderr — `PRIME_FD_TO_HANDLE target=/dmabuf:` is the good path;
-  `target=/memfd:v4l2sl-surf` means the memfd export lie came back.
+  and read stderr — `PRIME_FD_TO_HANDLE target=/dmabuf:` is EXPBUF (or
+  GBM fallback); `target=/memfd:v4l2sl-surf` means the memfd export lie
+  came back.
 - **Chrome is pinned to the big cores (4-7)** by the wrapper
   (`taskset -c 4-7`): this kernel has no EAS, so the plain scheduler was
   spreading Chrome's frame-deadline threads (GPU process, video renderer)
