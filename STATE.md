@@ -277,3 +277,23 @@ A 15+ min logged-in soak answered "is AV1 normal?" precisely:
   live capture buffers bounded by kernel DPB (~10) instead of player queue.
 - Current shipped state: correct decode + graceful HEVC fallback when the
   prebuffer burst exceeds the 40-slot pool. Matrix PASS=32.
+
+## 2026-09-04 (later) — YouTube confirms: the pool death is client-agnostic
+
+Forcing YouTube onto av01 (hide avc1/vp9/vp8 at the MediaSource.isTypeSupported
+level ONLY — hiding canPlayType too trips YouTube's "browser cannot play" gate)
+reproduces the identical startup death on the MSE/<video> path: av01 selected,
+3x no-free-capture, playback never starts (t=0 across 90s). Both with emulated
+60 Mbps and on the real ~3 Mbps path — the startup burst is bounded in FRAMES
+(a low-bitrate av01.0.01M rendition dies exactly like 1080p), so network speed
+does not save it. YouTube, unlike bilibili, did not fall back to another codec
+within the observation window — a stuck spinner instead.
+
+Practical exposure for daily use: YouTube serves VP9 by default (software
+decode, unaffected); AV1 death only bites when their server-side rollout hands
+this client av01. bilibili falls back to HEVC cleanly. The copy-out
+architecture noted above is the fix for both.
+
+(Also confirmed this morning: the overnight "Chrome graphical startup
+deadlock" was the router's fake-ip DNS blackholing Google endpoints — with the
+proxy path recovered, plain Chrome starts in 1s with no flags.)
