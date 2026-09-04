@@ -1,5 +1,8 @@
 # 测试与安装
 
+默认 **release / `-O3 -DNDEBUG`**（`meson.build` 的 `buildtype=release`）。
+不要用 `meson setup builddir --buildtype=debug` 来装系统 `.so`。
+
 ```
 meson setup builddir
 ninja -C builddir
@@ -7,6 +10,12 @@ sudo cp -f builddir/v4l2stateless_drv_video.so \
   /usr/lib/aarch64-linux-gnu/dri/
 export LIBVA_DRIVER_NAME=v4l2stateless
 bash tests/run_full_matrix.sh
+```
+
+旧 `builddir` 若仍是 `debug`（`optimization=0`），先：
+
+```
+meson configure builddir -Dbuildtype=release -Doptimization=3 -Db_ndebug=if-release
 ```
 
 矩阵加载 **已安装** 的 `.so`，不是 `builddir/` 里那份。

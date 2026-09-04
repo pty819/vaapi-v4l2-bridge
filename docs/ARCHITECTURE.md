@@ -36,7 +36,10 @@ It is **not**:
 
 meson builds one static library `libv4l2sl_core` from every `src/*.c`,
 then `link_whole`s it into the `.so`. Tests link the same static lib so
-codec translators cannot be dropped as “unused”.
+codec translators cannot be dropped as “unused”. Default **buildtype is
+`release` (`-O3 -DNDEBUG`)** — see README Build / install. A leftover
+`builddir` created before that pin may still be meson `debug` (`-O0 -g`);
+reconfigure it or you will keep installing an unoptimized `.so`.
 
 ---
 
@@ -399,7 +402,7 @@ path. Do not set `media.hardware-video-decoding.force-enabled` (VP9 /
 | `tests/ioctl_interpose.c` | `LD_PRELOAD` to see whether Chrome imported a GBM dmabuf or a memfd. |
 | `scripts/google-chrome-vaapi` | Installed as `/usr/local/bin/google-chrome-stable`. |
 
-Install loop that the matrix actually tests:
+Install loop that the matrix actually tests (release / `-O3` `builddir`):
 
 ```
 ninja -C builddir
@@ -408,7 +411,9 @@ sudo cp -f builddir/v4l2stateless_drv_video.so \
 bash tests/run_full_matrix.sh
 ```
 
-Editing `src/` without that `cp` tests yesterday’s `.so`.
+Editing `src/` without that `cp` tests yesterday’s `.so`. Compiling
+`-O0` then copying that artifact is how the dri copy stayed debug
+until 2026-09-04.
 
 ---
 

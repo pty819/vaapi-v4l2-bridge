@@ -26,16 +26,35 @@ Decoder nodes are selected by OUTPUT fourcc, not by a hardcoded `/dev/videoN`.
 
 ## Build / install
 
+`meson.build` pins **`buildtype=release`** (`optimization=3`, `b_ndebug=if-release`).
+A fresh `meson setup` compiles **`-O3 -DNDEBUG`** — not meson's default
+`debug` (`-O0 -g`). Chrome and the matrix load the copy under
+`/usr/lib/.../dri/`, so that install must come from this release build.
+
 On the RK3588 host:
 
 ```bash
-meson setup builddir
+meson setup builddir          # release / -O3; do not pass -Dbuildtype=debug
 ninja -C builddir
 sudo cp -f builddir/v4l2stateless_drv_video.so \
   /usr/lib/aarch64-linux-gnu/dri/
 export LIBVA_DRIVER_NAME=v4l2stateless
 vainfo --display drm --device /dev/dri/renderD128
 ```
+
+An **already-configured** `builddir` keeps whatever `buildtype` it was
+set up with. If `meson configure builddir` shows `debug` / `optimization=0`,
+reconfigure before ninja:
+
+```bash
+meson configure builddir -Dbuildtype=release -Doptimization=3 -Db_ndebug=if-release
+ninja -C builddir
+sudo cp -f builddir/v4l2stateless_drv_video.so \
+  /usr/lib/aarch64-linux-gnu/dri/
+```
+
+Confirm the compile line has `-O3` (and typically `-DNDEBUG`, no `-g`):
+`grep v4l2stateless.c builddir/compile_commands.json`.
 
 ## Use with ffmpeg
 

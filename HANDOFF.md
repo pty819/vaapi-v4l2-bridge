@@ -34,19 +34,24 @@ C 驱动 `v4l2stateless_drv_video.so` 把 ffmpeg VA-API 硬解接到主线 V4L2-
 |---|---|
 | NAS 工程 | `/home/liyifan/vaapi-v4l2-bridge/` |
 | NAS 源码 | `~/vaapi-v4l2-bridge/src/` |
-| NAS 构建 | `~/vaapi-v4l2-bridge/builddir/`（meson + ninja） |
+| NAS 构建 | `~/vaapi-v4l2-bridge/builddir/`（meson + ninja，**release / `-O3 -DNDEBUG`**） |
 | 已安装 .so | `/usr/lib/aarch64-linux-gnu/dri/v4l2stateless_drv_video.so` |
 | ffmpeg | **apt** `/usr/bin/ffmpeg` `7:8.0.1-3ubuntu2`，不是本地编的 |
 | 驱动选择 | `~/.profile` 与 `~/.config/environment.d/90-libva.conf`：`LIBVA_DRIVER_NAME=v4l2stateless` |
 | SSH | `liyifan@192.168.1.21`（密钥） |
 | git | NAS 仓库 `master` → `origin` = `https://github.com/pty819/vaapi-v4l2-bridge.git` |
 
-构建 / 安装：
+构建 / 安装（`meson.build` 默认 release = **`-O3 -DNDEBUG`**；未写
+`buildtype` 时 meson 会落成 debug/`-O0`，那是 09-04 之前系统 `.so` 偏大的原因）：
 
 ```bash
-cd ~/vaapi-v4l2-bridge/builddir
+cd ~/vaapi-v4l2-bridge
+# 新目录：meson setup builddir   # 已 pin release
+# 旧 debug builddir：meson configure builddir -Dbuildtype=release -Doptimization=3 -Db_ndebug=if-release
+cd builddir
 ninja
 sudo cp -f v4l2stateless_drv_video.so /usr/lib/aarch64-linux-gnu/dri/
+# 确认：grep -- -O3 compile_commands.json
 ```
 
 Mac 工作副本已于 09-02 删除（过时的 dma-heap 实验路线）；编辑走本地暂存目录 scp 到 `src/` 再 ninja。
