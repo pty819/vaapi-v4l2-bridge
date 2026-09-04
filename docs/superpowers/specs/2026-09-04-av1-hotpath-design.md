@@ -1,133 +1,95 @@
-# AV1 hot-path cleanup — combined request controls + zero-waste fixes
+# AV1 hot-path cleanup — verification coverage FIRST, then improvements
 
-Date: 2026-09-04 · Status: approved scope (user decisions recorded inline) ·
-Baseline commit: `2e59466`
+Date: 2026-09-04 (revised same day per user direction) · Status: scope
+approved · Baseline commit: `2e59466`
 
-## Context
+**Ordering rule (user decision, binding):** every Phase A item below must
+be verified — passing, or root-caused as a hardware limitation and
+documented — **before any Phase B (improvement) code is touched**. Driver
+bugs surfaced by Phase A are fixed inside Phase A.
 
-The post-copy-out audit (`8b5ea0c`) of the AV1 per-frame path found four
-items. The decode semantics (refresh flags, slot model, pool policy) are
-correct and are NOT touched by this work — this is purely an
-io-count/waste cleanup:
+## Phase A — close the unverified gap
 
-1. **Three separate `VIDIOC_S_EXT_CTRLS` per frame** (film grain, frame,
-   tile-group entries). `v4l2_ext_controls` carries all of them in one
-   call. AV1 steady state is 9 ioctls/frame vs the ~7/frame measured for
-   H.264/HEVC in `docs/perf-baseline-2026-09.md`.
-2. **Silent truncation at 32 tile params.** `v4l2sl_collect_decode_buffers`
-   caps `n_slice_params` at 32 and `av1_translate` clamps `n_tiles`; a
-   stream with more tiles decodes wrong with no diagnostics.
-3. **Duplicated parse attempt for ffmpeg submissions.** The OBU-truth
-   parser is tried on `span` (= `cb.largest`) first, then the fallback
-   loop re-tries `all_spans[0]` — the same pointer when there is a single
-   slice-data buffer (always, for ffmpeg).
-4. **~10 `getenv("V4L2SL_DEBUG")` calls per frame** (translate tail,
-   `av1_release_unrefd`, device.c mmap/pop gates, shared with other
-   codecs). Each is a linear scan of `environ`.
+The capability inventory lists four items as "unverified, not claimed".
+Phase A verifies each. Prediction on record: item A1 is the most likely
+to expose a real driver bug (analysis below).
 
-## Goals
+### A1. super-res streams
 
-1. AV1 request controls go out in **one** `S_EXT_CTRLS` (9 → 7
-   ioctls/frame).
-2. `> 32` tile params produce a **loud warning** (decode still proceeds —
-   see design rationale).
-3. The fallback parse loop **skips the pointer already tried** as `span`.
-4. `V4L2SL_DEBUG` is read **once** at driver init into a cached flag; all
-   gates test the flag.
+AV1 codes frames downscaled (denominator 9–16) and upscales at output.
+**Hypothesized bug**: `av1_fill_frame_params` fills the kernel's
+`frame_width_minus_1` and `upscaled_width` with the SAME value (VA's
+frame width). They are only equal when denominator == 8; a super-res
+stream feeds the kernel the display width as the coded width → wrong
+tile/SB grid → per-frame rejects or corruption. VA exposes only
+display width + denominator; coded width must be derived:
+`coded_w = (disp_w * 8 + denom / 2) / denom`, and the tile-grid
+`mi_cols` must be computed from `coded_w`.
 
-## Non-goals / decisions (user-confirmed)
+Verify: `aomenc --superres-mode=1 --superres-denominator=12` clip →
+hw-vs-sw framemd5. Outcomes:
+- bit-exact → PASS;
+- failure → apply the coded-width fix (plan Phase A Task 1) and retest;
+- kernel still rejects correct params → hardware limitation, record in
+  README "will not decode" list, Phase A still closes green.
 
-- **No fallback if the kernel rejects combined control submission.** The
-  target device either accepts it or the matrix fails loudly at
-  acceptance step 2. No per-control degrade path, no extra state.
-- **Verification stops at matrix + full-clip SVT** — no browser round this
-  time (the change is userspace-side sequencing of identical kernel
-  objects; the Chrome-path code is exercised by the same translate
-  function the matrix drives).
-- No behavior change to refresh parsing, slot model, pools, or the
-  trust gate.
+### A2. lossless / intrabc streams
 
-## Design
+Flags (`ALLOW_INTRABC`, lossless via q=0) are forwarded correctly from
+VA; risk is purely untested hardware/kernel behavior. Verify: one
+`-lossless 1` clip (ffmpeg libaom) and one intrabc-oriented clip
+(aomenc `--lossless=1 --enable-intrabc=1`, testsrc2 content), both
+hw-vs-sw bit-exact.
 
-### 1. Combined request controls (`src/v4l2stateless_av1.c`)
+### A3. concurrent AV1 decoders
 
-In `v4l2sl_av1_translate`, replace the three sequential
-`v4l2sl_set_request_controls` calls with one `v4l2_ext_controls` whose
-`controls[]` array holds, in this order: FILM_GRAIN, FRAME,
-TILE_GROUP_ENTRY (tile group omitted when `n_tiles == 0`, as today —
-count is 2 or 3).
+Each decoder context opens `/dev/video4` with independent queues (40
+capture buffers each). Kernel M2M concurrency on the single hantro AV1
+node is untested. Verify: two parallel ffmpeg VA-API AV1 decodes, both
+bit-exact; then browser: two tabs each playing an AV1 video, both
+decoding on hardware (≥2 live AV1 contexts in driver stderr, full frame
+rate, zero VA errors).
 
-Sequencing change that comes with it: all controls are submitted
-**before** the output buffer is popped/copied. Today's order is
-grain → frame → pop out → memcpy → tile group. Moving the tile-group
-control ahead of the pool pop is safe (it references only
-`tile_params[]`, never the copied output buffer) and simplifies the error
-path: a control failure returns `VA_STATUS_ERROR_OPERATION_FAILED` with
-**no pool state to unwind** — the current code has two different
-unwinding shapes (frame-ctrl failure returns without push, tile-ctrl
-failure pushes `out_buf_idx`) which collapse into one.
+### A4. browser AV1 mid-stream resolution change
 
-### 2. Tile-truncation warning (`src/v4l2stateless_av1.c`)
+The capture-renegotiate machinery (STREAMOFF/S_FMT/REQBUFS + DPB-model
+reset) has ffmpeg-path matrix coverage only. Browser behavior (whether
+Chrome renegotiates or recreates the decoder; whether playback stays on
+AV1 after the switch) is unobserved. Verify: YouTube av01-forcing shim
+with a delayed quality switch tiny→hd1080, plus bilibili quality-menu
+switch as secondary; pass = decode stays hardware-AV1 across the switch
+(currentTime advances, video4 held, zero VA errors, canvas sane).
 
-After the `n_tiles` clamp in `av1_translate`:
+## Phase B — hot-path cleanup (unchanged from prior approval)
 
-```c
-if (cb.n_slice_params > 32)
-    fprintf(stderr, "v4l2stateless: AV1 %d tile params exceed the "
-            "32-entry table; decoding first 32 — picture will be wrong\n",
-            cb.n_slice_params);
-```
+B1. One `S_EXT_CTRLS` per frame (grain+frame+tile-group batched,
+9 → 7 ioctls). Controls move ahead of the output-buffer pop; the three
+error-path shapes collapse to one clean return.
+B2. Loud warning when tile params exceed the 32-entry table
+(warn-and-continue — a failed entrypoint is cached by Chrome for the
+session).
+B3. Fallback OBU-parse loop skips the already-tried `span` pointer.
+B4. `V4L2SL_DEBUG` read once at init into `v4l2sl_debug`; all gates test
+the flag.
 
-Rationale for warn-and-continue over hard failure: a failed
-`vaEndPicture` entrypoint gets cached by Chrome for the whole session
-(known session stickiness) and kills AV1 until relaunch; a corrupt frame
-recovers at the next IDR. Same philosophy as the existing corrupt-frame
-`-2` path.
+### Phase B decisions (user-confirmed, carried over)
 
-### 3. Duplicate-parse skip (`src/v4l2stateless_av1.c`)
+- **No fallback** if the kernel rejects combined control submission —
+  the matrix fails loudly; the change is revisited, not patched around.
+- Phase B verification: matrix double-run + full-clip SVT. No browser
+  round (userspace-only sequencing of identical kernel objects).
 
-Fallback loop gains a pointer comparison:
+## Non-goals
 
-```c
-if (all_spans[si] && all_spans[si] != span &&
-    av1_parse_hdr_refresh(all_spans[si], all_sizes[si], pic, &parsed))
-```
+- No change to decode semantics: refresh parsing, slot model, pools,
+  trust gate are frozen.
+- Phase A does not chase VP9, 10-bit, or film grain (already documented
+  limitations with known upstream causes).
 
-`cb.largest` is by definition one of `all_spans[]`, so at most one
-duplicate attempt is removed; zero behavior change otherwise.
+## Acceptance
 
-### 4. Cached debug flag (`src/v4l2stateless.c`, `src/v4l2stateless.h`, callers)
-
-```c
-/* header */ extern int v4l2sl_debug;
-/* v4l2sl_init */ v4l2sl_debug = !!getenv("V4L2SL_DEBUG");
-```
-
-All `getenv("V4L2SL_DEBUG")` sites are replaced by `v4l2sl_debug` —
-mechanically, including init-time prints, so there is exactly one
-reading semantic (the env var is read at process start only, which was
-already the de-facto contract). Sites live in `v4l2stateless.c`,
-`v4l2stateless_av1.c`, `v4l2stateless_device.c`.
-
-## Acceptance (gate, in order)
-
-1. `ninja` clean; install `.so` to `/usr/lib/aarch64-linux-gnu/dri/`.
-2. `bash tests/run_full_matrix.sh` **twice** → `MATRIX_ALL_PASS` both
-   runs (correctness + determinism; this is also the combined-control
-   kernel gate).
-3. `av1_svt.mp4` full-clip hw-vs-sw framemd5 → 60/60 bit-exact (the
-   matrix's 32-frame blind-spot check).
-4. ioctl-count evidence: `strace -f -e trace=ioctl` over a short AV1
-   decode, steady-state count per frame **7** (was 9). Not a pass/fail
-   gate — it is the measurement that proves goal 1 landed.
-
-## Risks
-
-- **Combined submission rejected by hantro** → visible immediately at
-  acceptance step 2 as matrix AV1 failures. Response per user decision:
-  no auto-fallback; if it fails, the change is revisited rather than
-  patched around.
-- **Control-before-copy reordering** — userspace-only sequencing; the
-  kernel receives byte-identical objects. Covered by the full matrix.
-- **Env-var caching** — a mid-process env toggle was never supported;
-  no compatibility surface.
+- Phase A gate: A1–A4 each closed (bit-exact / fixed-then-bit-exact /
+  documented limitation). Only then Phase B starts.
+- Phase B gate: matrix ×2 `MATRIX_ALL_PASS`, av1_svt full-clip 60/60
+  bit-exact, strace shows ~1/3 the `VIDIOC_S_EXT_CTRLS` count.
+- Everything on the NAS repo, one commit per task, pushed at the end.
