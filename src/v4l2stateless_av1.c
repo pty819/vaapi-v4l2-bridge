@@ -1048,7 +1048,7 @@ VAStatus v4l2sl_av1_translate(struct v4l2sl_context *ctx,
     pic_param = cb.pic;
     for (i = 0; i < cb.n_slice_params && i < 32; i++)
         tile_params[i] = cb.slice_params[i];
-    n_tiles = cb.n_slice_params > 32 ? 32 : cb.n_slice_params;
+    n_tiles = cb.n_slice_params;
     /* Largest slice-data buffer — ffmpeg's AV1 VAAPI hwaccel submits the
      * whole OBU in one buffer. */
     tile_data = (uint8_t *)cb.largest;
@@ -1056,6 +1056,24 @@ VAStatus v4l2sl_av1_translate(struct v4l2sl_context *ctx,
     if (!pic_param) {
         fprintf(stderr, "v4l2stateless: AV1 decode missing picture params\n");
         return VA_STATUS_ERROR_INVALID_PARAMETER;
+    }
+    /* Truncating a >32-tile grid and still submitting the original
+     * tile_cols/tile_rows hung the hantro AV1 node (SoC hard reset).
+     * Refuse before any ioctl. Movie streams never hit this. */
+    {
+        unsigned cols = pic_param->tile_cols;
+        unsigned rows = pic_param->tile_rows;
+        unsigned grid = cols * rows;
+        int n_seen = cb.n_slice_params_seen ? cb.n_slice_params_seen
+                                            : cb.n_slice_params;
+
+        if ((cols && rows && grid > 32) || n_seen > 32) {
+            fprintf(stderr,
+                    "v4l2stateless: AV1 refusing decode: tile grid %ux%u "
+                    "(%u tiles) or %d slice params exceed the 32-entry "
+                    "table\n", cols, rows, grid, n_seen);
+            return VA_STATUS_ERROR_INVALID_PARAMETER;
+        }
     }
 
     if (!tile_data || tile_data_size == 0) {

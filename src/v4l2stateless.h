@@ -125,6 +125,7 @@ struct v4l2sl_collected {
     void *prob;             /* VAProbabilityBufferType (VP8) */
     void *slice_params[32]; /* VASliceParameterBufferType, in order */
     int n_slice_params;
+    int n_slice_params_seen; /* unclamped count (overflow vs the 32-slot table) */
     const uint8_t *slice_datas[V4L2SL_MAX_SLICE_DATAS];
     uint32_t slice_sizes[V4L2SL_MAX_SLICE_DATAS];
     int n_slice_datas;

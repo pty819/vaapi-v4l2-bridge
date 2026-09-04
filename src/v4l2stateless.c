@@ -723,6 +723,7 @@ void v4l2sl_collect_decode_buffers(struct v4l2sl_buffer **buffers, int n,
             cb->pic = buf->data;
             break;
         case VASliceParameterBufferType:
+            cb->n_slice_params_seen++;
             if (cb->n_slice_params < 32)
                 cb->slice_params[cb->n_slice_params++] = buf->data;
             break;
