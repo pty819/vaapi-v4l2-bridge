@@ -408,3 +408,15 @@ Phase A gate. Do not start Phase B until this heading exists. All four Phase A i
 | A4/A5 browser res-switch | A4/A5_RESSWITCH_PASS | YouTube av01 256x144 → 1920x1080; codecs stayed av01; t advancing; dropped 0; video4 held; error count 0; renegotiate expected. |
 
 Phase A **closed**. Phase B (hot-path cleanup) may start after this commit.
+
+
+## 2026-09-04 — Phase B hot-path (gated on Phase A)
+
+- Tile grids / VA slice-param counts **> 32 are refused** before any ioctl
+  (`4b9a54a`). Silently truncating to 32 while still submitting the original
+  `tile_cols*tile_rows` hung the hantro AV1 node (SoC hard reset). Movie
+  streams never hit this; do not VA-decode `verify/clips/av1_40tiles.mp4`.
+- Fallback OBU-parse loop skips the span already tried (`a070541`).
+- Grain + frame + tile-group batched into **one** request `S_EXT_CTRLS`
+  (`1ec74f8`). strace on `av1_aom.mp4`: `VIDIOC_S_EXT_CTRLS` 186 → 66
+  (exactly 1/3). Matrix 2× `MATRIX_ALL_PASS`; av1_svt full-clip bit-exact.
