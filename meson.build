@@ -4,6 +4,9 @@ project('v4l2stateless', 'c',
   default_options: [
     'c_std=c11',
     'warning_level=2',
+    'buildtype=release',
+    'optimization=3',
+    'b_ndebug=if-release',
   ],
 )
 
