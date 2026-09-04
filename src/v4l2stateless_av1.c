@@ -997,6 +997,7 @@ static void av1_release_unrefd(struct v4l2sl_context *ctx,
         if (v4l2sl_debug)
             fprintf(stderr, "v4l2stateless: AV1 rel buf=%d (nonref)\n", buf);
         surf->buf_index = -1;
+        surf->cap_view = NULL;
         ctx->av1.buf_owner[buf] = VA_INVALID_SURFACE;
         v4l2sl_cap_pool_push(ctx, buf);
         return;
@@ -1020,8 +1021,10 @@ static void av1_release_unrefd(struct v4l2sl_context *ctx,
             VASurfaceID id = ctx->av1.buf_owner[old];
             struct v4l2sl_surface *os = (id != VA_INVALID_SURFACE)
                 ? v4l2sl_surface_by_id(ctx->driver_data, id) : NULL;
-            if (os && os->buf_index == old)
+            if (os && os->buf_index == old) {
                 os->buf_index = -1;
+                os->cap_view = NULL;
+            }
             if (v4l2sl_debug)
                 fprintf(stderr, "v4l2stateless: AV1 rel buf=%d (slot %d -> %d)\n",
                         old, s, buf);

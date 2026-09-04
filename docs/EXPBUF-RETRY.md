@@ -98,3 +98,18 @@ the held fd after those pictures.
 
 `V4L2SL_EXPBUF_EXPORT=1` `h264_baseline.mp4` annex-B (`/tmp/base.h264`):
 `HOLD_EXACT`, 7 later P-frames, host alive (uptime ~5:07).
+
+
+## Phase 3 — HEVC/AV1 GetImage under EXPBUF-no-memcpy (2026-09-04)
+
+ffmpeg hwdownload vs software framemd5, `V4L2SL_EXPBUF_EXPORT=1`,
+worktree `.so` via `LIBVA_DRIVERS_PATH`, 0 gbm upload, 0 fallback:
+
+- `h264_baseline.mp4` 16 frames MATCH
+- `hevc_main.mp4` 16 frames MATCH
+- `av1_aom.mp4` 8 frames MATCH
+
+ffmpeg (and Chrome) decode onto surfaces that are **not** listed as
+context `render_targets`. GetImage therefore cannot look up the owning
+context that way. `pull_capture` now stores `surf->cap_view` (the capture
+mmap) and GetImage/Derive/Export read that pointer. Host alive (~5:16).

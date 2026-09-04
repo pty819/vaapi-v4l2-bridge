@@ -77,6 +77,7 @@ struct v4l2sl_surface {
     uint32_t stride;         /* negotiated capture geometry, set at decode */
     uint32_t aligned_h;
     uint32_t cap_fourcc;     /* V4L2 capture fourcc of attached decode buf */
+    void *cap_view;          /* mmap of capture_buf_ptr[buf_index]; EXPBUF GetImage */
     void *cpu_ptr;           /* software backing for upload / encode / VPP src */
     uint32_t cpu_size;
     uint32_t cpu_stride;

@@ -628,6 +628,7 @@ v4l2sl_create_surfaces(VADriverContextP ctx,
         surface->format = format;
         surface->status = VASurfaceReady;
         surface->buf_index = -1;
+        surface->cap_view = NULL;
         surface->memfd_fd = -1;
         surface->expbuf_fd = -1;
         surface->cpu_stride = v4l2sl_default_image_stride(format, width);
@@ -824,6 +825,7 @@ v4l2sl_destroy_surfaces(VADriverContextP ctx,
             }
         }
         surface->buf_index = -1;
+        surface->cap_view = NULL;
         destroy_surface_locked(driver_data, surface, surfaces[i]);
     }
     pthread_mutex_unlock(&g_v4l2sl_lock);
@@ -839,6 +841,41 @@ context_for_surface(struct v4l2sl_driver_data *dd, VASurfaceID surface)
             if (c->render_targets[i] == surface)
                 return c;
     return NULL;
+}
+
+/* ffmpeg (and some Chrome pools) decode onto surfaces that were never
+ * listed as context render_targets. GetImage/Export still need the
+ * owning V4L2 context — walk by the capture mmap pointer we stored. */
+static struct v4l2sl_context *
+context_owning_capture(struct v4l2sl_driver_data *dd, struct v4l2sl_surface *surf)
+{
+    struct v4l2sl_context *c;
+
+    if (!dd || !surf)
+        return NULL;
+    c = context_for_surface(dd, surf->surface_id);
+    if (c)
+        return c;
+    if (surf->buf_index < 0)
+        return NULL;
+    for (c = dd->contexts; c; c = c->next) {
+        int i = surf->buf_index;
+
+        if (i >= 0 && i < V4L2SL_MAX_CAPTURE_BUFS &&
+            c->capture_buf_ptr[i] &&
+            c->capture_buf_ptr[i] != MAP_FAILED &&
+            (!surf->cap_view || c->capture_buf_ptr[i] == surf->cap_view))
+            return c;
+    }
+    return NULL;
+}
+
+static const void *
+expbuf_capture_src(struct v4l2sl_surface *surf)
+{
+    if (!v4l2sl_expbuf_export_wanted() || !surf || surf->buf_index < 0)
+        return NULL;
+    return surf->cap_view;
 }
 
 /*
@@ -1288,6 +1325,7 @@ v4l2sl_begin_picture(VADriverContextP ctx,
             surface->buf_index < context->capture_bufs_allocd)
             v4l2sl_cap_pool_push(context, surface->buf_index);
         surface->buf_index = -1;
+        surface->cap_view = NULL;
         /* Keep memfd so DRM-PRIME clients retain a stable fd. */
     }
 
@@ -1626,10 +1664,8 @@ v4l2sl_derive_image(VADriverContextP ctx,
         va_fcc = surf->format ? surf->format : VA_FOURCC_NV12;
         data_size = surf->cpu_size;
         mmapped = 2; /* borrowed cpu backing — do not free on DestroyImage */
-    } else if (v4l2sl_expbuf_export_wanted() && surf->buf_index >= 0 && c &&
-               c->capture_buf_ptr[surf->buf_index] &&
-               c->capture_buf_ptr[surf->buf_index] != MAP_FAILED) {
-        map = c->capture_buf_ptr[surf->buf_index];
+    } else if (expbuf_capture_src(surf)) {
+        map = (void *)expbuf_capture_src(surf);
         data_size = v4l2sl_capture_plane_size(cap_fcc, stride, aligned_h);
         mmapped = 2;
         if (cap_fcc == V4L2_PIX_FMT_NV12)
@@ -1874,10 +1910,8 @@ v4l2sl_get_image(VADriverContextP ctx, VASurfaceID surface,
 
     /* Lazy memfd: bo-backed surfaces skip the per-frame memfd copy;
      * refill it from the bo now that someone is reading back. */
-    if (v4l2sl_expbuf_export_wanted() && surf->buf_index >= 0 && c &&
-        c->capture_buf_ptr[surf->buf_index] &&
-        c->capture_buf_ptr[surf->buf_index] != MAP_FAILED) {
-        src = c->capture_buf_ptr[surf->buf_index];
+    if (expbuf_capture_src(surf)) {
+        src = expbuf_capture_src(surf);
     } else if (surf->has_pic) {
         v4l2sl_surface_ensure_memfd(surf);
         src = NULL;
@@ -2058,7 +2092,7 @@ v4l2sl_export_surface_handle(VADriverContextP ctx, VASurfaceID surface_id,
      * create_surfaces callocs it for every surface). Falls back to
      * UNIMPLEMENTED when GBM is unavailable or the format is not NV12.
      */
-    c = context_for_surface(driver_data, surface_id);
+    c = context_owning_capture(driver_data, surf);
     /* Experiment: V4L2SL_EXPBUF_EXPORT=1 exports the VPU capture dma-buf
      * instead of the GBM copy. Shipping default remains GBM. */
     if (v4l2sl_expbuf_export_wanted() && surf->buf_index >= 0 && c &&

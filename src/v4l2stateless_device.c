@@ -376,6 +376,7 @@ static void release_ctx_capture_surfaces(struct v4l2sl_context *ctx)
         /* Keep the create-time memfd. Closing a V4L2 EXPBUF fd while the
          * GPU still holds a dup hangs the RK3588 CMA pool. */
         s->buf_index = -1;
+        s->cap_view = NULL;
     }
 }
 
@@ -1058,6 +1059,7 @@ int v4l2sl_surface_pull_capture(struct v4l2sl_context *ctx,
         surf->stride = stride;
         surf->aligned_h = alh;
         surf->cap_fourcc = fcc;
+        surf->cap_view = src;
         surf->last_writer = V4L2SL_WRITER_MEMFD;
         return 0;
     }
