@@ -297,3 +297,41 @@ architecture noted above is the fix for both.
 (Also confirmed this morning: the overnight "Chrome graphical startup
 deadlock" was the router's fake-ip DNS blackholing Google endpoints — with the
 proxy path recovered, plain Chrome starts in 1s with no flags.)
+
+## 2026-09-04 (final) — AV1 copy-out shipped: DPB-model buffer release (8b5ea0c)
+
+The architecture direction above is implemented. pull_capture already
+snapshotted every decoded frame (GBM bo for display surfaces, memfd
+otherwise), so the capture buffer only remained alive as a kernel DPB
+reference. The context now tracks slot->buffer with the SAME
+refresh_frame_flags submitted to the kernel and hands a buffer back the
+moment its slot is overwritten (refresh==0 frames return immediately).
+Live capture buffers are bounded by the kernel DPB (~10), not the player
+queue depth.
+
+**The trust gate is the load-bearing wall**: the slot model is armed only
+by the OBU-parse truth (Chrome-style submissions). Heuristic streams
+(ffmpeg raw tiles) keep the legacy surface-attached release. Reason: the
+model recycles buffers according to the flags it knows — if those are the
+wrong heuristic flags, the kernel slot table (fed by the same flags) is
+wrong too, and fast recycling turns latent wrong-slot reads into visible
+corruption. Exactly this showed up during bring-up: av1-aom-49 MD5 diff
+(double release authority — fixed by making the model the only releaser
+for armed contexts) and av1-svt crashing nonref reads (derive/get_image
+gated on buf_index >= 0 — fixed by an explicit has_pic flag).
+
+Two latent bugs fixed on the way:
+- surface_id was NEVER assigned (calloc zero) — the buf_owner map tracked
+  surface 0 for every buffer, silently disabling owner lookups.
+- SVT heuristic stored the ABSOLUTE order hint as `gop`; only the first
+  GOP (key_oh=0, first ARF oh=16) coincidentally matched. Later GOPs
+  (48+) broke every layer computation: 20/60 frames of av1_svt corrupt.
+  The matrix only decodes the first 32 frames, so this was invisible to
+  it — full-clip sw-vs-hw compare is now the extra check (60/60 exact).
+  Known remaining edge: ffmpeg + BILIAV1 streams stay corrupt (heuristic
+  unfixable by design, Chrome path uses the parser); matrix unaffected.
+
+Verification: matrix 2x MATRIX_ALL_PASS (deterministic); bilibili
+logged-in soak (62-min AV1 video): 5 min + 4-seek storm at 720p30, AV1
+on video4 throughout, 2 dropped frames total, zero pool errors; YouTube
+av01 via MSE shim: 1080p60 clean, codecs locked av01.0.09M.08.
