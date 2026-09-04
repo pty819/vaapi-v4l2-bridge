@@ -173,3 +173,14 @@ All 8 hwdownload hashes were identical (`54a0397…`). Pre-existing: same
 hash with `V4L2SL_EXPBUF_EXPORT=0`. Fix: GetImage prefers
 `last_writer == CPU && cpu_ptr`; VPP sets `dst->has_pic`. After the fix
 8 unique hashes. Matrix `VPP_OK` only greps the log, so it did not catch this.
+
+
+## Post-review e2e (2026-09-04 20:50)
+
+HEAD `be1589c` on origin/master. System dri matches `builddir` md5
+`2f378b1a1d3391f5fe231e021f77be1e`. No `LIBVA_DRIVERS_PATH`.
+
+- lab: 8× EXPBUF exact, HOLD_EXACT, ffmpeg H.264/HEVC/AV1 MATCH, VPP 8 unique hashes, opt-out `wanted=0`
+- Chrome maps dri `.so`, wanted=1, 22× EXPBUF, VaapiVideoDecoder, canvas avg=123 (local 1080p)
+- Bilibili live 60s: 23× EXPBUF, canvas avg 58–90, currentTime 24→81
+- matrix **PASS=32 FAIL=0**, `MATRIX_VPP_UNIQ=8`. Host alive (~6:13).
