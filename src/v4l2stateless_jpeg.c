@@ -393,7 +393,7 @@ VAStatus v4l2sl_jpeg_encode(struct v4l2sl_context *ctx,
         t = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
         xioctl(fd, VIDIOC_STREAMOFF, &t);
     }
-    if (getenv("V4L2SL_DEBUG"))
+    if (v4l2sl_debug)
         fprintf(stderr, "v4l2stateless: JPEG encoded %dx%d quality=%d bytes=%d planes=%d\n",
                 w, h, quality, jpeg_size, ctx->jpeg_q.out_planes);
     return st;

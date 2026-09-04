@@ -423,7 +423,7 @@ VAStatus v4l2sl_vpp_run(struct v4l2sl_context *ctx,
         t = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
         xioctl(fd, VIDIOC_STREAMOFF, &t);
     }
-    if (getenv("V4L2SL_DEBUG"))
+    if (v4l2sl_debug)
         fprintf(stderr, "v4l2stateless: VPP %dx%d -> %dx%d rot=%d\n",
                 src->width, src->height, dw, dh, rotate);
     return st;

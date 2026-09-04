@@ -994,7 +994,7 @@ static void av1_release_unrefd(struct v4l2sl_context *ctx,
     ctx->av1.buf_owner[buf] = surf->surface_id;
 
     if (!refresh) {
-        if (getenv("V4L2SL_DEBUG"))
+        if (v4l2sl_debug)
             fprintf(stderr, "v4l2stateless: AV1 rel buf=%d (nonref)\n", buf);
         surf->buf_index = -1;
         ctx->av1.buf_owner[buf] = VA_INVALID_SURFACE;
@@ -1022,7 +1022,7 @@ static void av1_release_unrefd(struct v4l2sl_context *ctx,
                 ? v4l2sl_surface_by_id(ctx->driver_data, id) : NULL;
             if (os && os->buf_index == old)
                 os->buf_index = -1;
-            if (getenv("V4L2SL_DEBUG"))
+            if (v4l2sl_debug)
                 fprintf(stderr, "v4l2stateless: AV1 rel buf=%d (slot %d -> %d)\n",
                         old, s, buf);
             ctx->av1.buf_owner[old] = VA_INVALID_SURFACE;
@@ -1288,7 +1288,7 @@ VAStatus v4l2sl_av1_translate(struct v4l2sl_context *ctx,
             fprintf(stderr, "v4l2stateless: AV1 pull capture failed\n");
             v4l2sl_cap_pool_push(ctx, done_cap);
         } else {
-            if (getenv("V4L2SL_DEBUG"))
+            if (v4l2sl_debug)
                 fprintf(stderr, "v4l2stateless: AV1 frame surf=%#x oh=%u buf=%d refresh=%02x type=%u\n",
                         surf->surface_id, pic_param->order_hint, done_cap,
                         frame.refresh_frame_flags,

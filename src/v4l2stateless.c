@@ -34,6 +34,10 @@
  * threads may block up to the 3 s decode timeout. */
 static pthread_mutex_t g_v4l2sl_lock = PTHREAD_MUTEX_INITIALIZER;
 
+/* Read once at init: every hot-path debug gate tests this flag instead of
+ * rescanning environ per frame. */
+int v4l2sl_debug;
+
 /* Supported profiles */
 static const VAProfile v4l2sl_profiles[] = {
     VAProfileH264ConstrainedBaseline,
@@ -773,7 +777,7 @@ v4l2sl_destroy_surfaces(VADriverContextP ctx,
     struct v4l2sl_driver_data *driver_data = ctx->pDriverData;
 
     pthread_mutex_lock(&g_v4l2sl_lock);
-    if (getenv("V4L2SL_DEBUG") && num_surfaces > 0) {
+    if (v4l2sl_debug && num_surfaces > 0) {
         fprintf(stderr, "v4l2stateless: destroy_surfaces n=%d first=%#x\n",
                 num_surfaces, surfaces[0]);
     }
@@ -1479,7 +1483,7 @@ v4l2sl_sync_surface(VADriverContextP ctx, VASurfaceID render_target)
     pthread_mutex_lock(&g_v4l2sl_lock);
     surface = v4l2sl_surface_by_id(driver_data, render_target);
     if (!surface) {
-        if (getenv("V4L2SL_DEBUG"))
+        if (v4l2sl_debug)
             fprintf(stderr, "v4l2stateless: sync lookup fail %#x\n",
                     render_target);
         pthread_mutex_unlock(&g_v4l2sl_lock);
@@ -1583,7 +1587,7 @@ v4l2sl_derive_image(VADriverContextP ctx,
     surf = v4l2sl_surface_by_id(driver_data, surface);
 
     if (!surf) {
-        if (getenv("V4L2SL_DEBUG"))
+        if (v4l2sl_debug)
             fprintf(stderr, "v4l2stateless: derive lookup fail %#x\n",
                     surface);
         pthread_mutex_unlock(&g_v4l2sl_lock);
@@ -2178,6 +2182,7 @@ v4l2sl_init(VADriverContextP ctx)
         ctx->vtable_vpp->vaQueryVideoProcPipelineCaps = v4l2sl_vpp_query_pipeline_caps_wrap;
     }
 
+    v4l2sl_debug = !!getenv("V4L2SL_DEBUG");
     return VA_STATUS_SUCCESS;
 }
 

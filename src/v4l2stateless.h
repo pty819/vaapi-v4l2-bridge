@@ -52,6 +52,8 @@ enum v4l2sl_last_writer {
 };
 #define v4l2sl_memfd_stale(s_) ((s_)->last_writer == V4L2SL_WRITER_BO)
 
+extern int v4l2sl_debug;
+
 /* Per-surface state */
 struct v4l2sl_surface {
     VASurfaceID surface_id;

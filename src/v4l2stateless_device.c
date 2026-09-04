@@ -677,7 +677,7 @@ int v4l2sl_ensure_capture(struct v4l2sl_context *ctx, int width, int height,
         return -1;
 
     ctx->capture_bufs_allocd = n_cap;
-    if (getenv("V4L2SL_DEBUG"))
+    if (v4l2sl_debug)
         fprintf(stderr, "v4l2stateless: capture pool n=%d\n", n_cap);
     ctx->n_free_cap = 0;
     {
@@ -787,7 +787,7 @@ static int v4l2sl_mmap_one_capture(struct v4l2sl_context *ctx, int index)
                     index, strerror(errno));
             return -1;
         }
-        if (getenv("V4L2SL_DEBUG"))
+        if (v4l2sl_debug)
             fprintf(stderr, "v4l2stateless: capture mmap idx=%d size=%u\n",
                     index, length);
     }
