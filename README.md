@@ -48,6 +48,28 @@ ffmpeg -hwaccel vaapi -hwaccel_output_format vaapi \
   -vf "hwdownload,format=nv12" -pix_fmt yuv420p -f framemd5 -
 ```
 
+### Known client limitation: bilibili-downloaded AV1 via ffmpeg-based players
+
+Decoding a **bilibili-downloaded AV1 file** with an ffmpeg-VA-API client
+(`ffmpeg -hwaccel vaapi`, VLC, mpv — anything routed through libavcodec's VA
+hwaccel) yields a corrupt picture on streams from bilibili's AV1 encoder.
+The root cause sits outside this driver: ffmpeg submits only raw tile
+payloads to VA-API and VA-API does not expose `refresh_frame_flags`, so no
+driver can recover the reference-slot truth this encoder's policy needs.
+
+The trigger is narrow — everything around it works:
+
+- bilibili **web** playback in Chrome: WebCodecs submits the full OBU span
+  and the driver parses the truth (soak-verified, 2026-09-04)
+- playing the same downloaded file **in Chrome**: own decoder, same span
+  submission — unaffected
+- ffmpeg decoding **any other** AV1 encode (libaom, SVT-AV1, 4K): bit-exact
+- ffmpeg **software** decode of the same file: correct (just no VPU)
+
+Workarounds: play such files in Chrome, decode them in software, or use the
+kernel-direct v4l2-request ffmpeg fork whose userspace parses OBU headers
+itself.
+
 Mid-stream resolution / bit-depth / chroma changes renegotiate capture (`STREAMOFF` / `S_FMT` / `REQBUFS`). Export: `vaExportSurfaceHandle` returns a single-object NV12 dmabuf backed by a driver-owned linear GBM bo (`src/v4l2stateless_gbm.c`) — the descriptor shape Chromium requires; VPU capture buffers never leave the kernel via `EXPBUF` (banned on this SoC).
 
 Full host matrix (needs `/dev/video*` and writes clips under `verify/`, gitignored):
