@@ -16,7 +16,7 @@ Codecs:
 | H.264 High422 8/10-bit | same, capture NV16/NV20 | bit-exact; VA path exercised by `tests/va_h264422_client.c` (stock ffmpeg never offers VAAPI for 4:2:2 — decoder pix_fmt list + profile map), kernel path GStreamer `v4l2slh264dec` vs `avdec_h264` |
 | HEVC 8-bit Main (incl. WPP) | same | bit-exact |
 | HEVC Main10 | same, capture NV15 → P010 | bit-exact vs ffmpeg software (`hwdownload,format=p010le`) |
-| AV1 Profile0 8-bit | hantro `/dev/video4` + matching media node | bit-exact vs ffmpeg SW (libaom, libaom realtime, SVT-AV1 RA, 4K, default). **Will not decode** AV1 super-res (`superres_denom > 8`) — kernel/hantro limitation (driver derives coded width correctly; pictures still mismatch). Re-advertised 2026-09-03: the old "node reopen hangs the SoC" was an undersized PSU, not a driver bug. Since 2026-09-04 `refresh_frame_flags` is **parsed as truth from Chrome's submitted OBU span** (order-hint heuristics remain the raw-tile/ffmpeg fallback), and a **kernel-DPB-model copy-out release** bounds live capture buffers to ~the DPB instead of the player's decode-ahead queue — bilibili (WebCodecs, 5-min soak + seek storm) and YouTube (MSE-forced av01, 1080p60) both stay on AV1 with zero pool errors. See `src/v4l2stateless_av1.c` |
+| AV1 Profile0 8-bit | hantro `/dev/video4` + matching media node | bit-exact vs ffmpeg SW (libaom, libaom realtime, SVT-AV1 RA, 4K, default). **Will not decode** AV1 super-res (`superres_denom > 8`) — kernel/hantro limitation (driver derives coded width correctly; pictures still mismatch). libaom `-lossless 1` is 60/60 bit-exact. aomenc `--lossless=1 --enable-intrabc=1` 2-pass clip is **not** bit-exact on the ffmpeg-VA path (30/60 after shown frame 29; kernel accepts; the clip never sets `allow_intrabc`). Re-advertised 2026-09-03: the old "node reopen hangs the SoC" was an undersized PSU, not a driver bug. Since 2026-09-04 `refresh_frame_flags` is **parsed as truth from Chrome's submitted OBU span** (order-hint heuristics remain the raw-tile/ffmpeg fallback), and a **kernel-DPB-model copy-out release** bounds live capture buffers to ~the DPB instead of the player's decode-ahead queue — bilibili (WebCodecs, 5-min soak + seek storm) and YouTube (MSE-forced av01, 1080p60) both stay on AV1 with zero pool errors. See `src/v4l2stateless_av1.c` |
 | VP8 | hantro `/dev/video2` | bit-exact vs ffmpeg software |
 | MPEG-2 Simple / Main | same `/dev/video2` | bit-exact vs GStreamer `v4l2slmpeg2dec` (hantro IDCT ≠ ffmpeg SW) |
 | JPEG Baseline encode | VEPU121 `/dev/video3` | `mjpeg_vaapi` (stateful M2M) |
@@ -80,6 +80,21 @@ The driver now derives coded width from display width and the denominator
 and DQBUF errors disappear, but frames 1–59 still mismatch software. Phase A
 closes this as a kernel/hardware limit, not a remaining userspace fill bug.
 Non-superres libaom / SVT-AV1 streams are unaffected (SVT 60/60 still exact).
+
+### Known limitation: aomenc 2-pass lossless+intrabc clip (ffmpeg VA)
+
+ffmpeg libaom **lossless** (`-lossless 1`, `testsrc` 1280x720 60 frames) is bit-exact
+vs software on this hantro node. The Phase A IntraBC clip — aomenc
+`--lossless=1 --enable-intrabc=1` on `testsrc2`, 60 frames — is **not**:
+hw rc=0, 0 DQBUF errors, 30/60 framemd5 mismatch from shown frame 29.
+aomenc `--webm` on Ubuntu `aom-tools` 3.13.1-2/arm64 aborts with a buffer
+overflow; the clip was encoded `--ivf` then remuxed. `--enable-intrabc`
+was accepted, but the bitstream never sets `allow_intrabc` (IntraBC is
+KEY/INTRA_ONLY-only; this is a 2-pass lag-35 inter pyramid). Driver already
+forwards VA screen-content / integer-MV / IntraBC flags. A 10-frame all-intra
+IntraBC probe was 10/10 bit-exact. This is the ffmpeg raw-tile refresh
+heuristic on a high-lag GOP, not a missing userspace flag. Phase A closes
+the item as documented; no C change.
 
 Mid-stream resolution / bit-depth / chroma changes renegotiate capture (`STREAMOFF` / `S_FMT` / `REQBUFS`). Export: `vaExportSurfaceHandle` returns a single-object NV12 dmabuf backed by a driver-owned linear GBM bo (`src/v4l2stateless_gbm.c`) — the descriptor shape Chromium requires; VPU capture buffers never leave the kernel via `EXPBUF` (banned on this SoC).
 

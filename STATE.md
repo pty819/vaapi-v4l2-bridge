@@ -35,6 +35,7 @@ Chrome `FillProfileInfo_Locked` attrib query is implemented (`vaQueryConfigAttri
 - **Forced browser HW on VP9 / 10-bit HDR** — has hung the VPU; keep `media.hardware-video-decoding.force-enabled=false`
 - **Browser mid-stream resolution changes** — capture renegotiate exists in the driver; Chrome/Firefox path is not matrix-tested
 - **AV1 super-res (`superres_denom > 8`)** — will not decode bit-exact on this hantro/kernel. Driver now derives coded width (`frame_width`) from display width + denominator; kernel still mismatches pictures after KEY. See verification coverage 2026-09-04.
+- **AV1 aomenc 2-pass lossless+intrabc clip (ffmpeg VA)** — not bit-exact. Kernel accepts the fill (0 DQBUF errors); 30/60 framemd5 mismatch from shown frame 29. The clip never sets `allow_intrabc` (IntraBC is KEY/INTRA_ONLY-only; `--enable-intrabc` was accepted). Same class as other ffmpeg raw-tile refresh-heuristic edges. A 10-frame all-intra IntraBC probe was 10/10. See verification coverage 2026-09-04.
 - **Vendor BSP / MPP** — out of scope (mainline only)
 
 ## 2026-09-03 GBM display surfaces — Chrome hardware decode WITH picture (f53f3f1..452de04)
@@ -347,3 +348,17 @@ av01 via MSE shim: 1080p60 clean, codecs locked av01.0.09M.08.
 - **Fix applied:** `av1_fill_frame_params` derives `disp_w`/`disp_h`/`sr_denom`/`coded_w` once after memset; tile-grid `mi_cols` uses coded width when `sr_denom > 8`; `upscaled_width`/`render_*` keep display, `frame_width_minus_1` is coded. `v4l2sl_ensure_capture` kept DISPLAY 1280x720.
 - **After fix:** A1_STILL_FAIL. hw2 rc=0, DQBUF errors gone (0), still 59/60 framemd5 mismatch (frame 0 bit-exact; frames 1–59 unique hashes but wrong). Capture still `1280x720 -> 1280x720 NV12`. Params look correct; pictures still mismatch = hantro/kernel will not decode super-res.
 - **Regression:** `av1_svt.mp4` full-clip hw-vs-sw 60/60 bit-exact (`A1_REGRESSION_CLEAN`). Coded-width derivation kept (kernel now receives distinct `frame_width` vs `upscaled_width` when denom > 8; does not regress non-superres SVT).
+
+### Lossless
+
+- **Verdict:** A2_lossless_PASS. Phase A item closed.
+- **Clip:** `verify/clips/av1_lossless.webm` (gitignored) — ffmpeg libaom `-lossless 1 -cpu-used 8 -threads 1`, lavfi `testsrc` 1280x720@30 2s, 27549 bytes.
+- **Compare:** hw rc=0, 60/60 framemd5 bit-exact vs software (`hwdownload,format=nv12` → yuv420p). `failed to set AV1|not mapped|no completed` = 0. `DQBUF ... ERROR` = 0. Capture `1280x720 -> 1280x720 NV12` on `/dev/video4`. Unique per-frame hashes (not a stuck buffer).
+
+### IntraBC
+
+- **Verdict:** A2_intrabc_FAIL (wrong-frames, not kernel-reject). Phase A item closed as a documented limitation; no driver patch (flags already forwarded; fix is not small/obvious).
+- **Clip:** `verify/clips/av1_intrabc.webm` (gitignored) — aomenc `--lossless=1 --enable-intrabc=1 --cpu-used=8` on lavfi `testsrc2` 1280x720@30 `--limit=60`. `--enable-intrabc` was accepted (default 1). aomenc `--webm` aborted (`*** buffer overflow detected ***`, rc=134); encoded `--ivf` then `ffmpeg -c copy` remux to WebM (3195370 bytes).
+- **Compare:** hw rc=0, 60/60 frames produced, 30/60 framemd5 match (shown 0–28 and 30), 30/60 mismatch (shown 29, 31–59). HW hashes all unique (not stuck). `failed to set AV1|not mapped|no completed` = 0. `DQBUF ... ERROR` = 0. Capture `1280x720 -> 1280x720 NV12` on `/dev/video4`.
+- **Classification:** wrong-frames. Kernel accepted sequence/frame/tile controls. Bitstream has `seq_force_screen_content_tools=SELECT` but every frame `allow_screen_content_tools=0` / `allow_intrabc=0` — IntraBC is intra-only, so this 2-pass inter pyramid never used it. Shown 30 matching after 29 failing is `show_existing_frame` of a still-good slot. Failure starts at the first new decode after the lag-35 pyramid's later ARFs — ffmpeg-VA raw-tile `refresh_frame_flags` heuristic, not a missing IntraBC flag. Driver already maps VA `allow_intrabc` / `allow_screen_content_tools` / `force_integer_mv` onto `V4L2_AV1_FRAME_FLAG_*`.
+- **Diagnostic (not the brief clip):** 10-frame 1-pass all-intra `--lossless=1 --enable-intrabc=1 --lag-in-frames=0 --kf-max-dist=1` at 640x360 actually set `allow_intrabc` on KEY 0–1; hw-vs-sw 10/10 bit-exact. IntraBC tools themselves are not the gap.
