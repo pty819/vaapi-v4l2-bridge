@@ -1,6 +1,6 @@
 # vaapi-v4l2-bridge
 
-Last verified **2026-09-03** on Orange Pi 5 (Armbian 26.8.3 resolute, kernel 7.1.8-edge-rockchip64). Ops notes: [HANDOFF.md](HANDOFF.md). Snapshot: [STATE.md](STATE.md).
+Last verified **2026-09-04** on Orange Pi 5 (Armbian 26.8.3 resolute, kernel 7.1.8-edge-rockchip64). Ops notes: [HANDOFF.md](HANDOFF.md). Snapshot: [STATE.md](STATE.md).
 
 libva backend that translates VA-API decode to the Linux V4L2 Request API (stateless).
 Target: Rockchip RK3588 / Orange Pi 5 on **mainline** Armbian (no vendor BSP, no MPP).
@@ -16,7 +16,7 @@ Codecs:
 | H.264 High422 8/10-bit | same, capture NV16/NV20 | bit-exact; VA path exercised by `tests/va_h264422_client.c` (stock ffmpeg never offers VAAPI for 4:2:2 — decoder pix_fmt list + profile map), kernel path GStreamer `v4l2slh264dec` vs `avdec_h264` |
 | HEVC 8-bit Main (incl. WPP) | same | bit-exact |
 | HEVC Main10 | same, capture NV15 → P010 | bit-exact vs ffmpeg software (`hwdownload,format=p010le`) |
-| AV1 Profile0 8-bit | hantro `/dev/video4` + matching media node | bit-exact vs ffmpeg SW (libaom, libaom realtime, SVT-AV1 RA, 4K, default). Re-advertised 2026-09-03: the old "node reopen hangs the SoC" was an undersized PSU, not a driver bug. Chrome AV1 verified (local file + YouTube) — see OBU-span tile extraction + uniform tile-size derivation in `src/v4l2stateless_av1.c` |
+| AV1 Profile0 8-bit | hantro `/dev/video4` + matching media node | bit-exact vs ffmpeg SW (libaom, libaom realtime, SVT-AV1 RA, 4K, default). Re-advertised 2026-09-03: the old "node reopen hangs the SoC" was an undersized PSU, not a driver bug. Since 2026-09-04 `refresh_frame_flags` is **parsed as truth from Chrome's submitted OBU span** (order-hint heuristics remain the raw-tile/ffmpeg fallback), and a **kernel-DPB-model copy-out release** bounds live capture buffers to ~the DPB instead of the player's decode-ahead queue — bilibili (WebCodecs, 5-min soak + seek storm) and YouTube (MSE-forced av01, 1080p60) both stay on AV1 with zero pool errors. See `src/v4l2stateless_av1.c` |
 | VP8 | hantro `/dev/video2` | bit-exact vs ffmpeg software |
 | MPEG-2 Simple / Main | same `/dev/video2` | bit-exact vs GStreamer `v4l2slmpeg2dec` (hantro IDCT ≠ ffmpeg SW) |
 | JPEG Baseline encode | VEPU121 `/dev/video3` | `mjpeg_vaapi` (stateful M2M) |
@@ -56,7 +56,7 @@ Full host matrix (needs `/dev/video*` and writes clips under `verify/`, gitignor
 bash tests/run_full_matrix.sh
 ```
 
-Last recorded host run: **PASS=32 FAIL=0** (2026-09-03/04, after AV1 re-advertisement). The script covers H.264 (CB/Main/High/B/all-P/slices/4K/QCIF/High10 p010le/High422 8+10-bit), HEVC (Main/WPP/4K/Main10 p010le), **AV1 (aom-8, aom-49, svt-32, 4K, default)**, VP8 (480+720), MPEG-2 vs GST (IP/B/1080), JPEG `mjpeg_vaapi`, RGA `scale_vaapi`, unit probe/fill, the `gbm-probe` and `va-export` clients, and `vainfo`.
+Last recorded host run: **PASS=32 FAIL=0** (2026-09-04, copy-out merged; run twice back-to-back, deterministic). Note the matrix decodes only the first 32 frames of the SVT clip — full-clip hw-vs-sw compare is the stronger AV1 check (`60/60` bit-exact). The script covers H.264 (CB/Main/High/B/all-P/slices/4K/QCIF/High10 p010le/High422 8+10-bit), HEVC (Main/WPP/4K/Main10 p010le), **AV1 (aom-8, aom-49, svt-32, 4K, default)**, VP8 (480+720), MPEG-2 vs GST (IP/B/1080), JPEG `mjpeg_vaapi`, RGA `scale_vaapi`, unit probe/fill, the `gbm-probe` and `va-export` clients, and `vainfo`.
 
 ## Desktop apps (Chrome / Firefox / VLC)
 
@@ -70,6 +70,30 @@ All of them need `LIBVA_DRIVER_NAME=v4l2stateless` in the **graphical** environm
 | VLC | `avcodec-hw=vaapi` in `vlcrc`. |
 
 Full steps, checks, and caveats: **[APPS.md](APPS.md)**.
+
+## Status highlights (2026-09-04)
+
+- **AV1 copy-out shipped (`8b5ea0c`)**: WebCodecs/MSE players queue one surface
+  per buffered frame, which decoupled surface lifetime from capture-buffer usage
+  and drained even the 40-slot pool in ~5s (silent HEVC fallback). Every decoded
+  frame is already snapshotted at `pull_capture` (GBM bo for display surfaces,
+  memfd otherwise), so the context now tracks slot→buffer with the same
+  `refresh_frame_flags` submitted to the kernel and returns a buffer the moment
+  its slot is overwritten. The slot model is armed **only by the OBU-parse
+  truth** — heuristic-flag streams keep the legacy release, because recycling
+  buffers per wrong flags exposes the kernel's equally-wrong slot table as
+  corruption (proven on SVT during bring-up). Fixed en route: `surface_id` was
+  never assigned (buf_owner map silently tracked surface 0), and the SVT
+  heuristic stored the **absolute** order hint as the GOP length (first GOP
+  masked it; later GOPs corrupted 20/60 frames — invisible to the 32-frame
+  matrix window).
+- **bilibili WebCodecs AV1 (`9a6a4ce`/`e136cd1`)**: BILIAV1's slot policy
+  defeats every order-hint heuristic, so the driver walks all frame OBUs in the
+  submitted span (4 candidate header layouts for the optional
+  screen-content/integer-MV bits) and only adopts the parsed
+  `refresh_frame_flags` when frame_type/show_frame/order_hint/primary_ref_frame
+  all verify against the VA picture parameters. AV1 pool is 40 slots (hantro AV1
+  capture does not eat CMA).
 
 ## Status highlights (2026-09-03)
 

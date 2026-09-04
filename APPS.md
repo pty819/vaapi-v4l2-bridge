@@ -6,7 +6,7 @@ instead of a real i915/AMD VA driver or a vendor MPP stack.
 This is the RK3588 / Orange Pi 5 setup used on the development NAS. Codec
 support and the `hwdownload` success rule are in [README.md](README.md).
 
-Last verified **2026-09-03** on the development NAS (Chrome live hw decode + visible picture on bilibili 1080p): `LIBVA_DRIVER_NAME=v4l2stateless` is in `~/.config/environment.d/90-libva.conf`; Chrome menu uses `/usr/local/bin/google-chrome-stable` (a copy of the wrapper); Firefox is Mozilla `.deb` 154.0.1 with `user.js` in both profiles; VLC `avcodec-hw=vaapi`.
+Last verified **2026-09-04** on the development NAS (Chrome live hw decode + visible picture on bilibili 1080p; bilibili WebCodecs AV1 soak + YouTube av01 both clean): `LIBVA_DRIVER_NAME=v4l2stateless` is in `~/.config/environment.d/90-libva.conf`; Chrome menu uses `/usr/local/bin/google-chrome-stable` (a copy of the wrapper); Firefox is Mozilla `.deb` 154.0.1 with `user.js` in both profiles; VLC `avcodec-hw=vaapi`.
 
 
 ## One environment variable for everyone
@@ -117,9 +117,9 @@ by full path if you want hardware decode.
 
 ### Check
 
-Open `chrome://gpu` → **Video Acceleration Information**. H.264 / HEVC
-should list Hardware (AV1 is not advertised by the bridge). Start with 1080p;
-4K HDR / VP9 will not use this bridge.
+Open `chrome://gpu` → **Video Acceleration Information**. H.264 / HEVC / AV1
+(8-bit Profile 0) all list Hardware. Start with 1080p; 4K HDR / VP9 will not
+use this bridge.
 
 Hardware decode is a resolution-dependent choice: a 320x240 QCIF clip decodes
 with `FFmpegVideoDecoder` (software) even when everything works. Use a 1080p
@@ -134,6 +134,10 @@ The driver side prints `H.264 config uses /dev/videoN` per session. Per-buffer
 `capture mmap idx=` lines are gated behind `V4L2SL_DEBUG=1`. Verified
 2026-09-03 live on bilibili 1080p: `VaapiVideoDecoder` + non-black canvas
 frames + GPU process holds the rkvdec node + zero `eglCreateImage` errors.
+2026-09-04: bilibili WebCodecs AV1 (62-min video, 5-min soak + seek storm,
+720p30, 2 dropped frames total) and YouTube av01 forced via an
+MSE-level codec shim (1080p60) both held `/dev/video4` with zero pool
+errors — the DPB-model copy-out release keeps the capture pool bounded.
 
 ### Zero-copy display path (GBM surfaces, since 2026-09-03)
 
@@ -262,6 +266,6 @@ Compare to a software decode of the same file. The matrix script is
 ## What this board will not hardware-decode
 
 - **VP9** — no VP9 OUTPUT fourcc on the mainline hantro node here
-- **AV1 / HEVC / H.264 10-bit HDR playback in browsers** — do not force it
+- **HEVC / H.264 10-bit HDR playback in browsers** — do not force it (AV1 is 8-bit Profile 0 only, and works)
 - Mid-stream resolution changes in Chrome/Firefox — poorly tested
 - Chromium-with-V4L2: it never opens this `.so`; that is expected

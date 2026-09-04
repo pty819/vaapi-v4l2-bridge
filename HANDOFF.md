@@ -108,15 +108,34 @@ HEVC 特有：SPS 是 **全局** control（`which=0`），绑 request 会 ioctl 
 
 ---
 
-## AV1（refresh_frame_flags 推断）
+## AV1（refresh_frame_flags：真值解析 + 启发式回退）
 
-VA **不暴露** `refresh_frame_flags`。驱动按第一帧 INTER 锁风格，再填 bitmask：
+VA **不暴露** `refresh_frame_flags`。两级策略：
+
+1. **真值解析（主路径，Chrome 系）**：Chrome 提交的 slice buffer 里有整个
+   OBU run，驱动 walk 所有 frame OBU、按 dav1d 字段序解 uncompressed
+   header（4 种候选布局覆盖可选 screen-content/integer-MV 位），并用
+   frame_type / show_frame / order_hint / primary_ref_frame 四个字段对 VA
+   参数**校验通过才采纳**。解析成功同时武装 slot 模型（copy-out，见下）。
+   手撕 AV1 头四个坑：order_hint_bits=f(3)+1；两个尺寸长度前缀**连读**；
+   帧头开头 show_existing_frame 位；KEY&&!show 也读 f(8)。
+2. **启发式（ffmpeg 裸 tile 回退）**：按第一帧 INTER 锁风格，再填 bitmask：
 
 | 风格 | 判定（KEY 之后第一帧 INTER） | refresh |
 |---|---|---|
 | `LIBAOM_RTC` | 第一帧 INTER **shown** | `1u << (order_hint % 6)`，槽 6–7 留 KEY |
-| `SVT` | 第一帧 INTER hidden + `showable` + `primary_ref_frame != 7` | shown 叶 = 0；第一个 hidden ARF 记下 GOP/L0；之后 `cur > av1_l0_oh` 为 L0；其余 hidden 用 `g = l0_oh - prev_l0_oh` 的层图 |
+| `SVT` | 第一帧 INTER hidden + `showable` + `primary_ref_frame != 7` | shown 叶 = 0；第一个 hidden ARF 记下 GOP（**距 KEY 的距离**，KEY 的 oh 存 `key_oh`——存绝对 oh 是 09-04 修掉的 bug，首 GOP 恰好相等、48+ 全错）/L0；之后 `cur > av1_l0_oh` 为 L0；其余 hidden 用 `g = l0_oh - prev_l0_oh` 的层图 |
 | `LIBAOM` | 其它（filtered ARF：not showable，`primary_ref=7`） | DPB 占用 + `get_free_ref_map_index` / `get_refresh_idx`（8 槽 first_dup） |
+
+**copy-out 释放（09-04，`8b5ea0c`）**：pull_capture 本就逐帧快照（GBM bo /
+memfd），capture buffer 剩唯一职责=内核 DPB 参考。上下文用提交给内核的
+同一份 refresh 跟踪 slot→buffer，槽位覆写即归还（refresh==0 立即归还），
+活 buffer 被内核 DPB（~10）而非播放器队列深度约束——WebCodecs/MSE 深度
+预解码队列不再抽干池子。**信任门是承重墙**：slot 模型只由解析真值激活；
+启发式流走遗留"buffer 挂表面"释放（模型+错启发式=快速回收暴露内核同样
+错的槽位表成花屏，SVT 实证）。配套：`has_pic` 标志把"已解码"与
+"持有 buffer"解耦（derive/get_image 不再看 buf_index）；`surface_id`
+创建时赋值（此前 calloc 零，buf_owner 全追 surface 0）。
 
 `order_hints[]` 按 **ref type**（LAST=1…ALTREF=7）填。`skip_mode_frame[]` 按 spec 5.9.22 / ffmpeg `skip_mode_params()` 推。
 
@@ -192,6 +211,8 @@ Debian/XtraDeb 的 arm64 Chromium 编的是 `use_v4l2_codec`，直连 `/dev/vide
 - **浏览器强制硬解 VP9 / 10-bit HDR**：不要开 `media.hardware-video-decoding.force-enabled`，这颗 VPU 会被打挂
 - **浏览器中途改分辨率**：驱动会对 capture 做 STREAMOFF / S_FMT / REQBUFS renegotiate；Chrome/Firefox 这条没有矩阵覆盖
 - **H.264 High422 已验收（09-02 晚）**：8/10bit hw==sw bit-exact。ffmpeg 到不了桥是上游双门控（h264 get_pixel_format 只给 4:2:0 加 VAAPI 候选 + vaapi profile map 无 H264_HIGH_422），不是桥的问题；VA 路径用 tests/va_h264422_client.c 全链路驱动，内核路径 GST v4l2slh264dec 对 avdec_h264（10-bit 经 tests/nv20_unpack.py 解包含 colmv 尾）。NV20 capture stride=1600、帧尾 460800B 是 colmv；GST videoconvert 的 10bit 解包有 ±1 舍入，勿用它做位级判据
+- **ffmpeg 解 BILIAV1 流仍花屏**（09-04 定界）：启发式对 bilibili 编码器的槽位策略原理上无解（真值在 OBU 头里，ffmpeg 只交裸 tile）；Chrome 路径走解析器不受影响。矩阵不含此流，非回归
+- **矩阵的 SVT 用例只解码前 32 帧**：GOP2 起的错（33+ 帧）矩阵永远看不见——AV1 改动后应加做全片 hw-vs-sw framemd5 对比（`av1_svt` 现 60/60 bit-exact）
 - 官方 Chrome **必须**走包装脚本（`scripts/google-chrome-vaapi` / `/usr/local/bin/google-chrome-stable`）。裸跑 `/usr/bin/google-chrome-stable` 会跳过非 PCI 的 panthor
 - **浏览器 10-bit（09-03 实测）**：8-bit HEVC 1080p 在 Chrome 经桥硬解**可用**（驱动侧会话验证）；Main10 在 demux 层被拒（`DEMUXER_ERROR_NO_SUPPORTED_STREAMS`），无 flag 可强开、Chrome 无 HEVC 软解回退，SDR 面板无实际意义。Firefox 的 `media.hardware-video-decoding.force-enabled` 仍然不要开
 
@@ -279,3 +300,17 @@ P3 聚群 7-11 + P4 项 6-8 全部落地并合 master（`e0ec24b`）：持久 me
 PRIME 层/probe 遍历四处共享 helper。解码路径 strace 收尾 **~7 ioctl/帧**
 持平。C12 双重验证不可修（libva 2.23.0 与上游 master 均无 update_grain）。
 明细见 STATE.md 与 docs/perf-baseline-2026-09.md。
+
+## 2026-09-04 — bilibili WebCodecs AV1 打通 + copy-out 释放（池干涸终结）
+
+两个阶段（明细都在 STATE.md）：
+
+1. **refresh 真值解析 + 40 槽池**（`9a6a4ce`/`e136cd1`）：BILIAV1 的槽位
+   策略任何 order_hint 启发式都推不出（全 INTER 帧鬼影花屏，只有关键帧
+   对）——修法是直接解 Chrome 提交的 OBU span（见 AV1 节）。池扩到 40 槽
+   （hantro AV1 capture 不占 CMA）。Chrome 会话粘性：VA 解码失败后整个
+   会话不再重试 AV1，复测须重启实例。
+2. **copy-out / DPB 模型释放**（`8b5ea0c`）：见 AV1 节。验证：矩阵双连
+   ALL_PASS、av1_svt 全片 60/60 bit-exact（顺带修掉 surface_id 未赋值、
+   SVT gop 存绝对 oh 两个潜伏 bug）、bilibili 登录态 62 分钟片 5 分钟浸泡
+   + 4 连跳转风暴（零池错误）、YouTube av01 1080p60（MSE shim）干净。
