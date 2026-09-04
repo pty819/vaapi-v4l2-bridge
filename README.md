@@ -1,6 +1,6 @@
 # vaapi-v4l2-bridge
 
-Last verified **2026-09-04** on Orange Pi 5 (Armbian 26.8.3 resolute, kernel 7.1.8-edge-rockchip64). Ops notes: [HANDOFF.md](HANDOFF.md). Snapshot: [STATE.md](STATE.md).
+Last verified **2026-09-04** on Orange Pi 5 (Armbian 26.8.3 resolute, kernel 7.1.8-edge-rockchip64). Ops notes: [HANDOFF.md](HANDOFF.md). Snapshot: [STATE.md](STATE.md). Module map (what each `.c` file owns, how a VA call becomes a V4L2 request, Chrome vs ffmpeg pixel paths): [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 libva backend that translates VA-API decode to the Linux V4L2 Request API (stateless).
 Target: Rockchip RK3588 / Orange Pi 5 on **mainline** Armbian (no vendor BSP, no MPP).
