@@ -244,3 +244,36 @@ never hit:
 
 Verification: refresh truth + 1285-frame 0-error session (dropped 0), matrix
 PASS=32 before and after. Known-good ffmpeg heuristic paths unchanged.
+
+## 2026-09-04 — soak findings: bilibili WebCodecs decode-ahead vs zero-copy (open)
+
+A 15+ min logged-in soak answered "is AV1 normal?" precisely:
+
+- **Decode correctness: fixed and stable.** refresh truth parsing holds across
+  sessions; when the AV1 pipeline runs, playback is clean (0 dropped in every
+  measured window, correct picture).
+- **Steady state on bilibili: falls back to HEVC within seconds of startup.**
+  bwp's WebCodecs pipeline decode-ahead has no client-side queue bound; with
+  our zero-copy GBM export every queued VideoFrame IS a capture buffer, and
+  the player holds more frames than any pool before it starts displaying
+  (buffered-start threshold). Experiments (all reverted):
+  1. bounded blocking wait in vaEndPicture (2s/12s/60s, global lock released,
+     dedicated pool mutex+cond): **60s wait recycled ZERO surfaces** — playback
+     had not started, so nothing displays, so nothing recycles. Circular.
+  2. pool 120: the kernel REQBUFS caps this hantro capture queue at **64**;
+     still below the start threshold. Blocking also degrades UX from "fast
+     clean fallback" to "endless loading spinner" — worse than the error path.
+- **Why x86 works**: Chrome's WebCodecs on typical Intel/AMD setups uses the
+  COPY path (decoder output copied into client frames, VA surfaces recycle
+  immediately). We deliberately run zero-copy (GBM single-object NV12 export)
+  for compositor efficiency — that choice is what couples surface lifetime to
+  player queue depth.
+- **Architecture direction (next session)**: eager copy-out for WebCodecs-style
+  clients — at vaSyncSurface, snapshot decode->memfd (machinery exists), then
+  release the capture buffer as soon as our own DPB model (refresh_frame_flags
+  is now parsed from the bitstream, so the slot map is known exactly) says its
+  slot was overwritten. Export then copies memfd->GBM bo (CPU) instead of
+  RGA-blitting from the V4L2 buffer. Cost: ~100MB/s memcpy at 720p30; gain:
+  live capture buffers bounded by kernel DPB (~10) instead of player queue.
+- Current shipped state: correct decode + graceful HEVC fallback when the
+  prebuffer burst exceeds the 40-slot pool. Matrix PASS=32.
