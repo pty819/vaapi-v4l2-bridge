@@ -1321,24 +1321,13 @@ int v4l2sl_submit_request(int request_fd)
 void v4l2sl_explog(const char *fmt, ...)
 {
     va_list ap;
-    int fd;
-    char buf[512];
-    int n;
 
-    va_start(ap, fmt);
-    n = vsnprintf(buf, sizeof(buf), fmt, ap);
-    va_end(ap);
-    if (n < 0)
+    if (!v4l2sl_debug)
         return;
-    if (n >= (int)sizeof(buf))
-        n = (int)sizeof(buf) - 1;
-    fwrite(buf, 1, (size_t)n, stderr);
+    va_start(ap, fmt);
+    vfprintf(stderr, fmt, ap);
+    va_end(ap);
     fflush(stderr);
-    fd = open("/tmp/v4l2sl-expbuf.log", O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644);
-    if (fd >= 0) {
-        (void)write(fd, buf, (size_t)n);
-        close(fd);
-    }
 }
 
 int v4l2sl_expbuf_export_wanted(void)
@@ -1346,21 +1335,15 @@ int v4l2sl_expbuf_export_wanted(void)
     static int once, wanted;
     if (!once) {
         const char *e = getenv("V4L2SL_EXPBUF_EXPORT");
-        const char *rt;
-        char path[256];
 
-        wanted = e && e[0] && e[0] != '0';
-        /* Chrome GPU process drops unknown env (only LIBVA_* survive).
-         * A runtime flag file is the experiment switch that Chrome can see. */
-        if (!wanted) {
-            rt = getenv("XDG_RUNTIME_DIR");
-            snprintf(path, sizeof(path), "%s/v4l2sl-expbuf",
-                     (rt && rt[0]) ? rt : "/tmp");
-            wanted = access(path, F_OK) == 0;
-        }
+        /* Default ON after Chrome zero-copy proof. Opt out with =0. */
+        wanted = 1;
+        if (e && e[0] == '0')
+            wanted = 0;
         once = 1;
-        v4l2sl_explog("v4l2stateless: EXPBUF wanted=%d pid=%d\n",
-                      wanted, getpid());
+        if (v4l2sl_debug)
+            fprintf(stderr, "v4l2stateless: EXPBUF wanted=%d pid=%d\n",
+                    wanted, getpid());
     }
     return wanted;
 }

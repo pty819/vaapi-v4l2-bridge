@@ -2086,18 +2086,12 @@ v4l2sl_export_surface_handle(VADriverContextP ctx, VASurfaceID surface_id,
         return VA_STATUS_ERROR_UNSUPPORTED_MEMORY_TYPE;
     }
     /*
-     * Decode surfaces: VPU capture buffers must never be exported (EXPBUF
-     * + GPU import is a chip bug), and handing the memfd out as DRM_PRIME
-     * is the black-frame lie. Export the driver-owned linear GBM copy
-     * instead - a real dma-buf in the single-object NV12 shape Chrome's
-     * zero-copy GL path imports. Decode surface = attached capture buffer
-     * or member of a VLD context (cpu_ptr is NOT a discriminator:
-     * create_surfaces callocs it for every surface). Falls back to
-     * UNIMPLEMENTED when GBM is unavailable or the format is not NV12.
+     * Decode surfaces: EXPBUF the VPU capture buffer (single-object NV12
+     * dma-buf). Chrome exports the pool before the first picture; we
+     * claim a capture index at first export and decode into that same
+     * slot. V4L2SL_EXPBUF_EXPORT=0 restores the GBM-copy fallback.
      */
     c = context_owning_capture(driver_data, surf);
-    /* Experiment: V4L2SL_EXPBUF_EXPORT=1 exports the VPU capture dma-buf
-     * instead of the GBM copy. Shipping default remains GBM. */
     v4l2sl_explog(
             "v4l2stateless: export surf=%u idx=%d view=%p wanted=%d c=%p fd=%d\n",
             (unsigned)surface_id, surf->buf_index, surf->cap_view,

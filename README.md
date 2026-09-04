@@ -115,7 +115,7 @@ IntraBC probe was 10/10 bit-exact. This is the ffmpeg raw-tile refresh
 heuristic on a high-lag GOP, not a missing userspace flag. Phase A closes
 the item as documented; no C change.
 
-Mid-stream resolution / bit-depth / chroma changes renegotiate capture (`STREAMOFF` / `S_FMT` / `REQBUFS`). Export: `vaExportSurfaceHandle` returns a single-object NV12 dmabuf backed by a driver-owned linear GBM bo (`src/v4l2stateless_gbm.c`) — the descriptor shape Chromium requires; VPU capture buffers never leave the kernel via `EXPBUF` (banned on this SoC).
+Mid-stream resolution / bit-depth / chroma changes renegotiate capture (`STREAMOFF` / `S_FMT` / `REQBUFS`). Export: `vaExportSurfaceHandle` returns a single-object NV12 dmabuf from `VIDIOC_EXPBUF` of the VPU capture buffer (Chrome zero-copy, no capture→GBM memcpy). Opt out with `V4L2SL_EXPBUF_EXPORT=0` to restore the GBM copy. See [docs/EXPBUF-RETRY.md](docs/EXPBUF-RETRY.md).
 
 Full host matrix (needs `/dev/video*` and writes clips under `verify/`, gitignored):
 

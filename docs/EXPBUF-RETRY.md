@@ -141,3 +141,14 @@ Bilibili live `https://live.bilibili.com/22957791` ~75s:
 - host alive (~5:45). dri `.so` still 2026-09-04 17:13 (GBM shipping).
 
 **Not shipped.** Do not `sudo cp` dri or merge master until asked.
+
+
+## Phase 5 — shipping default (2026-09-04)
+
+Chrome gate passed (local 1080p + bilibili live). EXPBUF is now the
+**default** path: `v4l2sl_expbuf_export_wanted()` returns 1 unless
+`V4L2SL_EXPBUF_EXPORT=0`. Per-frame `/tmp/v4l2sl-expbuf.log` is gone;
+claim/export traces only with `V4L2SL_DEBUG=1`.
+
+System dri `.so` is the EXPBUF build after this merge. GBM copy remains
+as fallback when EXPBUF ioctl fails or the env opts out.

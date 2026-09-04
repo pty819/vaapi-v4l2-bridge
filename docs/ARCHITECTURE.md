@@ -138,9 +138,10 @@ Also owns:
   **snapshot** it (GBM bo if the surface is a display surface, else memfd).
 - Capture / output pool accounting.
 
-**Banned:** `VIDIOC_EXPBUF` on VPU capture buffers. RK3588 CMA/IOMMU
-hangs if the GPU imports those dma-bufs. Export is always a *copy* onto
-a driver-owned backing (section 7).
+**Default:** `VIDIOC_EXPBUF` of the VPU capture buffer (Chrome zero-copy).
+The pre-PSU hang that banned this is documented in
+[EXPBUF-RETRY.md](EXPBUF-RETRY.md); after the PSU swap the path is the
+shipping default. `V4L2SL_EXPBUF_EXPORT=0` restores the GBM copy.
 
 ### 4.3 Device discovery (`src/v4l2stateless_probe.c` + `.h`)
 
@@ -301,14 +302,11 @@ Lazy memfd: if the bo is the snapshot, the memfd is **stale**
 that (it never GetImages).
 
 ```
-VPU CAPTURE (CMA, never exported)
-        │  memcpy once per frame
-        ▼
-   ┌─ display surface? ─ yes ─► GBM bo ──Export──► GPU (EGL image)
-   │                         │
-   │                         └─ ensure_memfd on demand ─► memfd
-   no
-   └──► memfd ──GetImage/Derive──► ffmpeg / Firefox
+VPU CAPTURE (CMA)
+        │  EXPBUF (default) ──Export──► GPU (EGL image)
+        │
+        └─ GetImage/Derive reads capture mmap (no GBM copy)
+           V4L2SL_EXPBUF_EXPORT=0 restores GBM memcpy snapshot
 ```
 
 ---
@@ -468,7 +466,7 @@ until 2026-09-04.
 
 ## 13. Invariants (break these and you get a hang or a silent SW fallback)
 
-1. Never `EXPBUF` a VPU capture buffer.
+1. EXPBUF of VPU capture is the shipping default; `V4L2SL_EXPBUF_EXPORT=0` restores the GBM copy.
 2. Never submit AV1 sequence controls as request-scoped.
 3. Never truncate an AV1 tile grid and still tell the kernel the original
    `tile_cols`/`tile_rows`.
