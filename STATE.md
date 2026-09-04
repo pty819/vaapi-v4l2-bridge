@@ -372,3 +372,13 @@ av01 via MSE shim: 1080p60 clean, codecs locked av01.0.09M.08.
 - **Compare:** hw rc=0 both. `cmp /tmp/a_c1.md5 /tmp/a_c1sw.md5` and `cmp /tmp/a_c2.md5 /tmp/a_c2sw.md5` match. 60/60 unique hashes each clip (aom first `747488486943da9f651ad0f088203493`, svt first `057c6a06b81d8507d436ffd9e766ac87`). Capture `1280x720 -> 1280x720 NV12` 40 capture / 4 output buffers both jobs.
 - **grep -hcE "no free capture|failed":** 0 and 0. Tighter: `v4l2stateless: no free capture` = 0/0, `failed to set AV1` = 0/0, `DQBUF ... ERROR` = 0/0. Loose `failed` = 0/0 (no ffmpeg "failed to" noise).
 - **dmesg:** clean. `sudo dmesg | tail` unchanged vs pre-test (last lines still rockchip-rga 160x120 from earlier VPP; no new hantro/AV1/video4 errors). Usual `derive_image: surface 1 has no decoded frame` on both stderr (same as other passing AV1 runs).
+
+### Concurrent (browser)
+
+- **Verdict:** A4_BROWSER_PASS. Phase A item closed. Two distinct Chrome tabs played concurrent AV1 (bilibili `av01` 720p, codecid 13 / `100024.m4s`) on `/dev/video4` (`rockchip,rk3588-av1-vpu-dec`).
+- **URLs:** `https://www.bilibili.com/video/BV1Vst861EwN` (tab0, 1281x720) and `https://www.bilibili.com/video/BV1G7tG6tEwL` (tab1, 1280x720). Two page targets via CDP `Target.createTarget` (brief `pages[1]||pages[0]` would have attached both URLs to one tab when `/json` had a single page).
+- **Method:** wrapper `google-chrome-stable` `--user-data-dir=$HOME/.config/gc-dbg --remote-debugging-port=9222`. Official soak also passed `--disable-background-media-suspend --disable-renderer-backgrounding --disable-backgrounding-occluded-windows` so background tabs keep decoding (without these, Chrome paused the occluded tab at `t` frozen). Driver: `/tmp/twotabs.js`. SIGTERM between AV1 sessions; never `-9`. `gc-dbg/Default` left intact.
+- **Probes (4 x 15s):** both `t` advanced 20 → 35 → 50 → 65, `paused:false`, `dropped` flat (tab0=2, tab1=3, not climbing). Both codecs locked `av01` (`41469086614-1-100024.m4s` / `41488810129-1-100024.m4s`). Distinct targets `1E20111C506EA46AB4FFC4E7D451CF79` and `BF94F3075F0FA0E4D249BEAC1ECB7914`.
+- **video4:** Chrome GPU process held two `/dev/video4` + two `/dev/media3` FDs from the second context open through all four probes (`opened /dev/video4` x2, renegotiate `1280x720 -> 1280x720 NV12` x2).
+- **grep:** `"AV1 config uses"` = 4 (≥2; 2 vainfo-style at Chrome start + 1 per tab). `no-free-capture|pull capture failed|VA_STATUS` = 0.
+- **Shutdown:** `pkill -TERM -f user-data-dir=$HOME/.config/gc-dbg`; sleep 6; Chrome gone, 9222 closed.
