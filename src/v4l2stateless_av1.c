@@ -390,9 +390,13 @@ static uint8_t av1_infer_refresh_svt(const VASurfaceID sids[8],
 
     if (ctx && !ctx->av1.have_first_arf) {
         ctx->av1.have_first_arf = 1;
-        ctx->av1.gop = (uint8_t)(cur ? cur : 8);
+        /* Distance from the GOP's KEY — the absolute order_hint only
+         * equals it in the first GOP (cur=16, key_oh=0). At later GOPs
+         * storing `cur` (48...) broke every layer computation after it. */
+        ctx->av1.gop = (uint8_t)(cur > ctx->av1.key_oh ? cur - ctx->av1.key_oh
+                                                       : (cur ? cur : 8));
         ctx->av1.l0_oh = cur;
-        ctx->av1.prev_l0_oh = 0;
+        ctx->av1.prev_l0_oh = ctx->av1.key_oh;
         ctx->av1.l0_toggle = 1;
         ctx->av1.l1_toggle = 0;
         r = av1_most_dup_first(sids, hints);
@@ -483,6 +487,7 @@ static uint8_t av1_infer_refresh_flags(const VADecPictureParameterBufferAV1 *pic
             ctx->av1.have_first_arf = 0;
             ctx->av1.l0_oh = 0;
             ctx->av1.prev_l0_oh = 0;
+            ctx->av1.key_oh = cur;
         }
         return 0xff;
     }
@@ -886,9 +891,14 @@ static void av1_fill_frame_params(struct v4l2_ctrl_av1_frame *frame,
                     break;
                 }
         }
-        if (parsed_ok)
+        if (parsed_ok) {
+            /* OBU truth available: the slot model may own buffer release.
+             * The order-hint heuristic is NOT trusted for that — SVT-style
+             * pyramids mismatch it, and early recycling then exposes the
+             * kernel's equally-wrong slot table as corruption. */
+            ctx->av1.model_active = 1;
             frame->refresh_frame_flags = parsed;
-        else
+        } else
             frame->refresh_frame_flags = av1_infer_refresh_flags(pic, dd, ctx);
     }
 
@@ -940,6 +950,76 @@ static void av1_fill_frame_params(struct v4l2_ctrl_av1_frame *frame,
 /*
  * AV1 decode pipeline — translate and submit
  */
+/* AV1 copy-out release. pull_capture has already snapshotted this frame
+ * (GBM bo for display surfaces, memfd otherwise), so a capture buffer's
+ * only remaining duty is being a kernel DPB reference. Track the slots
+ * with the same refresh_frame_flags we submit to the kernel and hand
+ * buffers back as soon as their slot is overwritten; non-reference
+ * frames (refresh == 0) return immediately. This is what bounds the
+ * pool against zero-copy clients that queue one surface per buffered
+ * frame (Chrome WebCodecs/MSE decode-ahead) instead of the buffer
+ * lifetime following the surface lifetime. */
+void v4l2sl_av1_dpb_model_reset(struct v4l2sl_context *ctx)
+{
+    int i;
+
+    if (!ctx)
+        return;
+    ctx->av1.model_active = 0;
+    for (i = 0; i < V4L2_AV1_TOTAL_REFS_PER_FRAME; i++)
+        ctx->av1.slot_buf[i] = -1;
+    for (i = 0; i < V4L2SL_MAX_CAPTURE_BUFS; i++)
+        ctx->av1.buf_owner[i] = VA_INVALID_SURFACE;
+}
+
+static void av1_release_unrefd(struct v4l2sl_context *ctx,
+                               struct v4l2sl_surface *surf,
+                               int buf, uint8_t refresh)
+{
+    int s, t, still;
+
+    if (!ctx || !surf || buf < 0 || buf >= V4L2SL_MAX_CAPTURE_BUFS)
+        return;
+    ctx->av1.buf_owner[buf] = surf->surface_id;
+
+    if (!refresh) {
+        if (getenv("V4L2SL_DEBUG"))
+            fprintf(stderr, "v4l2stateless: AV1 rel buf=%d (nonref)\n", buf);
+        surf->buf_index = -1;
+        ctx->av1.buf_owner[buf] = VA_INVALID_SURFACE;
+        v4l2sl_cap_pool_push(ctx, buf);
+        return;
+    }
+    for (s = 0; s < V4L2_AV1_TOTAL_REFS_PER_FRAME; s++) {
+        int old;
+
+        if (!(refresh & (1u << s)))
+            continue;
+        old = ctx->av1.slot_buf[s];
+        ctx->av1.slot_buf[s] = buf;
+        if (old < 0 || old == buf)
+            continue;
+        still = 0;
+        for (t = 0; t < V4L2_AV1_TOTAL_REFS_PER_FRAME; t++)
+            if (ctx->av1.slot_buf[t] == old)
+                still = 1;
+        if (still)
+            continue;
+        {
+            VASurfaceID id = ctx->av1.buf_owner[old];
+            struct v4l2sl_surface *os = (id != VA_INVALID_SURFACE)
+                ? v4l2sl_surface_by_id(ctx->driver_data, id) : NULL;
+            if (os && os->buf_index == old)
+                os->buf_index = -1;
+            if (getenv("V4L2SL_DEBUG"))
+                fprintf(stderr, "v4l2stateless: AV1 rel buf=%d (slot %d -> %d)\n",
+                        old, s, buf);
+            ctx->av1.buf_owner[old] = VA_INVALID_SURFACE;
+            v4l2sl_cap_pool_push(ctx, old);
+        }
+    }
+}
+
 VAStatus v4l2sl_av1_translate(struct v4l2sl_context *ctx,
                               struct v4l2sl_buffer **buffers,
                               int num_buffers)
@@ -1196,6 +1276,15 @@ VAStatus v4l2sl_av1_translate(struct v4l2sl_context *ctx,
         if (v4l2sl_surface_pull_capture(ctx, surf, done_cap) < 0) {
             fprintf(stderr, "v4l2stateless: AV1 pull capture failed\n");
             v4l2sl_cap_pool_push(ctx, done_cap);
+        } else {
+            if (getenv("V4L2SL_DEBUG"))
+                fprintf(stderr, "v4l2stateless: AV1 frame surf=%#x oh=%u buf=%d refresh=%02x type=%u\n",
+                        surf->surface_id, pic_param->order_hint, done_cap,
+                        frame.refresh_frame_flags,
+                        pic_param->pic_info_fields.bits.frame_type);
+            if (ctx->av1.model_active)
+                av1_release_unrefd(ctx, surf, done_cap,
+                                   frame.refresh_frame_flags);
         }
     } else {
         v4l2sl_cap_pool_push(ctx, done_cap);

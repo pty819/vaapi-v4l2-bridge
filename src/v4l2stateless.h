@@ -60,6 +60,7 @@ struct v4l2sl_surface {
     unsigned int format;     /* VA fourcc (NV12/P010/YUY2/ARGB) */
     unsigned int rt_format;
     VASurfaceStatus status;
+    int has_pic;             /* holds a decoded picture snapshot (bo/memfd) */
     int buf_index;           /* V4L2 capture buffer index, -1 if not allocated */
     int memfd_fd;          /* memfd snapshot fd (CPU-readback vehicle) */
     uint32_t memfd_size;     /* current ftruncate size of memfd_fd (grow-only) */
@@ -225,8 +226,15 @@ struct v4l2sl_context {
         uint8_t l0_toggle;     /* SVT L0 slots 0-1-2 */
         uint8_t l1_toggle;     /* SVT L1 slots 3-4 */
         uint8_t have_first_arf;
+        uint32_t key_oh;       /* order_hint of the current GOP's KEY */
         uint32_t l0_oh;        /* last SVT L0 ARF order_hint */
         uint32_t prev_l0_oh;   /* previous L0 ARF (mini-GOP length) */
+        /* Kernel-DPB model for the AV1 copy-out release: which capture
+         * buffer each reference slot holds, and which surface owns a
+         * given buffer (to clear buf_index when it is released). */
+        int model_active;      /* slot model owns releases (parsed truth) */
+        int slot_buf[V4L2_AV1_TOTAL_REFS_PER_FRAME];
+        VASurfaceID buf_owner[V4L2SL_MAX_CAPTURE_BUFS];
     } av1;
 
     /* Persistent M2M queues (stateful devices: RGA VPP / VEPU JPEG) */
@@ -439,6 +447,7 @@ VAStatus v4l2sl_hevc_translate(struct v4l2sl_context *ctx,
                                int num_buffers);
 
 /* AV1 translation (v4l2stateless_av1.c) */
+void v4l2sl_av1_dpb_model_reset(struct v4l2sl_context *ctx);
 VAStatus v4l2sl_av1_translate(struct v4l2sl_context *ctx,
                               struct v4l2sl_buffer **buffers,
                               int num_buffers);

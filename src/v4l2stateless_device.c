@@ -419,6 +419,8 @@ void v4l2sl_decode_reset(struct v4l2sl_context *ctx)
         v4l2sl_streamoff(ctx->v4l2_fd, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE);
         ctx->streamed = 0;
     }
+    /* STREAMOFF also drops every kernel DPB reference. */
+    v4l2sl_av1_dpb_model_reset(ctx);
 
     if (ctx->request_fd >= 0) {
         close(ctx->request_fd);
@@ -568,6 +570,7 @@ int v4l2sl_ensure_capture(struct v4l2sl_context *ctx, int width, int height,
         v4l2sl_streamoff(ctx->v4l2_fd, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE);
         v4l2sl_streamoff(ctx->v4l2_fd, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE);
         ctx->streamed = 0;
+        v4l2sl_av1_dpb_model_reset(ctx);
     }
 
     release_ctx_capture_surfaces(ctx);
@@ -1058,6 +1061,7 @@ int v4l2sl_surface_pull_capture(struct v4l2sl_context *ctx,
      */
     if (surf->gbm_bo) {
         if (v4l2sl_gbm_surface_upload(surf, src, stride, alh) == 0) {
+            surf->has_pic = 1;
             surf->buf_index = buf_index;
             surf->stride = stride;
             surf->aligned_h = alh;
@@ -1076,6 +1080,7 @@ int v4l2sl_surface_pull_capture(struct v4l2sl_context *ctx,
         return -1;
     memcpy(dst, src, sz);
 
+    surf->has_pic = 1;
     surf->buf_index = buf_index;
     surf->stride = stride;
     surf->aligned_h = alh;

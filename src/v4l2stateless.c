@@ -618,6 +618,7 @@ v4l2sl_create_surfaces(VADriverContextP ctx,
             goto fail;
         }
 
+        surface->surface_id = id;
         surface->width = width;
         surface->height = height;
         surface->format = format;
@@ -772,6 +773,10 @@ v4l2sl_destroy_surfaces(VADriverContextP ctx,
     struct v4l2sl_driver_data *driver_data = ctx->pDriverData;
 
     pthread_mutex_lock(&g_v4l2sl_lock);
+    if (getenv("V4L2SL_DEBUG") && num_surfaces > 0) {
+        fprintf(stderr, "v4l2stateless: destroy_surfaces n=%d first=%#x\n",
+                num_surfaces, surfaces[0]);
+    }
     for (int i = 0; i < num_surfaces; i++) {
         struct v4l2sl_surface *surface = v4l2sl_surface_by_id(driver_data,
                                                               surfaces[i]);
@@ -792,8 +797,19 @@ v4l2sl_destroy_surfaces(VADriverContextP ctx,
                 }
             }
             if (listed && surface->buf_index >= 0 &&
-                surface->buf_index < c->capture_bufs_allocd)
-                v4l2sl_cap_pool_push(c, surface->buf_index);
+                surface->buf_index < c->capture_bufs_allocd) {
+                if (c->codec == V4L2SL_CODEC_AV1 && c->av1.model_active) {
+                    /* Model-owned release: forget the owner so a recycled
+                     * surface ID is never mistaken for it; the slot update
+                     * pushes the buffer when the kernel stops referencing
+                     * it. */
+                    if (surface->buf_index < V4L2SL_MAX_CAPTURE_BUFS)
+                        c->av1.buf_owner[surface->buf_index] =
+                            VA_INVALID_SURFACE;
+                } else {
+                    v4l2sl_cap_pool_push(c, surface->buf_index);
+                }
+            }
             if (c->current_surface == surface) {
                 c->current_surface = NULL;
                 c->current_surface_id = VA_INVALID_ID;
@@ -981,6 +997,7 @@ v4l2sl_create_context(VADriverContextP ctx,
                     i < V4L2SL_NUM_OUTPUT_BUFS; i++)
         v4l2sl_out_pool_push(context, i);
 
+    v4l2sl_av1_dpb_model_reset(context);
     *context_id = ++driver_data->next_context_id;
     context->context_id = *context_id;
     context->next = driver_data->contexts;
@@ -1251,11 +1268,16 @@ v4l2sl_begin_picture(VADriverContextP ctx,
 
     /* If this surface still holds a decoded capture buffer, return it to the
      * free pool — being re-targeted means its previous frame is obsolete
-     * (and the client has synced it already, per VA-API contract). */
+     * (and the client has synced it already, per VA-API contract).
+     * AV1 defers to the kernel-DPB model: a re-targeted surface's buffer
+     * is only free once its reference slot is overwritten. */
     if (surface->buf_index >= 0) {
         /* Userspace bookkeeping only: hand the buffer back to the free pool.
          * The kernel QBUF happens exactly once, in the decode path. */
-        if (surface->buf_index < context->capture_bufs_allocd)
+        int av1_model = context->codec == V4L2SL_CODEC_AV1 &&
+                        context->av1.model_active;
+        if (!av1_model &&
+            surface->buf_index < context->capture_bufs_allocd)
             v4l2sl_cap_pool_push(context, surface->buf_index);
         surface->buf_index = -1;
         /* Keep memfd so DRM-PRIME clients retain a stable fd. */
@@ -1457,6 +1479,9 @@ v4l2sl_sync_surface(VADriverContextP ctx, VASurfaceID render_target)
     pthread_mutex_lock(&g_v4l2sl_lock);
     surface = v4l2sl_surface_by_id(driver_data, render_target);
     if (!surface) {
+        if (getenv("V4L2SL_DEBUG"))
+            fprintf(stderr, "v4l2stateless: sync lookup fail %#x\n",
+                    render_target);
         pthread_mutex_unlock(&g_v4l2sl_lock);
         return VA_STATUS_ERROR_INVALID_SURFACE;
     }
@@ -1558,11 +1583,14 @@ v4l2sl_derive_image(VADriverContextP ctx,
     surf = v4l2sl_surface_by_id(driver_data, surface);
 
     if (!surf) {
+        if (getenv("V4L2SL_DEBUG"))
+            fprintf(stderr, "v4l2stateless: derive lookup fail %#x\n",
+                    surface);
         pthread_mutex_unlock(&g_v4l2sl_lock);
         return VA_STATUS_ERROR_INVALID_SURFACE;
     }
 
-    if ((surf->memfd_fd < 0 || surf->buf_index < 0) && !surf->cpu_ptr) {
+    if (!surf->has_pic && !surf->cpu_ptr) {
         fprintf(stderr, "v4l2stateless: derive_image: surface %d has no decoded frame\n",
                 surface);
         pthread_mutex_unlock(&g_v4l2sl_lock);
@@ -1826,10 +1854,10 @@ v4l2sl_get_image(VADriverContextP ctx, VASurfaceID surface,
 
     /* Lazy memfd: bo-backed surfaces skip the per-frame memfd copy;
      * refill it from the bo now that someone is reading back. */
-    if (surf->buf_index >= 0)
+    if (surf->has_pic)
         v4l2sl_surface_ensure_memfd(surf);
 
-    if (surf->memfd_fd >= 0 && surf->buf_index >= 0) {
+    if (surf->memfd_fd >= 0) {
         map_size = v4l2sl_capture_plane_size(cap_fcc, src_stride, src_alh);
         mapped = v4l2sl_surface_map_memfd(surf, map_size);
         if (!mapped) {
