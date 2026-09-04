@@ -382,3 +382,29 @@ av01 via MSE shim: 1080p60 clean, codecs locked av01.0.09M.08.
 - **video4:** Chrome GPU process held two `/dev/video4` + two `/dev/media3` FDs from the second context open through all four probes (`opened /dev/video4` x2, renegotiate `1280x720 -> 1280x720 NV12` x2).
 - **grep:** `"AV1 config uses"` = 4 (≥2; 2 vainfo-style at Chrome start + 1 per tab). `no-free-capture|pull capture failed|VA_STATUS` = 0.
 - **Shutdown:** `pkill -TERM -f user-data-dir=$HOME/.config/gc-dbg`; sleep 6; Chrome gone, 9222 closed.
+
+### Browser resolution switch
+
+- **Verdict:** A4/A5_RESSWITCH_PASS. Phase A item closed. YouTube av01 mid-stream quality switch 256x144 → 1920x1080 on `/dev/video4` (`rockchip,rk3588-av1-vpu-dec`). Codecs stayed `av01…` (tiny `av01.0.00M.08`, hd1080 `av01.0.09M.08`). Bilibili quality-menu secondary path not needed (YouTube ladder had both av01 tiny and av01 hd1080).
+- **URL:** `https://www.youtube.com/watch?v=aqz-KE-bpKQ` (Big Buck Bunny). MSE shim hid `avc1`/`vp9`/`vp8` at `MediaSource.isTypeSupported` only. Driver: `/tmp/yt_resswitch.js`.
+- **Method:** wrapper `google-chrome-stable` `--user-data-dir=$HOME/.config/gc-dbg --remote-debugging-port=9222 --remote-allow-origins=* --disable-background-media-suspend --disable-renderer-backgrounding --disable-backgrounding-occluded-windows`. Fresh instance (session stickiness). Log `/tmp/chrome_a4.log`. SIGTERM only; `gc-dbg/Default` left intact.
+- **Probes (8 x 15s, switch at k=2):** PROBE0–1 `t` 24.8 → 39.8, `256x144`, `av01.0.00M.08`, `dropped=0`. PROBE2 (switch instant) `t=0 w=0` while YouTube rebuilt the MSE source. PROBE3–7 `t` 68.2 → 83.2 → 98.2 → 113.2 → 128.2, `1920x1080`, `av01.0.09M.08`, `dropped=0`. `paused:false` every probe. `t` advancing after the switch; dropped flat.
+- **video4:** Chrome GPU pid **408519** held `/dev/video4` from first context through all probes (`fuser` = that GPU process; `lsof` one character-device FD). `opened /dev/video4` x3 (initial 1080, tiny, hd1080).
+- **renegotiate (expected, informational):** `1920x1080 -> 1920x1080 NV12` then `256x144 -> 256x144 NV12` then `1920x1080 -> 1920x1080 NV12` (3 lines). `"AV1 config uses"` = 5.
+- **errors:** `no-free-capture|no free capture|pull capture failed|VA_STATUS` = 0.
+- **Shutdown:** `pkill -TERM -f user-data-dir=$HOME/.config/gc-dbg`; sleep 6; Chrome gone, 9222 closed, video4 free.
+
+## 2026-09-04 — AV1 verification coverage closed (super-res / lossless+intrabc / concurrency / browser res-switch)
+
+Phase A gate. Do not start Phase B until this heading exists. All four Phase A items recorded; browser res-switch is the last.
+
+| Item | Verdict | Notes |
+|---|---|---|
+| A1 super-res | A1_STILL_FAIL (kernel/hantro limitation) | Coded-width fill landed (`f962bd8`); DQBUF errors gone; pictures still wrong when denom>8. SVT regression clean. |
+| A2 lossless | A2_lossless_PASS | 60/60 framemd5 vs software. |
+| A2 IntraBC | A2_intrabc_FAIL (wrong-frames, not kernel-reject) | Brief 2-pass clip never set `allow_intrabc`; flags already forwarded. All-intra diagnostic 10/10. |
+| A3 concurrent local | A3_LOCAL_PASS | Two ffmpeg VA-API AV1 jobs bit-exact vs sequential SW. |
+| A4 concurrent browser | A4_BROWSER_PASS | Two Chrome tabs, both `av01` 720p, video4 held two FDs, errors 0. |
+| A4/A5 browser res-switch | A4/A5_RESSWITCH_PASS | YouTube av01 256x144 → 1920x1080; codecs stayed av01; t advancing; dropped 0; video4 held; error count 0; renegotiate expected. |
+
+Phase A **closed**. Phase B (hot-path cleanup) may start after this commit.
