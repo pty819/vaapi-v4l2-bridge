@@ -152,3 +152,14 @@ claim/export traces only with `V4L2SL_DEBUG=1`.
 
 System dri `.so` is the EXPBUF build after this merge. GBM copy remains
 as fallback when EXPBUF ioctl fails or the env opts out.
+
+Installed 2026-09-04 20:29: `sudo cp` worktree `-O3` `.so` to
+`/usr/lib/aarch64-linux-gnu/dri/v4l2stateless_drv_video.so`. Previous GBM
+copy kept as `v4l2stateless_drv_video.so.gbm-20260904-1713`.
+
+Post-install (no `LIBVA_DRIVERS_PATH`):
+- `va_export_client` 8× EXPBUF, EXPORT/LAZY_EXACT
+- ffmpeg H.264 8-frame MATCH
+- Chrome maps the dri `.so`, wanted=1, 22× EXPBUF, VaapiVideoDecoder,
+  canvas avg=123
+- `tests/run_full_matrix.sh` **PASS=32 FAIL=0** host alive (~5:54)

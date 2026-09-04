@@ -123,7 +123,7 @@ Full host matrix (needs `/dev/video*` and writes clips under `verify/`, gitignor
 bash tests/run_full_matrix.sh
 ```
 
-Last recorded host run: **PASS=32 FAIL=0** (2026-09-04, copy-out merged; run twice back-to-back, deterministic). Note the matrix decodes only the first 32 frames of the SVT clip — full-clip hw-vs-sw compare is the stronger AV1 check (`60/60` bit-exact). The script covers H.264 (CB/Main/High/B/all-P/slices/4K/QCIF/High10 p010le/High422 8+10-bit), HEVC (Main/WPP/4K/Main10 p010le), **AV1 (aom-8, aom-49, svt-32, 4K, default)**, VP8 (480+720), MPEG-2 vs GST (IP/B/1080), JPEG `mjpeg_vaapi`, RGA `scale_vaapi`, unit probe/fill, the `gbm-probe` and `va-export` clients, and `vainfo`.
+Last recorded host run: **PASS=32 FAIL=0** (2026-09-04, EXPBUF default on system dri). Note the matrix decodes only the first 32 frames of the SVT clip — full-clip hw-vs-sw compare is the stronger AV1 check (`60/60` bit-exact). The script covers H.264 (CB/Main/High/B/all-P/slices/4K/QCIF/High10 p010le/High422 8+10-bit), HEVC (Main/WPP/4K/Main10 p010le), **AV1 (aom-8, aom-49, svt-32, 4K, default)**, VP8 (480+720), MPEG-2 vs GST (IP/B/1080), JPEG `mjpeg_vaapi`, RGA `scale_vaapi`, unit probe/fill, the `gbm-probe` and `va-export` clients, and `vainfo`.
 
 ## Desktop apps (Chrome / Firefox / VLC)
 
