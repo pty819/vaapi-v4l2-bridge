@@ -1915,6 +1915,14 @@ v4l2sl_get_image(VADriverContextP ctx, VASurfaceID surface,
      * refill it from the bo now that someone is reading back. */
     if (expbuf_capture_src(surf)) {
         src = expbuf_capture_src(surf);
+    } else if (surf->last_writer == V4L2SL_WRITER_CPU && surf->cpu_ptr) {
+        src = surf->cpu_ptr;
+        src_stride = surf->cpu_stride ? surf->cpu_stride : surf->width;
+        src_alh = surf->height;
+        cap_fcc = V4L2_PIX_FMT_NV12;
+        dst_fourcc = VA_FOURCC_NV12;
+        dst_stride = ib->pitch ? ib->pitch
+                           : v4l2sl_default_image_stride(VA_FOURCC_NV12, copy_w);
     } else if (surf->has_pic) {
         v4l2sl_surface_ensure_memfd(surf);
         src = NULL;

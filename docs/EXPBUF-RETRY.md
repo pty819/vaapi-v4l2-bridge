@@ -163,3 +163,13 @@ Post-install (no `LIBVA_DRIVERS_PATH`):
 - Chrome maps the dri `.so`, wanted=1, 22× EXPBUF, VaapiVideoDecoder,
   canvas avg=123
 - `tests/run_full_matrix.sh` **PASS=32 FAIL=0** host alive (~5:54)
+
+
+## VPP GetImage empty-memfd (2026-09-04, found during EXPBUF ship review)
+
+`scale_vaapi` wrote the scaled frame to `dst->cpu_ptr`, but `vaGetImage`
+preferred the empty create-time memfd (`memfd_fd >= 0` before `cpu_ptr`).
+All 8 hwdownload hashes were identical (`54a0397…`). Pre-existing: same
+hash with `V4L2SL_EXPBUF_EXPORT=0`. Fix: GetImage prefers
+`last_writer == CPU && cpu_ptr`; VPP sets `dst->has_pic`. After the fix
+8 unique hashes. Matrix `VPP_OK` only greps the log, so it did not catch this.

@@ -206,7 +206,13 @@ VAStatus v4l2sl_vpp_run(struct v4l2sl_context *ctx,
               (dst_fcc == VA_FOURCC_ARGB || dst_fcc == VA_FOURCC_BGRA ||
                dst_fcc == VA_FOURCC_BGRX) ? 4 : 1;
 
-    if (src->memfd_fd >= 0 && src->buf_index >= 0 && src->stride) {
+    if (v4l2sl_expbuf_export_wanted() && src->cap_view &&
+        src->buf_index >= 0 && src->stride) {
+        /* Decode snapshot lives in the capture mmap; memfd was never filled. */
+        srcp = src->cap_view;
+        src_stride = src->stride;
+        src_alh = src->aligned_h ? src->aligned_h : src->height;
+    } else if (src->memfd_fd >= 0 && src->buf_index >= 0 && src->stride) {
         v4l2sl_surface_ensure_memfd(src);
         src_map_sz = v4l2sl_capture_plane_size(
             src->cap_fourcc ? src->cap_fourcc : V4L2_PIX_FMT_NV12,
@@ -411,6 +417,7 @@ VAStatus v4l2sl_vpp_run(struct v4l2sl_context *ctx,
     }
 
     st = VA_STATUS_SUCCESS;
+    dst->has_pic = 1;
     dst->last_writer = V4L2SL_WRITER_CPU;
     if (dst->gbm_bo && dst_fcc == VA_FOURCC_NV12)
         v4l2sl_gbm_surface_upload(dst, dst->cpu_ptr, dst->cpu_stride,
