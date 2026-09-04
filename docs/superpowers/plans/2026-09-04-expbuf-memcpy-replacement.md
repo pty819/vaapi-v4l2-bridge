@@ -250,7 +250,27 @@ If Chrome **passes**: commit `experiment: Chrome VaapiVideoDecoder EXPBUF zero-c
 
 - [ ] **Step 1: Write the Phase 0–4 table of PASS/FAIL**
 - [ ] **Step 2: Commit and push `experiment/expbuf-retry`**
-- [ ] **Step 3: Do not merge to master, do not `sudo cp` dri, unless the human says so**
+- [ ] **Step 3: After Phase 4 PASS — ship EXPBUF as default**
+
+This is the approved product outcome (2026-09-04): the dri `.so` should
+stop paying capture→GBM memcpy once Chrome zero-copy on the VPU fd is
+proven.
+
+On the experiment branch first, then merge to master:
+
+1. `v4l2sl_expbuf_export_wanted()` returns true by default; keep
+   `V4L2SL_EXPBUF_EXPORT=0` as an emergency GBM-copy rollback.
+2. Runtime: if `VIDIOC_EXPBUF` fails, log once and fall back to GBM copy
+   for that surface (do not fail `vaEndPicture`).
+3. `ninja -C builddir && echo liyifan | sudo -S cp -f builddir/v4l2stateless_drv_video.so /usr/lib/aarch64-linux-gnu/dri/`
+4. Restart Chrome (session cache). Confirm interpose still shows VPU fd
+   **without** setting the env.
+5. Matrix twice `MATRIX_ALL_PASS` (GetImage path must still work).
+6. Merge `experiment/expbuf-retry` to `master`, push.
+7. Rewrite ARCHITECTURE / README / invariants: EXPBUF is the display
+   path; memcpy is fallback, not the chip-bug floor.
+
+Do **not** do this step if Phase 4 failed.
 
 ---
 

@@ -56,9 +56,12 @@ When `v4l2sl_expbuf_export_wanted()` is true:
    BeginPicture re-target” only if Chrome has already released the
    previous surface (VA contract). If a hang appears here, that is a
    **real** remaining bug, not “PSU”.
-4. Default (`env` unset): unchanged GBM copy. Never `sudo cp` the
-   experiment `.so` over `/usr/lib/.../dri/` until Chrome gate passes
-   and the human asks to flip the default.
+4. Default (`env` unset) **during the experiment**: unchanged GBM copy.
+   Never `sudo cp` over `/usr/lib/.../dri/` until Phase 4 (Chrome) passes.
+   **Once Phase 4 passes, the approved product outcome is to make EXPBUF
+   the shipping default** (drop capture→GBM memcpy) so the dri `.so`
+   Chrome actually loads uses the cheaper path. GBM copy remains a
+   fallback if EXPBUF fails at runtime.
 
 `gbm_bo_import(NV12)` staying EINVAL is OK: Chrome uses EGL dma-buf
 images (`num_objects==1`), which already succeeded in Phase 0.
@@ -72,7 +75,7 @@ images (`num_objects==1`), which already succeeded in Phase 0.
 | 2 | P-frames: export surface N while decoding N+1 (DPB still live) | hang, wrong pixels on N |
 | 3 | HEVC Main + AV1 720p/1080p, same client | hang / mismatch |
 | 4 | Chrome: `LIBVA_DRIVERS_PATH` + env, `ioctl_interpose` shows PRIME of **expbuf** fd; local 720p then bilibili; SIGTERM only | hang, black frames, interpose shows GBM bo fd |
-| 5 | Docs + optional default flip **only after human OK** | — |
+| 5 | Ship: EXPBUF default in the dri `.so` (memcpy gone); GBM fallback on EXPBUF failure | — |
 
 Every GPU-touching command: `timeout -k 5 <budget>`. Chrome: SIGTERM,
 never `-9`. Worktree only.
@@ -92,6 +95,7 @@ Must have **all**:
 ## Non-goals
 
 - 10-bit / P010 GBM
-- Flipping master default in the same commit as the first Chrome pass
+- Flipping the dri `.so` / master default **before** Phase 4 Chrome evidence
+  (after Phase 4, flipping default **is** the intended product change)
 - Rewriting HEVC/AV1 DPB models except as needed to not recycle an
   exported index
