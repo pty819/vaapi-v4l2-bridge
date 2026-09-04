@@ -103,3 +103,9 @@ va_export_client = executable('va_export_client',
   dependencies: [libva_dep, libva_drm_dep, libdrm_dep,
                  dependency('gbm'), dependency('egl'), dependency('glesv2')],
 )
+
+va_expbuf_hold = executable('va_expbuf_hold',
+  files('tests/va_expbuf_hold.c'),
+  dependencies: [libva_dep, libva_drm_dep, libdrm_dep,
+                 dependency('gbm'), dependency('egl'), dependency('glesv2')],
+)

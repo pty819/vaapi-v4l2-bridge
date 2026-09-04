@@ -87,3 +87,14 @@ GetImage/Derive read `capture_buf_ptr[buf_index]`.
 - env unset: EXPORT/LAZY_EXACT 0-7 (GBM copy)
 - env set: 8× `EXPBUF export ok`, 0× falling back, 0× gbm upload,
   EXPORT/LAZY_EXACT 0-7. Host alive.
+
+
+## Phase 2 — DPB-live hold (2026-09-04)
+
+`tests/va_expbuf_hold.c`: decode frame 0 onto surface 0, EXPBUF + keep
+dma-buf fd and an EGLImage, then decode 7 later H.264 pictures onto
+surfaces 1/2/3 cycling (never re-BeginPicture on surface 0). Re-import
+the held fd after those pictures.
+
+`V4L2SL_EXPBUF_EXPORT=1` `h264_baseline.mp4` annex-B (`/tmp/base.h264`):
+`HOLD_EXACT`, 7 later P-frames, host alive (uptime ~5:07).
