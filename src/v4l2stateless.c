@@ -1626,6 +1626,18 @@ v4l2sl_derive_image(VADriverContextP ctx,
         va_fcc = surf->format ? surf->format : VA_FOURCC_NV12;
         data_size = surf->cpu_size;
         mmapped = 2; /* borrowed cpu backing — do not free on DestroyImage */
+    } else if (v4l2sl_expbuf_export_wanted() && surf->buf_index >= 0 && c &&
+               c->capture_buf_ptr[surf->buf_index] &&
+               c->capture_buf_ptr[surf->buf_index] != MAP_FAILED) {
+        map = c->capture_buf_ptr[surf->buf_index];
+        data_size = v4l2sl_capture_plane_size(cap_fcc, stride, aligned_h);
+        mmapped = 2;
+        if (cap_fcc == V4L2_PIX_FMT_NV12)
+            va_fcc = VA_FOURCC_NV12;
+        else if (cap_fcc == V4L2_PIX_FMT_NV15)
+            va_fcc = VA_FOURCC_P010;
+        else
+            va_fcc = VA_FOURCC_YUY2;
     } else {
         v4l2sl_surface_ensure_memfd(surf);
         data_size = v4l2sl_capture_plane_size(cap_fcc, stride, aligned_h);
@@ -1862,10 +1874,20 @@ v4l2sl_get_image(VADriverContextP ctx, VASurfaceID surface,
 
     /* Lazy memfd: bo-backed surfaces skip the per-frame memfd copy;
      * refill it from the bo now that someone is reading back. */
-    if (surf->has_pic)
+    if (v4l2sl_expbuf_export_wanted() && surf->buf_index >= 0 && c &&
+        c->capture_buf_ptr[surf->buf_index] &&
+        c->capture_buf_ptr[surf->buf_index] != MAP_FAILED) {
+        src = c->capture_buf_ptr[surf->buf_index];
+    } else if (surf->has_pic) {
         v4l2sl_surface_ensure_memfd(surf);
+        src = NULL;
+    } else {
+        src = NULL;
+    }
 
-    if (surf->memfd_fd >= 0) {
+    if (src) {
+        /* capture mmap already set */
+    } else if (surf->memfd_fd >= 0) {
         map_size = v4l2sl_capture_plane_size(cap_fcc, src_stride, src_alh);
         mapped = v4l2sl_surface_map_memfd(surf, map_size);
         if (!mapped) {

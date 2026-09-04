@@ -1050,6 +1050,18 @@ int v4l2sl_surface_pull_capture(struct v4l2sl_context *ctx,
 
     src = ctx->capture_buf_ptr[buf_index];
 
+    if (v4l2sl_expbuf_export_wanted()) {
+        /* Skip capture→GBM/memfd memcpy. Chrome EXPBUFs this index.
+         * GetImage/Derive read capture_buf_ptr[buf_index] while it is live. */
+        surf->has_pic = 1;
+        surf->buf_index = buf_index;
+        surf->stride = stride;
+        surf->aligned_h = alh;
+        surf->cap_fourcc = fcc;
+        surf->last_writer = V4L2SL_WRITER_MEMFD;
+        return 0;
+    }
+
     /*
      * Lazy memfd: when this surface has a GBM display bo, the bo is the
      * per-frame snapshot and the memfd copy is skipped — CPU-readback

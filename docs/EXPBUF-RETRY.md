@@ -74,3 +74,16 @@ EGL R8-at-offset (same as the existing export client), not GBM NV12 import.
 
 Still untested: Chrome ANGLE/Wayland, HEVC/AV1 export, 4K, buffers that
 remain in the kernel DPB while a later frame decodes.
+
+
+## Phase 1 — skip capture→GBM memcpy (2026-09-04)
+
+`pull_capture` returns after setting `has_pic`/`buf_index` when
+`V4L2SL_EXPBUF_EXPORT=1` (no `gbm_surface_upload`, no memfd memcpy).
+GetImage/Derive read `capture_buf_ptr[buf_index]`.
+
+`va_export_client` h264_idr_nv12 8 frames:
+
+- env unset: EXPORT/LAZY_EXACT 0-7 (GBM copy)
+- env set: 8× `EXPBUF export ok`, 0× falling back, 0× gbm upload,
+  EXPORT/LAZY_EXACT 0-7. Host alive.
