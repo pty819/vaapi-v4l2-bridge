@@ -895,7 +895,7 @@ static void av1_fill_frame_params(struct v4l2_ctrl_av1_frame *frame,
              * only some carry the OBU framing. Try them all. */
             int si;
             for (si = 0; si < V4L2SL_MAX_SLICE_DATAS && !parsed_ok; si++)
-                if (all_spans[si] &&
+                if (all_spans[si] && all_spans[si] != span &&
                     av1_parse_hdr_refresh(all_spans[si], all_sizes[si],
                                           pic, &parsed)) {
                     parsed_ok = 1;
