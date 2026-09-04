@@ -34,6 +34,7 @@ Chrome `FillProfileInfo_Locked` attrib query is implemented (`vaQueryConfigAttri
 - **VP9** — no VP9 OUTPUT fourcc on this mainline hantro node
 - **Forced browser HW on VP9 / 10-bit HDR** — has hung the VPU; keep `media.hardware-video-decoding.force-enabled=false`
 - **Browser mid-stream resolution changes** — capture renegotiate exists in the driver; Chrome/Firefox path is not matrix-tested
+- **AV1 super-res (`superres_denom > 8`)** — will not decode bit-exact on this hantro/kernel. Driver now derives coded width (`frame_width`) from display width + denominator; kernel still mismatches pictures after KEY. See verification coverage 2026-09-04.
 - **Vendor BSP / MPP** — out of scope (mainline only)
 
 ## 2026-09-03 GBM display surfaces — Chrome hardware decode WITH picture (f53f3f1..452de04)
@@ -335,3 +336,14 @@ Verification: matrix 2x MATRIX_ALL_PASS (deterministic); bilibili
 logged-in soak (62-min AV1 video): 5 min + 4-seek storm at 720p30, AV1
 on video4 throughout, 2 dropped frames total, zero pool errors; YouTube
 av01 via MSE shim: 1080p60 clean, codecs locked av01.0.09M.08.
+
+## 2026-09-04 — AV1 verification coverage
+
+### Super-res
+
+- **Verdict:** A1_STILL_FAIL (hardware/kernel limitation). Phase A item closed.
+- **Clip:** `verify/clips/av1_superres.webm` (gitignored) — aomenc `--superres-mode=1 --superres-denominator=12`, 1280x720, 60 frames / 2s. aomenc `--webm` aborted (buffer overflow); encoded `--ivf` then remuxed to WebM.
+- **Baseline (before coded-width fix):** A1_FAIL. hw rc=0, 60/60 frames produced, 59/60 framemd5 mismatch (only frame 0 matched). `grep -cE "failed to set AV1|not mapped|no completed"` = 0. 122 `DQBUF ... ERROR` lines (capture type=9 idx=22, output type=10 idx=3). Capture stayed DISPLAY size: `renegotiate capture 1280x720  -> 1280x720 NV12 streamed=0` (not coded ~853x720).
+- **Fix applied:** `av1_fill_frame_params` derives `disp_w`/`disp_h`/`sr_denom`/`coded_w` once after memset; tile-grid `mi_cols` uses coded width when `sr_denom > 8`; `upscaled_width`/`render_*` keep display, `frame_width_minus_1` is coded. `v4l2sl_ensure_capture` kept DISPLAY 1280x720.
+- **After fix:** A1_STILL_FAIL. hw2 rc=0, DQBUF errors gone (0), still 59/60 framemd5 mismatch (frame 0 bit-exact; frames 1–59 unique hashes but wrong). Capture still `1280x720 -> 1280x720 NV12`. Params look correct; pictures still mismatch = hantro/kernel will not decode super-res.
+- **Regression:** `av1_svt.mp4` full-clip hw-vs-sw 60/60 bit-exact (`A1_REGRESSION_CLEAN`). Coded-width derivation kept (kernel now receives distinct `frame_width` vs `upscaled_width` when denom > 8; does not regress non-superres SVT).

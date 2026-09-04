@@ -16,7 +16,7 @@ Codecs:
 | H.264 High422 8/10-bit | same, capture NV16/NV20 | bit-exact; VA path exercised by `tests/va_h264422_client.c` (stock ffmpeg never offers VAAPI for 4:2:2 — decoder pix_fmt list + profile map), kernel path GStreamer `v4l2slh264dec` vs `avdec_h264` |
 | HEVC 8-bit Main (incl. WPP) | same | bit-exact |
 | HEVC Main10 | same, capture NV15 → P010 | bit-exact vs ffmpeg software (`hwdownload,format=p010le`) |
-| AV1 Profile0 8-bit | hantro `/dev/video4` + matching media node | bit-exact vs ffmpeg SW (libaom, libaom realtime, SVT-AV1 RA, 4K, default). Re-advertised 2026-09-03: the old "node reopen hangs the SoC" was an undersized PSU, not a driver bug. Since 2026-09-04 `refresh_frame_flags` is **parsed as truth from Chrome's submitted OBU span** (order-hint heuristics remain the raw-tile/ffmpeg fallback), and a **kernel-DPB-model copy-out release** bounds live capture buffers to ~the DPB instead of the player's decode-ahead queue — bilibili (WebCodecs, 5-min soak + seek storm) and YouTube (MSE-forced av01, 1080p60) both stay on AV1 with zero pool errors. See `src/v4l2stateless_av1.c` |
+| AV1 Profile0 8-bit | hantro `/dev/video4` + matching media node | bit-exact vs ffmpeg SW (libaom, libaom realtime, SVT-AV1 RA, 4K, default). **Will not decode** AV1 super-res (`superres_denom > 8`) — kernel/hantro limitation (driver derives coded width correctly; pictures still mismatch). Re-advertised 2026-09-03: the old "node reopen hangs the SoC" was an undersized PSU, not a driver bug. Since 2026-09-04 `refresh_frame_flags` is **parsed as truth from Chrome's submitted OBU span** (order-hint heuristics remain the raw-tile/ffmpeg fallback), and a **kernel-DPB-model copy-out release** bounds live capture buffers to ~the DPB instead of the player's decode-ahead queue — bilibili (WebCodecs, 5-min soak + seek storm) and YouTube (MSE-forced av01, 1080p60) both stay on AV1 with zero pool errors. See `src/v4l2stateless_av1.c` |
 | VP8 | hantro `/dev/video2` | bit-exact vs ffmpeg software |
 | MPEG-2 Simple / Main | same `/dev/video2` | bit-exact vs GStreamer `v4l2slmpeg2dec` (hantro IDCT ≠ ffmpeg SW) |
 | JPEG Baseline encode | VEPU121 `/dev/video3` | `mjpeg_vaapi` (stateful M2M) |
@@ -69,6 +69,17 @@ The trigger is narrow — everything around it works:
 Workarounds: play such files in Chrome, decode them in software, or use the
 kernel-direct v4l2-request ffmpeg fork whose userspace parses OBU headers
 itself.
+
+### Known hardware/kernel limitation: AV1 super-res will not decode
+
+AV1 **super-res** (`superres_scale_denominator > 8`, aomenc `--superres-mode=1`)
+is not bit-exact on this RK3588 hantro node (`/dev/video4`, kernel 7.1.8-edge).
+The driver now derives coded width from display width and the denominator
+(`frame_width` vs `upscaled_width`); capture stays the DISPLAY size
+(1280x720, not the ~853 coded width). After that, KEY frame 0 is bit-exact
+and DQBUF errors disappear, but frames 1–59 still mismatch software. Phase A
+closes this as a kernel/hardware limit, not a remaining userspace fill bug.
+Non-superres libaom / SVT-AV1 streams are unaffected (SVT 60/60 still exact).
 
 Mid-stream resolution / bit-depth / chroma changes renegotiate capture (`STREAMOFF` / `S_FMT` / `REQBUFS`). Export: `vaExportSurfaceHandle` returns a single-object NV12 dmabuf backed by a driver-owned linear GBM bo (`src/v4l2stateless_gbm.c`) — the descriptor shape Chromium requires; VPU capture buffers never leave the kernel via `EXPBUF` (banned on this SoC).
 

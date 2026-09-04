@@ -665,6 +665,17 @@ static void av1_fill_frame_params(struct v4l2_ctrl_av1_frame *frame,
     struct v4l2sl_driver_data *dd = ctx ? ctx->driver_data : NULL;
     memset(frame, 0, sizeof(*frame));
 
+    /* Super-res: VA gives the DISPLAY size and the denominator; the coded
+     * size (what the tile grid and SB layout live on) must be derived.
+     * Equal when denominator == 8, which is why non-superres streams
+     * never noticed the two fields being filled identically. */
+    uint32_t disp_w = (uint32_t)pic->frame_width_minus1 + 1;
+    uint32_t disp_h = (uint32_t)pic->frame_height_minus1 + 1;
+    uint32_t sr_denom = pic->superres_scale_denominator ?
+                        pic->superres_scale_denominator : 8;
+    uint32_t coded_w = sr_denom > 8 ?
+                       (disp_w * 8 + sr_denom / 2) / sr_denom : disp_w;
+
     /* Tile info */
     frame->tile_info.flags = 0;
     if (pic->pic_info_fields.bits.uniform_tile_spacing_flag)
@@ -680,7 +691,7 @@ static void av1_fill_frame_params(struct v4l2_ctrl_av1_frame *frame,
         int rows = pic->tile_rows;
         if (cols > 64) cols = 64;
         if (rows > 64) rows = 64;
-        uint32_t mi_cols = (pic->frame_width_minus1 + 4) / 4;   /* ceil(w/4) */
+        uint32_t mi_cols = (sr_denom > 8 ? (coded_w + 3) : (disp_w + 3)) / 4;
         uint32_t mi_rows = (pic->frame_height_minus1 + 4) / 4;
         /* Uniform spacing: split the MI grid evenly. Non-uniform: honour
          * the superblock widths VA already computed. */
@@ -843,11 +854,11 @@ static void av1_fill_frame_params(struct v4l2_ctrl_av1_frame *frame,
     frame->interpolation_filter = pic->interp_filter;
     frame->tx_mode = pic->mode_control_fields.bits.tx_mode;
     frame->order_hint = pic->order_hint;
-    frame->upscaled_width = pic->frame_width_minus1 + 1;
-    frame->frame_width_minus_1 = pic->frame_width_minus1;
-    frame->frame_height_minus_1 = pic->frame_height_minus1;
-    frame->render_width_minus_1 = pic->frame_width_minus1;
-    frame->render_height_minus_1 = pic->frame_height_minus1;
+    frame->upscaled_width = disp_w;
+    frame->frame_width_minus_1 = coded_w - 1;
+    frame->frame_height_minus_1 = disp_h - 1;
+    frame->render_width_minus_1 = disp_w - 1;
+    frame->render_height_minus_1 = disp_h - 1;
 
     /* Reference frames: VA surface ids -> our V4L2 timestamps */
     for (int i = 0; i < V4L2_AV1_TOTAL_REFS_PER_FRAME; i++) {
