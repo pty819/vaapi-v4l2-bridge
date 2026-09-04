@@ -4,3 +4,6 @@
 *~
 .cache/
 docs/_build/
+
+._*
+.DS_Store
