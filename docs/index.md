@@ -4,6 +4,19 @@ libva DRM 后端：把 VA-API 译成 RK3588 **主线** 上的 V4L2 Request API�
 
 ```{toctree}
 :maxdepth: 2
+:caption: 从这座桥学习 VA-API 与 V4L2
+
+learn/index
+learn/map
+learn/vaapi
+learn/v4l2
+learn/request
+learn/memory
+learn/bridge-as-textbook
+```
+
+```{toctree}
+:maxdepth: 2
 :caption: 总览
 
 overview
@@ -43,4 +56,4 @@ handbook/desktop
 
 仓库根目录还有一份英文模块图 [docs/ARCHITECTURE.md](https://github.com/pty819/vaapi-v4l2-bridge/blob/master/docs/ARCHITECTURE.md)（与本站同源，站点按主题拆页并写得更细）。
 
-能力表（谁能播、矩阵绿不绿）仍以仓库根目录 [README.md](https://github.com/pty819/vaapi-v4l2-bridge/blob/master/README.md) 和 [STATE.md](https://github.com/pty819/vaapi-v4l2-bridge/blob/master/STATE.md) 为准。本站点解释 **模块怎么拼、一帧怎么走、像素住哪**。
+能力表（谁能播、矩阵绿不绿）仍以仓库根目录 [README.md](https://github.com/pty819/vaapi-v4l2-bridge/blob/master/README.md) 和 [STATE.md](https://github.com/pty819/vaapi-v4l2-bridge/blob/master/STATE.md) 为准。本站点解释 **模块怎么拼、一帧怎么走、像素住哪**。若目的是弄懂 Linux 上 VA-API 与 V4L2 两套栈，从 [学习路径](learn/index.md) 开始。
