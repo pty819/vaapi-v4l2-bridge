@@ -55,3 +55,22 @@ justify flipping the driver to export VPU buffers: DPB lifetime, Chrome
 ANGLE, and bit-exact sampling are untested. Next experiment, if wanted:
 decode one H.264 IDR, EXPBUF *that* index, EGL sample vs GetImage, still
 under `timeout`, still not in the shipping `.so`.
+
+
+## Decoded-frame export (same day, later)
+
+Worktree driver gated by `V4L2SL_EXPBUF_EXPORT=1` (default off). Loaded via
+`LIBVA_DRIVERS_PATH` — **system dri .so unchanged**.
+
+`va_export_client` on `h264_idr_nv12.h264` (8 all-IDR 1280x720 frames):
+
+- Without the env: `EXPORT_EXACT 0..7` + `LAZY_EXACT 0..7` (GBM copy, as shipping).
+- With the env: log `EXPBUF export ok idx=23..16 fd=… stride=1280 alh=720` then
+  the same `EXPORT_EXACT` / `LAZY_EXACT` 0..7. EGL sampling of the **VPU**
+  dma-buf matched `vaGetImage` byte-for-byte. Host stayed up.
+
+`gbm_bo_import` of NV12 fourcc is still EINVAL; the client samples via
+EGL R8-at-offset (same as the existing export client), not GBM NV12 import.
+
+Still untested: Chrome ANGLE/Wayland, HEVC/AV1 export, 4K, buffers that
+remain in the kernel DPB while a later frame decodes.

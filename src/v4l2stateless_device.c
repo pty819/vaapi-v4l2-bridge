@@ -1296,3 +1296,33 @@ int v4l2sl_submit_request(int request_fd)
 
     return 0;
 }
+
+int v4l2sl_expbuf_export_wanted(void)
+{
+    static int once, wanted;
+    if (!once) {
+        const char *e = getenv("V4L2SL_EXPBUF_EXPORT");
+        wanted = e && e[0] && e[0] != '0';
+        once = 1;
+    }
+    return wanted;
+}
+
+int v4l2sl_capture_expbuf(struct v4l2sl_context *ctx, int buf_index)
+{
+    struct v4l2_exportbuffer exp;
+
+    if (!ctx || ctx->v4l2_fd < 0 || buf_index < 0)
+        return -1;
+    memset(&exp, 0, sizeof(exp));
+    exp.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
+    exp.index = (unsigned)buf_index;
+    exp.plane = 0;
+    exp.flags = O_CLOEXEC | O_RDWR;
+    if (v4l2sl_xioctl(ctx->v4l2_fd, VIDIOC_EXPBUF, &exp) < 0) {
+        fprintf(stderr, "v4l2stateless: EXPBUF capture[%d] failed: %s\n",
+                buf_index, strerror(errno));
+        return -1;
+    }
+    return exp.fd;
+}

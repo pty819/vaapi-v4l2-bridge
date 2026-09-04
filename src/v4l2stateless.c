@@ -629,6 +629,7 @@ v4l2sl_create_surfaces(VADriverContextP ctx,
         surface->status = VASurfaceReady;
         surface->buf_index = -1;
         surface->memfd_fd = -1;
+        surface->expbuf_fd = -1;
         surface->cpu_stride = v4l2sl_default_image_stride(format, width);
         surface->cpu_size = v4l2sl_va_image_size(format, surface->cpu_stride, height);
         /* cpu_ptr is lazy (ensure_cpu): decode-only surfaces never touch
@@ -763,6 +764,8 @@ destroy_surface_locked(struct v4l2sl_driver_data *dd,
         munmap(s->memfd_retired, s->memfd_retired_size);
     if (s->memfd_fd >= 0)
         close(s->memfd_fd);
+    if (s->expbuf_fd >= 0)
+        close(s->expbuf_fd);
     v4l2sl_gbm_surface_destroy(s);
     free(s->cpu_ptr);
     free(s);
@@ -2034,6 +2037,35 @@ v4l2sl_export_surface_handle(VADriverContextP ctx, VASurfaceID surface_id,
      * UNIMPLEMENTED when GBM is unavailable or the format is not NV12.
      */
     c = context_for_surface(driver_data, surface_id);
+    /* Experiment: V4L2SL_EXPBUF_EXPORT=1 exports the VPU capture dma-buf
+     * instead of the GBM copy. Shipping default remains GBM. */
+    if (v4l2sl_expbuf_export_wanted() && surf->buf_index >= 0 && c &&
+        c->v4l2_fd >= 0) {
+        int efd = v4l2sl_capture_expbuf(c, surf->buf_index);
+        if (efd >= 0) {
+            uint32_t stride = surf->stride ? surf->stride :
+                              (c->cap_stride ? c->cap_stride : surf->width);
+            uint32_t alh = surf->aligned_h ? surf->aligned_h :
+                           (c->cap_height ? c->cap_height : surf->height);
+            uint32_t plane = v4l2sl_capture_plane_size(
+                surf->cap_fourcc ? surf->cap_fourcc : V4L2_PIX_FMT_NV12,
+                stride, alh);
+            if (surf->expbuf_fd >= 0 && surf->expbuf_fd != efd)
+                close(surf->expbuf_fd);
+            surf->expbuf_fd = efd;
+            fprintf(stderr, "v4l2stateless: EXPBUF export ok idx=%d fd=%d stride=%u alh=%u\n",
+                    surf->buf_index, efd, stride, alh);
+            v4l2sl_fill_prime_layers(descriptor, efd, plane,
+                                     DRM_FORMAT_MOD_LINEAR,
+                                     VA_FOURCC_NV12, surf->width, surf->height,
+                                     stride, alh,
+                                     DRM_FORMAT_NV12, DRM_FORMAT_R8,
+                                     DRM_FORMAT_GR88, flags);
+            pthread_mutex_unlock(&g_v4l2sl_lock);
+            return VA_STATUS_SUCCESS;
+        }
+        fprintf(stderr, "v4l2stateless: EXPBUF export failed, falling back\n");
+    }
     if (surf->buf_index >= 0 ||
         (c && c->entrypoint == VAEntrypointVLD) ||
         surf->format == VA_FOURCC_NV12) {
