@@ -1184,31 +1184,51 @@ VAStatus v4l2sl_av1_translate(struct v4l2sl_context *ctx,
         grain.cb_offset = fg->cb_offset;
         grain.cr_offset = fg->cr_offset;
     }
-    struct v4l2_ext_control grain_ctrl = { 0 };
-    grain_ctrl.id = V4L2_CID_STATELESS_AV1_FILM_GRAIN;
-    grain_ctrl.ptr = &grain;
-    grain_ctrl.size = sizeof(grain);
-    struct v4l2_ext_controls grain_ctrls = { 0 };
-    grain_ctrls.controls = &grain_ctrl;
-    grain_ctrls.count = 1;
-    if (v4l2sl_set_request_controls(request_fd, v4l2_fd, &grain_ctrls) < 0)
-        fprintf(stderr, "v4l2stateless: warning: AV1 film grain control failed\n");
+    struct v4l2_ext_control req_ctrls[3];
+    unsigned n_req_ctrls = 0;
+    struct v4l2_ctrl_av1_tile_group_entry entries[32];
 
-    /* Set AV1 frame params */
-    struct v4l2_ext_control frame_ctrl = { 0 };
-    frame_ctrl.id = V4L2_CID_STATELESS_AV1_FRAME;
-    frame_ctrl.p_av1_frame = &frame;
-    frame_ctrl.size = sizeof(frame);
+    memset(req_ctrls, 0, sizeof(req_ctrls));
+    req_ctrls[n_req_ctrls].id = V4L2_CID_STATELESS_AV1_FILM_GRAIN;
+    req_ctrls[n_req_ctrls].ptr = &grain;
+    req_ctrls[n_req_ctrls].size = sizeof(grain);
+    n_req_ctrls++;
 
-    struct v4l2_ext_controls frame_ctrls = { 0 };
-    frame_ctrls.controls = &frame_ctrl;
-    frame_ctrls.count = 1;
+    req_ctrls[n_req_ctrls].id = V4L2_CID_STATELESS_AV1_FRAME;
+    req_ctrls[n_req_ctrls].p_av1_frame = &frame;
+    req_ctrls[n_req_ctrls].size = sizeof(frame);
+    n_req_ctrls++;
 
-    if (v4l2sl_set_request_controls(request_fd, v4l2_fd, &frame_ctrls) < 0) {
-        fprintf(stderr, "v4l2stateless: failed to set AV1 frame params\n");
-        return VA_STATUS_ERROR_OPERATION_FAILED;
+    /* Tile-group entries depend only on tile_params[] — not on the
+     * copied output buffer, so they move ahead of the pool pop. */
+    if (n_tiles > 0) {
+        uint32_t base = 0;
+        for (int i = 0; i < n_tiles; i++) {
+            memset(&entries[i], 0, sizeof(entries[i]));
+            entries[i].tile_offset = base;
+            entries[i].tile_size = tile_params[i]->slice_data_size;
+            entries[i].tile_row = tile_params[i]->tile_row;
+            entries[i].tile_col = tile_params[i]->tile_column;
+            base += tile_params[i]->slice_data_size;
+        }
+        req_ctrls[n_req_ctrls].id = V4L2_CID_STATELESS_AV1_TILE_GROUP_ENTRY;
+        req_ctrls[n_req_ctrls].ptr = entries;
+        req_ctrls[n_req_ctrls].size = sizeof(entries[0]) * n_tiles;
+        n_req_ctrls++;
     }
 
+    {
+        struct v4l2_ext_controls req_ctrls_batch = { 0 };
+        req_ctrls_batch.controls = req_ctrls;
+        req_ctrls_batch.count = n_req_ctrls;
+        /* One S_EXT_CTRLS per frame. Failure is terminal — no per-control
+         * fallback. Submitted before the output-buffer pop so a failure
+         * has no pool state to unwind. */
+        if (v4l2sl_set_request_controls(request_fd, v4l2_fd, &req_ctrls_batch) < 0) {
+            fprintf(stderr, "v4l2stateless: failed to set AV1 request controls\n");
+            return VA_STATUS_ERROR_OPERATION_FAILED;
+        }
+    }
 
     /*
      * Synchronous decode pipeline - mirrors H.264/HEVC: pop from pools,
@@ -1262,31 +1282,6 @@ VAStatus v4l2sl_av1_translate(struct v4l2sl_context *ctx,
     tile_data_size = total;
     if (!dst)
         fprintf(stderr, "v4l2stateless: AV1 output buffer not mapped\n");
-
-    if (n_tiles > 0) {
-        struct v4l2_ctrl_av1_tile_group_entry entries[32];
-        uint32_t base = 0;
-        for (int i = 0; i < n_tiles; i++) {
-            memset(&entries[i], 0, sizeof(entries[i]));
-            entries[i].tile_offset = base;
-            entries[i].tile_size = tile_params[i]->slice_data_size;
-            entries[i].tile_row = tile_params[i]->tile_row;
-            entries[i].tile_col = tile_params[i]->tile_column;
-            base += tile_params[i]->slice_data_size;
-        }
-        struct v4l2_ext_control tg_ctrl = { 0 };
-        tg_ctrl.id = V4L2_CID_STATELESS_AV1_TILE_GROUP_ENTRY;
-        tg_ctrl.ptr = entries;
-        tg_ctrl.size = sizeof(entries[0]) * n_tiles;
-        struct v4l2_ext_controls tg_ctrls = { 0 };
-        tg_ctrls.controls = &tg_ctrl;
-        tg_ctrls.count = 1;
-        if (v4l2sl_set_request_controls(request_fd, v4l2_fd, &tg_ctrls) < 0) {
-            fprintf(stderr, "v4l2stateless: failed to set AV1 tile group entries\n");
-            v4l2sl_out_pool_push(ctx, out_buf_idx);
-            return VA_STATUS_ERROR_OPERATION_FAILED;
-        }
-    }
 
     /* On failure decode_submit resets both queues — do not push back. */
     int done_cap = v4l2sl_decode_submit(ctx, out_buf_idx, tile_data_size, timestamp);
