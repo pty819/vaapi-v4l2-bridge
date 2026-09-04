@@ -113,3 +113,31 @@ ffmpeg (and Chrome) decode onto surfaces that are **not** listed as
 context `render_targets`. GetImage therefore cannot look up the owning
 context that way. `pull_capture` now stores `surf->cap_view` (the capture
 mmap) and GetImage/Derive/Export read that pointer. Host alive (~5:16).
+
+
+## Phase 4 — Chrome zero-copy (2026-09-04)
+
+Worktree `.so` via `LIBVA_DRIVERS_PATH` + `--gpu-launcher`. Chrome GPU
+process **drops** `V4L2SL_*` env; the experiment switch that Chrome can
+see is `$XDG_RUNTIME_DIR/v4l2sl-expbuf` (or `V4L2SL_EXPBUF_EXPORT=1` for
+ffmpeg / lab clients).
+
+Chrome exports the VA surface pool **before** the first decode
+(`buf_index=-1`). EXPBUF mode now claims a capture slot at first export
+and `decode_submit` re-queues that same index. `begin_picture` does not
+recycle the slot while EXPBUF is on.
+
+Local `http://127.0.0.1:8931/h264_gate.mp4`:
+- GPU maps worktree `.so` (not dri)
+- 22× `EXPBUF export ok`, 0 fallback, 0 gbm upload
+- `kVideoDecoderName=VaapiVideoDecoder`, chrome://gpu clean
+- canvas avg=123 / max=255, 1920×1080
+- host alive
+
+Bilibili live `https://live.bilibili.com/22957791` ~75s:
+- 23× `EXPBUF export ok`, 0 fallback
+- VaapiVideoDecoder throughout
+- canvas avg 63–140, 1920×1080, currentTime 20→78, paused=false
+- host alive (~5:45). dri `.so` still 2026-09-04 17:13 (GBM shipping).
+
+**Not shipped.** Do not `sudo cp` dri or merge master until asked.

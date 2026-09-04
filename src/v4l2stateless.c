@@ -856,17 +856,20 @@ context_owning_capture(struct v4l2sl_driver_data *dd, struct v4l2sl_surface *sur
     c = context_for_surface(dd, surf->surface_id);
     if (c)
         return c;
-    if (surf->buf_index < 0)
-        return NULL;
-    for (c = dd->contexts; c; c = c->next) {
-        int i = surf->buf_index;
+    if (surf->buf_index >= 0) {
+        for (c = dd->contexts; c; c = c->next) {
+            int i = surf->buf_index;
 
-        if (i >= 0 && i < V4L2SL_MAX_CAPTURE_BUFS &&
-            c->capture_buf_ptr[i] &&
-            c->capture_buf_ptr[i] != MAP_FAILED &&
-            (!surf->cap_view || c->capture_buf_ptr[i] == surf->cap_view))
-            return c;
+            if (i >= 0 && i < V4L2SL_MAX_CAPTURE_BUFS &&
+                c->capture_buf_ptr[i] &&
+                c->capture_buf_ptr[i] != MAP_FAILED &&
+                (!surf->cap_view || c->capture_buf_ptr[i] == surf->cap_view))
+                return c;
+        }
     }
+    for (c = dd->contexts; c; c = c->next)
+        if (c->entrypoint == VAEntrypointVLD && c->v4l2_fd >= 0)
+            return c;
     return NULL;
 }
 
@@ -1316,7 +1319,7 @@ v4l2sl_begin_picture(VADriverContextP ctx,
      * (and the client has synced it already, per VA-API contract).
      * AV1 defers to the kernel-DPB model: a re-targeted surface's buffer
      * is only free once its reference slot is overwritten. */
-    if (surface->buf_index >= 0) {
+    if (surface->buf_index >= 0 && !v4l2sl_expbuf_export_wanted()) {
         /* Userspace bookkeeping only: hand the buffer back to the free pool.
          * The kernel QBUF happens exactly once, in the decode path. */
         int av1_model = context->codec == V4L2SL_CODEC_AV1 &&
@@ -2095,9 +2098,17 @@ v4l2sl_export_surface_handle(VADriverContextP ctx, VASurfaceID surface_id,
     c = context_owning_capture(driver_data, surf);
     /* Experiment: V4L2SL_EXPBUF_EXPORT=1 exports the VPU capture dma-buf
      * instead of the GBM copy. Shipping default remains GBM. */
-    if (v4l2sl_expbuf_export_wanted() && surf->buf_index >= 0 && c &&
-        c->v4l2_fd >= 0) {
-        int efd = v4l2sl_capture_expbuf(c, surf->buf_index);
+    v4l2sl_explog(
+            "v4l2stateless: export surf=%u idx=%d view=%p wanted=%d c=%p fd=%d\n",
+            (unsigned)surface_id, surf->buf_index, surf->cap_view,
+            v4l2sl_expbuf_export_wanted(), (void *)c,
+            c ? c->v4l2_fd : -1);
+    fflush(stderr);
+    if (v4l2sl_expbuf_export_wanted() && c && c->v4l2_fd >= 0) {
+        if (surf->buf_index < 0)
+            (void)v4l2sl_claim_capture_for_export(c, surf);
+        int efd = (surf->buf_index >= 0)
+                  ? v4l2sl_capture_expbuf(c, surf->buf_index) : -1;
         if (efd >= 0) {
             uint32_t stride = surf->stride ? surf->stride :
                               (c->cap_stride ? c->cap_stride : surf->width);
@@ -2109,8 +2120,9 @@ v4l2sl_export_surface_handle(VADriverContextP ctx, VASurfaceID surface_id,
             if (surf->expbuf_fd >= 0 && surf->expbuf_fd != efd)
                 close(surf->expbuf_fd);
             surf->expbuf_fd = efd;
-            fprintf(stderr, "v4l2stateless: EXPBUF export ok idx=%d fd=%d stride=%u alh=%u\n",
+            v4l2sl_explog("v4l2stateless: EXPBUF export ok idx=%d fd=%d stride=%u alh=%u\n",
                     surf->buf_index, efd, stride, alh);
+            fflush(stderr);
             v4l2sl_fill_prime_layers(descriptor, efd, plane,
                                      DRM_FORMAT_MOD_LINEAR,
                                      VA_FOURCC_NV12, surf->width, surf->height,

@@ -12,6 +12,7 @@
  */
 
 #include <stdio.h>
+#include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
 #include <fcntl.h>
@@ -443,13 +444,19 @@ int v4l2sl_decode_submit(struct v4l2sl_context *ctx, int out_buf_idx,
     if (!ctx || ctx->v4l2_fd < 0 || ctx->request_fd < 0)
         return -1;
 
-    if (ctx->n_free_cap == 0) {
-        fprintf(stderr, "v4l2stateless: no free capture buffer\n");
+    cap_buf_idx = -1;
+    if (v4l2sl_expbuf_export_wanted() && ctx->current_surface &&
+        ctx->current_surface->buf_index >= 0)
+        cap_buf_idx = ctx->current_surface->buf_index;
+    if (cap_buf_idx < 0) {
+        if (ctx->n_free_cap == 0) {
+            fprintf(stderr, "v4l2stateless: no free capture buffer\n");
 
-        v4l2sl_out_pool_push(ctx, out_buf_idx);
-        return -1;
+            v4l2sl_out_pool_push(ctx, out_buf_idx);
+            return -1;
+        }
+        cap_buf_idx = ctx->free_cap_bufs[--ctx->n_free_cap];
     }
-    cap_buf_idx = ctx->free_cap_bufs[--ctx->n_free_cap];
 
     if (v4l2sl_queue_output(ctx, out_buf_idx, bytesused, timestamp) < 0) {
         fprintf(stderr, "v4l2stateless: QBUF output[%d] failed\n", out_buf_idx);
@@ -1311,13 +1318,49 @@ int v4l2sl_submit_request(int request_fd)
     return 0;
 }
 
+void v4l2sl_explog(const char *fmt, ...)
+{
+    va_list ap;
+    int fd;
+    char buf[512];
+    int n;
+
+    va_start(ap, fmt);
+    n = vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    if (n < 0)
+        return;
+    if (n >= (int)sizeof(buf))
+        n = (int)sizeof(buf) - 1;
+    fwrite(buf, 1, (size_t)n, stderr);
+    fflush(stderr);
+    fd = open("/tmp/v4l2sl-expbuf.log", O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644);
+    if (fd >= 0) {
+        (void)write(fd, buf, (size_t)n);
+        close(fd);
+    }
+}
+
 int v4l2sl_expbuf_export_wanted(void)
 {
     static int once, wanted;
     if (!once) {
         const char *e = getenv("V4L2SL_EXPBUF_EXPORT");
+        const char *rt;
+        char path[256];
+
         wanted = e && e[0] && e[0] != '0';
+        /* Chrome GPU process drops unknown env (only LIBVA_* survive).
+         * A runtime flag file is the experiment switch that Chrome can see. */
+        if (!wanted) {
+            rt = getenv("XDG_RUNTIME_DIR");
+            snprintf(path, sizeof(path), "%s/v4l2sl-expbuf",
+                     (rt && rt[0]) ? rt : "/tmp");
+            wanted = access(path, F_OK) == 0;
+        }
         once = 1;
+        v4l2sl_explog("v4l2stateless: EXPBUF wanted=%d pid=%d\n",
+                      wanted, getpid());
     }
     return wanted;
 }
@@ -1339,4 +1382,36 @@ int v4l2sl_capture_expbuf(struct v4l2sl_context *ctx, int buf_index)
         return -1;
     }
     return exp.fd;
+}
+
+int v4l2sl_claim_capture_for_export(struct v4l2sl_context *ctx,
+                                    struct v4l2sl_surface *surf)
+{
+    int idx, w, h;
+    uint32_t fourcc;
+
+    if (!ctx || !surf || ctx->v4l2_fd < 0)
+        return -1;
+    w = ctx->width > 0 ? ctx->width : (int)surf->width;
+    h = ctx->height > 0 ? ctx->height : (int)surf->height;
+    fourcc = ctx->cap_pixelformat ? ctx->cap_pixelformat : V4L2_PIX_FMT_NV12;
+    if (v4l2sl_ensure_capture(ctx, w, h, fourcc) < 0)
+        return -1;
+    if (surf->buf_index >= 0)
+        return 0;
+    if (ctx->n_free_cap == 0) {
+        v4l2sl_explog("v4l2stateless: claim capture: no free slot surf=%u\n",
+                      (unsigned)surf->surface_id);
+        return -1;
+    }
+    idx = ctx->free_cap_bufs[--ctx->n_free_cap];
+    surf->buf_index = idx;
+    surf->stride = ctx->cap_stride;
+    surf->aligned_h = ctx->cap_height;
+    surf->cap_fourcc = ctx->cap_pixelformat;
+    /* Do not mmap here: mapping the whole Chrome pool pins ~75MB CMA and
+     * has hung this SoC. EXPBUF does not need a userspace mapping. */
+    v4l2sl_explog("v4l2stateless: claim capture idx=%d surf=%u\n",
+                  idx, (unsigned)surf->surface_id);
+    return 0;
 }

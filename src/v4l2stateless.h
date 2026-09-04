@@ -401,7 +401,10 @@ void v4l2sl_gbm_surface_destroy(struct v4l2sl_surface *s);
 VAStatus v4l2sl_surface_fill_prime_gbm(const struct v4l2sl_surface *surf,
                                        uint32_t flags, void *descriptor);
 int v4l2sl_capture_expbuf(struct v4l2sl_context *ctx, int buf_index);
+int v4l2sl_claim_capture_for_export(struct v4l2sl_context *ctx,
+                                   struct v4l2sl_surface *surf);
 int v4l2sl_expbuf_export_wanted(void);
+void v4l2sl_explog(const char *fmt, ...);
 typedef int (*v4l2sl_ioctl_fn)(int fd, unsigned long request, void *arg);
 void v4l2sl_set_ioctl_hook(v4l2sl_ioctl_fn fn);
 int v4l2sl_dequeue_buffer(int fd, enum v4l2_buf_type type, int *flag_error);
