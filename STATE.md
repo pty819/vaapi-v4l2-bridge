@@ -6,6 +6,20 @@ Living ops notes: [HANDOFF.md](HANDOFF.md). Desktop apps: [APPS.md](APPS.md). Co
 
 Git: `https://github.com/pty819/vaapi-v4l2-bridge.git` (`master`).
 
+## 2026-09-05 — AV1 de-advertised (multi-column tiles); EXPBUF re-installed
+
+- **AV1 profile removed from `vaQueryConfigProfiles`** (opt-in `V4L2SL_ADVERTISE_AV1=1`).
+  Evidence: every verified-good AV1 stream is **1x1 tile** (matrix testsrc, bilibili
+  720/1080p, YouTube 480/720p). Multi-column tiles misdecode (YouTube av01 1440p
+  garbled, GBM copy AND EXPBUF both) and one 4K 8-column clip **hard-reset the
+  board** (no oops, no pstore, clock-jump boot signature). Same family as the old
+  truncated->32-tile reset. Chrome/bilibili/YouTube now decode AV1 in software.
+  Matrix AV1 legs will fail while AV1 stays hidden.
+- Driver installed to dri: `f7a88e97d2851242233b7a5d434842a6` (EXPBUF default
+  + AV1 off). EXPBUF verified on bilibili live 22957791 ~90s: 19x
+  `EXPBUF export ok`, 0 gbm upload, 0 EXPBUF fail, rkvdec `/dev/video1` held,
+  canvas avg 48-129 moving, host stable.
+
 ## What actually works
 
 C libva backend `v4l2stateless_drv_video.so` translates VA-API to mainline V4L2-stateless (plus stateful JPEG encode and RGA VPP). Nodes are chosen by OUTPUT fourcc, not a hardcoded `/dev/videoN`.

@@ -226,6 +226,15 @@ v4l2sl_query_config_profiles(VADriverContextP ctx,
     for (unsigned i = 0; i < NUM_PROFILES; i++) {
         enum v4l2sl_codec codec;
 
+        if (v4l2sl_profiles[i] == VAProfileAV1Profile0 &&
+            !getenv("V4L2SL_ADVERTISE_AV1")) {
+            /* De-advertised 2026-09-05: every verified-good AV1 stream is
+             * 1x1 tile; multi-column tiles garble (1440p) and one 4K 8-col
+             * clip hard-reset the board through the kernel tile path.
+             * Chrome/bilibili/YouTube then decode AV1 in software. Opt back
+             * in for experiments with V4L2SL_ADVERTISE_AV1=1. */
+            continue;
+        }
         if (codec_for_profile(v4l2sl_profiles[i], &codec) < 0)
             continue;
         if (!cached_device(driver_data, codec))

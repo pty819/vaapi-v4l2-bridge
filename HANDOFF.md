@@ -281,6 +281,16 @@ Debian/XtraDeb 的 arm64 Chromium 编的是 `use_v4l2_codec`，直连 `/dev/vide
 GStreamer AV1 对照：`gstv4l2codecav1dec.c`。内核：`drivers/media/platform/verisilicon/rockchip_vpu981_hw_av1_dec.c`。
 - **7ec4e39 的 ZeroCopyGL disable 曾把 Chrome 硬解修坏（09-02 深夜定位并已修复）**：真实根因不是流——包装脚本  把 VaapiVideoDecoder 逼进 ImageProcessor 输出路径，本平台没有 ImageProcessor（vmodule 实锤："Unable to find ImageProcessor to convert format" + CroStatus 6 → PIPELINE_ERROR_DECODE），Chrome 静默降级 FFmpeg 软解且整个会话不再重试。ZeroCopyGL 保持默认开。（**此句 09-03 起过时**：GBM 显示 surface 落地后零拷贝导入每帧成功、零 eglCreateImage 错误，见下方 09-03 段；当时的“失败刷噪音+回退 CPU 拷贝”描述作废。）包装脚本已改回只禁 Vulkan 并写了长注释防再犯；bilibili 直播实测 VaapiVideoDecoder 稳定、GPU 进程 61 个解码 surface。更早的 mid-GDP 首帧理论作废
 
+## 2026-09-05 — AV1 摘牌 + EXPBUF 复装
+
+- **AV1 不再广告**（`V4L2SL_ADVERTISE_AV1=1` 可开回）：所有验过的 AV1 都是 1×1 tile；
+  多列 tile 花屏（YouTube 1440p，GBM/EXPBUF 都花）、4K 8 列直接硬复位整机
+  （01:06 无 oops/pstore、chrony 跳钟——断电式签名，第三次）。Chrome AV1 走软解。
+- 系统 dri = `f7a88e97…`（EXPBUF 默认 + AV1 off）。B 站直播 22957791 90s：
+  19× EXPBUF ok、0 gbm upload、video1 全程被持、canvas 48–129 在动。
+- **教训：新的 AV1 流形态（多列 tile/4K）第一发不许在整机上跑**——先 720p 多列
+  bit-exact 梯子，再爬分辨率。矩阵 AV1 五腿在摘牌期间会红，属预期。
+
 ## 2026-09-04 — EXPBUF 默认零拷贝
 
 - 换电源后重测：旧「EXPBUF+GPU import 挂 CMA/IOMMU」与欠功率电源同期。
