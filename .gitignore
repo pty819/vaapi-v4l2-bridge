@@ -3,3 +3,4 @@
 *.so
 *~
 .cache/
+docs/_build/
